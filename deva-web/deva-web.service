@@ -1,0 +1,23 @@
+[Unit]
+Description=Deva Web (Electron app converted to web — standalone)
+Documentation=https://github.com/sqfcyily/deva
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+# ↓↓↓ 改成你的实际解压路径 ↓↓↓
+WorkingDirectory=/opt/deva-web
+Environment=NODE_ENV=production
+Environment=DEVA_HOME=/opt/deva-web/.deva
+Environment=DEVA_WEB_PORT=8790
+Environment=DEVA_WEB_HOST=127.0.0.1
+Environment=DEVA_WEB_STATIC=/opt/deva-web/app/renderer
+ExecStart=/usr/bin/node /opt/deva-web/app/index.cjs
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

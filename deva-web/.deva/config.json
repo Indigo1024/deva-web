@@ -1,0 +1,140 @@
+{
+  "personas": {
+    "enabled": {
+      "general": true,
+      "xiaomajiang": true
+    },
+    "seeded": {
+      "general": true,
+      "xiaomajiang": true
+    }
+  },
+  "models": {
+    "providers": [
+      {
+        "id": "anthropic",
+        "name": "Anthropic",
+        "kind": "official",
+        "accent": "#d97757",
+        "adapter": "anthropic",
+        "apiHost": "https://api.anthropic.com",
+        "docUrl": "https://console.anthropic.com/settings/keys",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "openai",
+        "name": "OpenAI",
+        "kind": "official",
+        "accent": "#10a37f",
+        "adapter": "openai",
+        "apiHost": "https://api.openai.com/v1",
+        "docUrl": "https://platform.openai.com/api-keys",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "openai-responses",
+        "name": "OpenAI · Responses",
+        "kind": "official",
+        "accent": "#10a37f",
+        "adapter": "responses",
+        "apiHost": "https://api.openai.com/v1",
+        "docUrl": "https://platform.openai.com/api-keys",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "gemini",
+        "name": "Google Gemini",
+        "kind": "official",
+        "accent": "#4285f4",
+        "adapter": "openai",
+        "apiHost": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "docUrl": "https://aistudio.google.com/apikey",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "deepseek",
+        "name": "DeepSeek",
+        "kind": "official",
+        "accent": "#4d6bfe",
+        "adapter": "openai",
+        "apiHost": "https://api.deepseek.com",
+        "docUrl": "https://platform.deepseek.com/api_keys",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "moonshot",
+        "name": "Moonshot · Kimi",
+        "kind": "official",
+        "accent": "#16a085",
+        "adapter": "openai",
+        "apiHost": "https://api.moonshot.cn/v1",
+        "docUrl": "https://platform.moonshot.cn/console/api-keys",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "zhipu",
+        "name": "智谱 · GLM",
+        "kind": "official",
+        "accent": "#3859ff",
+        "adapter": "openai",
+        "apiHost": "https://open.bigmodel.cn/api/paas/v4",
+        "docUrl": "https://bigmodel.cn/usercenter/apikeys",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "qwen",
+        "name": "通义千问 · Qwen",
+        "kind": "official",
+        "accent": "#615ced",
+        "adapter": "openai",
+        "apiHost": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "docUrl": "https://bailian.console.aliyun.com/",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "ollama",
+        "name": "Ollama · 本地",
+        "kind": "official",
+        "accent": "#71717a",
+        "adapter": "openai",
+        "apiHost": "http://localhost:11434/v1",
+        "docUrl": "https://ollama.com/library",
+        "enabled": false,
+        "models": [],
+        "purpose": "llm"
+      },
+      {
+        "id": "typesafe",
+        "name": "TypeSafe · Jev",
+        "kind": "official",
+        "purpose": "decision",
+        "accent": "#6d5efc",
+        "adapter": "jev",
+        "apiHost": "https://api.typesafe.ai",
+        "docUrl": "https://console.typesafe.ai",
+        "enabled": false,
+        "threshold": 0.6,
+        "models": []
+      }
+    ],
+    "activeModelId": "",
+    "activeEffort": "max"
+  },
+  "theme": "system"
+}
