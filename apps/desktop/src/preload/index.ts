@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { EffortLevel } from '../shared/effort'
 import type { UpdateState } from '../shared/update'
+import type { DeliverableInfo } from '../shared/deliverables'
 
 /** 目录项（单层）。 */
 export interface DirEntry {
@@ -762,6 +763,13 @@ const api = {
     minimize: (): Promise<void> => ipcRenderer.invoke('window:minimize'),
     toggleMaximize: (): Promise<void> => ipcRenderer.invoke('window:toggle-maximize'),
     close: (): Promise<void> => ipcRenderer.invoke('window:close'),
+    /** 窗口是否全屏（macOS 全屏时红绿灯隐藏，图标栏不再为它让位） */
+    isFullScreen: (): Promise<boolean> => ipcRenderer.invoke('window:is-fullscreen'),
+    onFullScreen: (cb: (on: boolean) => void): (() => void) => {
+      const listener = (_e: unknown, on: boolean): void => cb(on)
+      ipcRenderer.on('window:fullscreen', listener)
+      return () => ipcRenderer.removeListener('window:fullscreen', listener)
+    },
     /** 主题切换时同步原生标题栏控件（min/max/close）的图标配色 */
     setOverlaySymbolColor: (color: string): Promise<void> =>
       ipcRenderer.invoke('window:set-overlay', color)
@@ -1125,7 +1133,7 @@ const api = {
     },
     /**
      * 订阅 tasks:navigate 导航意图，返回取消订阅函数。
-     * 主进程发起：通知点击带 `{sessionId}`（打开该任务独占会话）；托盘「定时任务概览」带 `{pane:'tasks'}`（切到 Tasks 标签）。
+     * 主进程发起：通知点击带 `{sessionId}`（打开定时任务独占会话 / 刚回复完的对话）；托盘「定时任务概览」带 `{pane:'tasks'}`（切到 Tasks 标签）。
      */
     onNavigate: (cb: (payload: { sessionId?: string; pane?: 'tasks' }) => void): (() => void) => {
       const listener = (_e: unknown, payload: { sessionId?: string; pane?: 'tasks' }): void =>
@@ -1142,6 +1150,23 @@ const api = {
     readText: (): Promise<string> => ipcRenderer.invoke('clipboard:read-text'),
     writeText: (text: string): Promise<{ ok: true }> =>
       ipcRenderer.invoke('clipboard:write-text', text)
+  },
+  /**
+   * 交付卡（present_files）。只传对话 id + 调用 id + 序号：路径由主进程从该对话历史里那次调用取，
+   * 只能作用于模型交付给用户的文件。
+   */
+  deliverables: {
+    inspect: (sessionId: string, toolUseId: string): Promise<DeliverableInfo[]> =>
+      ipcRenderer.invoke('deliverables:inspect', sessionId, toolUseId),
+    /** 系统缩略图（取不到回落文件图标）的 data URL；文件不存在等返回 null。 */
+    thumbnail: (sessionId: string, toolUseId: string, index: number): Promise<string | null> =>
+      ipcRenderer.invoke('deliverables:thumbnail', sessionId, toolUseId, index),
+    /** 用默认应用打开（仅成品类扩展名，见 DeliverableInfo.openable）。 */
+    open: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('deliverables:open', sessionId, toolUseId, index),
+    /** 在系统文件管理器中显示并选中该文件。 */
+    reveal: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('deliverables:reveal', sessionId, toolUseId, index)
   },
   /**
    * 检查更新（设置 → 关于）。状态由主进程持有，经 onState 推送；check / download / install 只负责触发。

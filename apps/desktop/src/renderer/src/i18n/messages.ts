@@ -259,7 +259,25 @@ const zhCN: MessageTree = {
       memoryWrite: '记住',
       memoryDelete: '删除记忆',
       todoWrite: '更新待办清单',
+      presentFiles: '交付文件',
       unknown: '调用工具'
+    },
+    // 交付卡（present_files）
+    deliver: {
+      title: '交付文件',
+      count: '{n} 个文件',
+      countOne: '1 个文件',
+      open: '打开',
+      openFailed: '无法打开该文件，可在文件夹中查看',
+      revealWin: '在资源管理器中显示',
+      revealMac: '在访达中显示',
+      revealOther: '在文件夹中显示',
+      copyPath: '复制路径',
+      missing: '文件已不存在',
+      expand: '展开其余 {n} 个',
+      collapse: '收起',
+      // 整张卡收起时标题后的摘要：{name}=首个文件名，{n}=总数，{rest}=其余个数
+      collapsedMany: '{name} 等 {n} 个文件'
     },
     status: { running: '执行中', done: '完成', failed: '失败', denied: '已拒绝' },
     subagent: {
@@ -527,7 +545,7 @@ const zhCN: MessageTree = {
       downloading: '正在下载 {percent}%',
       downloaded: '新版本 {version} 已下载',
       install: '重启并安装',
-      installHint: 'Deva 会关闭并安装新版本，装完自动重新打开；不点的话，下次退出 Deva 时也会装上。',
+      installHint: '安装期间 Deva 将自动重启。如暂不安装，更新将在下次退出 Deva 时自动完成。',
       checkFailed: '检查更新失败',
       downloadFailed: '下载更新失败',
       retry: '重试',
@@ -1215,7 +1233,23 @@ const en: MessageTree = {
       memoryWrite: 'Remember',
       memoryDelete: 'Forget memory',
       todoWrite: 'Update todo list',
+      presentFiles: 'Deliver files',
       unknown: 'Call tool'
+    },
+    deliver: {
+      title: 'Deliverables',
+      count: '{n} files',
+      countOne: '1 file',
+      open: 'Open',
+      openFailed: 'Couldn’t open this file. Try showing it in its folder.',
+      revealWin: 'Show in File Explorer',
+      revealMac: 'Show in Finder',
+      revealOther: 'Show in folder',
+      copyPath: 'Copy path',
+      missing: 'File no longer exists',
+      expand: 'Show {n} more',
+      collapse: 'Show less',
+      collapsedMany: '{name} and {rest} more'
     },
     status: { running: 'Running', done: 'Done', failed: 'Failed', denied: 'Denied' },
     subagent: {
@@ -1486,7 +1520,7 @@ const en: MessageTree = {
       downloaded: 'Version {version} downloaded',
       install: 'Restart and install',
       installHint:
-        'Deva will close, install the new version, and reopen. If you skip this, it installs the next time you quit Deva.',
+        'Deva will restart to complete the installation. Otherwise, the update will be installed automatically the next time you quit Deva.',
       checkFailed: 'Couldn’t check for updates',
       downloadFailed: 'Couldn’t download the update',
       retry: 'Retry',
