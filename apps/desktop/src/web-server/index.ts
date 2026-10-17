@@ -17,7 +17,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { readFile, readdir, stat } from 'fs/promises'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { extname, join, normalize, resolve, dirname, basename } from 'path'
+import { extname, join, normalize, resolve, dirname, basename, isAbsolute } from 'path'
 import { randomUUID } from 'node:crypto'
 import { WebSocketServer, type WebSocket } from 'ws'
 
@@ -50,7 +50,7 @@ import { registerWorkspaceIpc } from '../main/services/workspace'
 import { registerSecretsIpc } from '../main/services/secrets'
 import { registerProviderIpc } from '../main/services/provider'
 import { hasActiveTurns, registerChatIpc, settleActiveTurns } from '../main/services/chat'
-import { listSessions } from '../main/services/chat-store'
+import { listSessions, getSession } from '../main/services/chat-store'
 import { sweepCheckpoints } from '../main/services/checkpoints'
 import { sweepSubagents } from '../main/services/subagent-store'
 import { registerSkillsIpc } from '../main/services/skills'
@@ -169,13 +169,82 @@ function registerWebChannels(): void {
   shimIpcMain.handle('window:toggle-maximize', () => {})
   shimIpcMain.handle('window:close', () => {})
   shimIpcMain.handle('window:set-overlay', () => {})
+  // 全屏：浏览器里由用户按 F11 控制，渲染层只说「不是全屏」→ 图标栏按常规布局（不做 macOS 让位）
+  shimIpcMain.handle('window:is-fullscreen', () => false)
   shimIpcMain.handle('app:get-platform', () => 'linux')
+  registerDeliverablesWeb()
   // 通知点击回流（浏览器点了通知 → 触发主进程 Notification click 回调）
   shimIpcMain.on('web:notify-click', (_e: unknown, id: string) => fireNotifyClick(id))
   // 剪贴板同步（浏览器聚焦时把本机剪贴板送进服务端缓存）
   shimIpcMain.on('web:clipboard-cache', (_e: unknown, text: string) => {
     ;(globalThis as any).__devaClipboardCache = typeof text === 'string' ? text : String(text ?? '')
   })
+}
+
+// ── 交付卡（present_files）Web 适配 ─────────────────────────────────────────
+/**
+ * 桌面端 deliverables 的三个动作在 Web 里没有系统文件管理器 / 默认应用，等价语义如下：
+ *  - inspect    ：原样（只读文件元信息，路径仍由会话边车校验，不放开任意路径读取）
+ *  - thumbnail  ：服务端不生成，返回 null → 前端回落文件类型图标（省 CPU，且 Linux 本就多数取不到）
+ *  - open       ：改为「下载到用户电脑」（浏览器唯一通用的“打开成品”方式）
+ *  - reveal     ：前端已提供「复制路径」，服务端返回 false 让 UI 走该兜底
+ * 路径一律经 getSession 的 delivered 边车解析，与桌面端同一道安全边界。
+ */
+function registerDeliverablesWeb(): void {
+  shimIpcMain.handle('deliverables:inspect', async (_e: unknown, sessionId: unknown, toolUseId: unknown) => {
+    const paths = deliveredPathsOf(sessionId, toolUseId)
+    return Promise.all(
+      paths.map(async (p) => {
+        const st = await stat(p).catch(() => null)
+        return {
+          path: p,
+          name: basename(p),
+          dir: dirname(p),
+          size: st?.isFile() ? st.size : null,
+          openable: true // Web 端一律可下载（不受桌面端可执行扩展名黑名单限制）
+        }
+      })
+    )
+  })
+  shimIpcMain.handle('deliverables:thumbnail', () => null)
+  shimIpcMain.handle('deliverables:open', async (_e: unknown, sessionId: unknown, toolUseId: unknown, index: unknown) => {
+    const p = deliveredPathOf(sessionId, toolUseId, index)
+    if (!p) return { ok: false }
+    const st = await stat(p).catch(() => null)
+    if (!st?.isFile()) return { ok: false }
+    // Web 没有「默认应用」：把下载地址交给前端（window.open 触发浏览器下载）
+    return {
+      ok: true,
+      url: `/api/deliverable?sessionId=${encodeURIComponent(String(sessionId))}&toolUseId=${encodeURIComponent(
+        String(toolUseId)
+      )}&index=${encodeURIComponent(String(index))}`
+    }
+  })
+  shimIpcMain.handle('deliverables:reveal', () => ({ ok: false }))
+}
+
+/** 该对话里那次 present_files 交付的绝对路径（安全边界：仅限模型交付过的文件）。 */
+function deliveredPathsOf(sessionId: unknown, toolUseId: unknown): string[] {
+  if (typeof sessionId !== 'string' || typeof toolUseId !== 'string') return []
+  const s = getSession(sessionId)
+  if (!s) return []
+  const recorded = s.delivered?.[toolUseId]
+  if (recorded) return recorded
+  for (const m of s.messages) {
+    if (m.role !== 'assistant' || typeof m.content === 'string') continue
+    for (const p of m.content) {
+      if (p.type !== 'tool_use' || p.id !== toolUseId) continue
+      if (p.name !== 'present_files') return []
+      const paths = (p.input as { paths?: unknown } | null)?.paths
+      return Array.isArray(paths) ? paths.filter((x): x is string => typeof x === 'string' && isAbsolute(x)) : []
+    }
+  }
+  return []
+}
+
+function deliveredPathOf(sessionId: unknown, toolUseId: unknown, index: unknown): string | null {
+  if (typeof index !== 'number' || !Number.isInteger(index)) return null
+  return deliveredPathsOf(sessionId, toolUseId)[index] ?? null
 }
 
 // dialog 钩子：浏览器端文件选择器（往返 WS）
@@ -214,6 +283,7 @@ const MIME: Record<string, string> = {
   '.gif': 'image/gif',
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.ttf': 'font/ttf',
@@ -327,6 +397,25 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    // ── 免密入口 ──
+    // GET /__deva_autologin?t=<token>：校验签名 token 后写入会话 Cookie 并跳 /。
+    // 放在认证墙之前（未认证必须可达），不触碰登录/限速逻辑。
+    if (path === '/__deva_autologin' && req.method === 'GET') {
+      const t = url.searchParams.get('t') ?? ''
+      if (!verifyToken(auth, t)) {
+        json(res, 401, { ok: false, error: 'invalid-token' })
+        return
+      }
+      const exp = Number(t.slice(0, t.indexOf('.')))
+      const maxAge = Math.max(0, Math.floor((exp - Date.now()) / 1000))
+      setSessionCookie(req, res, t, maxAge)
+      res.statusCode = 302
+      res.setHeader('Location', '/')
+      res.setHeader('Cache-Control', 'no-store')
+      res.end()
+      return
+    }
+
     if (path === '/api/logout' && req.method === 'POST') {
       clearSessionCookie(res)
       json(res, 200, { ok: true })
@@ -345,7 +434,18 @@ const server = createServer(async (req, res) => {
     // ── 认证墙 ──
     // 例外：/assets/* 公开（前端构建产物、无敏感数据）—— 登录页须预取它们实现「登录后秒开」，
     // 且允许 CF 边缘缓存匿名命中。数据接口 /api/*、页面本身与 WS 仍严格鉴权。
-    if (!authed(req) && !(req.method === 'GET' && path.startsWith('/assets/'))) {
+    // 站点图标同理公开（浏览器与 CF 会匿名请求 /favicon.ico，否则 401 且控制台报错；
+    // 安卓「添加到主屏幕」还会匿名取 manifest 与 192/512 图标）。
+    const PUBLIC_ASSET =
+      path.startsWith('/assets/') ||
+      path === '/favicon.ico' ||
+      path === '/favicon.svg' ||
+      path === '/favicon.png' ||
+      path === '/favicon-192.png' ||
+      path === '/favicon-512.png' ||
+      path === '/site.webmanifest' ||
+      path === '/apple-touch-icon.png'
+    if (!authed(req) && !(req.method === 'GET' && PUBLIC_ASSET)) {
       if (
         req.method === 'GET' &&
         (path === '/' || path === '/index.html' || (!path.startsWith('/api/') && !path.includes('.')))
@@ -368,6 +468,31 @@ const server = createServer(async (req, res) => {
       res.setHeader('Content-Type', 'text/javascript; charset=utf-8')
       res.setHeader('Cache-Control', 'no-store')
       res.end(js)
+      return
+    }
+
+    // ── 交付文件下载（present_files 交付卡「打开」在 Web 端的等价动作） ──
+    // 安全边界与会话边车一致：只允许下载该对话里 present_files 明确交付过的文件。
+    if (path === '/api/deliverable' && req.method === 'GET') {
+      const sid = url.searchParams.get('sessionId')
+      const tid = url.searchParams.get('toolUseId')
+      const idx = Number(url.searchParams.get('index'))
+      const p = deliveredPathOf(sid, tid, idx)
+      const st = p ? await stat(p).catch(() => null) : null
+      if (!p || !st?.isFile()) {
+        res.statusCode = 404
+        res.end('Not Found')
+        return
+      }
+      const data = await readFile(p)
+      res.statusCode = 200
+      res.setHeader('Content-Type', MIME[extname(p).toLowerCase()] ?? 'application/octet-stream')
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(basename(p))}`
+      )
+      res.setHeader('Cache-Control', 'no-store')
+      res.end(data)
       return
     }
 

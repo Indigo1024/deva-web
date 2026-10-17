@@ -81,6 +81,12 @@ export function webWindow(): any {
     isDestroyed: (): boolean => false,
     isMinimized: (): boolean => false,
     isVisible: (): boolean => true,
+    /**
+     * Web 没有等价概念：浏览器标签页可能开着而用户不在看，但服务端无从得知。
+     * 恒返回 true → 回复提醒（reply-notify）视为「用户正在看」而不额外弹系统通知，
+     * 由浏览器自身的通知通道（页面内 Toast / 标签标题）承担，避免与桌面端逻辑打架。
+     */
+    isFocused: (): boolean => true,
     show: (): void => {},
     hide: (): void => {},
     focus: (): void => {},

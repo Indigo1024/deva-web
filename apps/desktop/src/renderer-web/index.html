@@ -8,6 +8,12 @@
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ws: wss: https:; media-src 'self' blob:"
     />
     <title>Deva</title>
+    <!-- 站点图标：与启动闪屏同一个圆角渐变 D 标志（public/favicon.*，由闪屏 SVG 生成） -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#4F46E5" />
     <!-- 首帧引导：服务端把认证后的同步配置原样注入此数据块（零额外请求、无串行 RTT）。
          type="application/json" 为惰性数据块，不受 CSP script-src 限制；theme-init.js 读取它。 -->
     <script id="deva-boot" type="application/json">{"pending":true}</script>

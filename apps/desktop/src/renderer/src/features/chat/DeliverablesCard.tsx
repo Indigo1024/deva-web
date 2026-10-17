@@ -105,13 +105,24 @@ export function DeliverablesCard({
   const open = (i: number): void => {
     void window.deva.deliverables
       .open(sessionId, block.id, i)
-      .catch(() => ({ ok: false }))
+      .catch(() => ({ ok: false } as { ok: boolean; url?: string }))
       .then((r) => {
+        // Web 版：服务端没有「默认应用」，改为返回下载地址 → 浏览器直接下载成品文件。
+        if (r.ok && r.url) {
+          window.open(r.url, '_blank')
+          return
+        }
         if (!r.ok) toast.show({ variant: 'error', message: t('chat.deliver.openFailed') })
       })
   }
 
   const reveal = (i: number): void => {
+    // Web 版没有系统文件管理器：reveal 语义降级为「复制路径」（服务端返回 ok:false 即为该情形）。
+    if ((window.deva as { platform?: string }).platform === 'web') {
+      const p = files[i]?.path
+      if (p) copyPath(i, p)
+      return
+    }
     void window.deva.deliverables
       .reveal(sessionId, block.id, i)
       .catch(() => ({ ok: false }))

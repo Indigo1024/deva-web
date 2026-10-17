@@ -1161,8 +1161,8 @@ const api = {
     /** 系统缩略图（取不到回落文件图标）的 data URL；文件不存在等返回 null。 */
     thumbnail: (sessionId: string, toolUseId: string, index: number): Promise<string | null> =>
       ipcRenderer.invoke('deliverables:thumbnail', sessionId, toolUseId, index),
-    /** 用默认应用打开（仅成品类扩展名，见 DeliverableInfo.openable）。 */
-    open: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean }> =>
+    /** 用默认应用打开（仅成品类扩展名，见 DeliverableInfo.openable）。Web 版返回下载地址 url。 */
+    open: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean; url?: string }> =>
       ipcRenderer.invoke('deliverables:open', sessionId, toolUseId, index),
     /** 在系统文件管理器中显示并选中该文件。 */
     reveal: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean }> =>

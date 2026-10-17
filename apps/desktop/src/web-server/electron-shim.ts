@@ -103,7 +103,7 @@ function devaHome(): string {
 export const app = {
   isPackaged: false,
   runningUnderARM64Translation: false,
-  getVersion: (): string => '0.1.7-web',
+  getVersion: (): string => '0.1.8-web',
   getName: (): string => 'Deva Web',
   getPath: (name: string): string => {
     if (name === 'home') return nodeOs.homedir()
