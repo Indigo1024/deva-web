@@ -259,6 +259,10 @@ export function HumationFace({
   // 无 spec 配色时用 seed 配色兜底（引擎默认是黑白线稿）；spec 里显式给的逐项覆盖。
   const pal = seededPalette(seed)
   const colors = { ...pal.colors, ...(spec?.colors ?? {}) }
+  // 注：库在 size 为字符串时会给 <svg> 写 height="auto"（SVG 属性不接受 auto，控制台报错）。
+  // 所有调用点的头像尺寸都由容器 CSS（> svg { width/height:100% }）接管，故此处一律传数字：
+  // 未指定 size 时用引擎自身 viewBox 高度（等价铺满容器），彻底绕开该库的非法属性。
+  const svgSize = typeof size === 'number' ? size : 88
   return (
     <Avatar
       assets={humation1}
@@ -266,7 +270,7 @@ export function HumationFace({
       selections={selections}
       colors={colors}
       background={spec?.background || pal.background}
-      size={size ?? '100%'}
+      size={svgSize}
       title={title}
       className={className}
     />

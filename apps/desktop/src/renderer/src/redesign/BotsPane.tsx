@@ -101,7 +101,11 @@ export function BotsPane(): React.JSX.Element {
               <button
                 key={b.id}
                 className={`cf-trow bots-row${b.id === viewId ? ' is-active' : ''}`}
-                onClick={() => setViewId(b.id)}
+                onClick={() => {
+                  setViewId(b.id)
+                  // 手机端：选中机器人详情后收起列表抽屉（桌面无副作用）
+                  window.dispatchEvent(new CustomEvent('deva:mobdrawer-close'))
+                }}
               >
                 <PlatformLogo platform={b.platform} size={30} />
                 <div className="cf-trow__main">

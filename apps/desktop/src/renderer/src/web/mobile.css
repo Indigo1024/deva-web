@@ -1,0 +1,352 @@
+/*
+ * Web 移动端适配（仅 Web 构建引入；桌面 Electron 不受影响）。
+ *
+ * 策略：
+ *  - 三列布局（图标栏 | 列表 | 内容）在 <720px 折为「内容 + 底部标签栏」，
+ *    列表列（aside.cf-rail，消息/角色/机器人/定时任务四处一致）变抽屉，
+ *    由顶栏菜单键 / 底栏标签唤起，带遮罩。
+ *  - 弹窗在手机上全屏（.cf-modal 铺满），设置左侧导航改横向滚动。
+ *  - 触摸目标加高、输入字号 16px（防 iOS 聚焦缩放）、安全区适配、
+ *    滚动 overscroll 收敛（防误触浏览器下拉刷新打断对话滚动）。
+ * 加载顺序：本文件须在 redesign.css 之后引入（renderer-web/main.tsx 末尾）。
+ */
+
+/* ---------------------------- 顶栏抽屉键（桌面隐藏） ---------------------------- */
+.cf-mobmenu {
+  display: none;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+.cf-mobmenu:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+/* 遮罩：桌面恒隐藏 */
+.cf-mobbackdrop {
+  display: none;
+}
+
+@media (max-width: 719px) {
+  /* 弹窗层必须盖过抽屉（抽屉 z=80）：否则「任务页 + → 手动添加」的表单弹窗会被
+     抽屉整个盖住，看起来像点了没反应。cf-modal 在手机端为全屏层，同样提级到抽屉之上。 */
+  .cf-modal__backdrop {
+    z-index: 120;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  html,
+  body {
+    overscroll-behavior-y: none;
+  }
+
+  /* ---------------------------- 外壳：纵向流 ---------------------------- */
+  .cf-shell {
+    --cf-main: 100%;
+  }
+  .cf-body {
+    display: flex;
+    flex-direction: column;
+  }
+  .cf-conv {
+    flex: 1;
+    min-height: 0;
+    order: 1;
+  }
+  /* 窗口级拖拽手柄在 web 无意义 */
+  .cf-resizer {
+    display: none;
+  }
+
+  /* ---------------------------- 底部标签栏（原图标栏） ---------------------------- */
+  .cf-iconrail {
+    order: 99;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 2px;
+    min-height: 56px;
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
+    border-right: none;
+    border-top: 1px solid var(--border);
+    background: var(--bg-inset);
+    z-index: 60;
+  }
+  .cf-iconrail__me {
+    margin-bottom: 0;
+    margin-right: 2px;
+  }
+  .cf-navbtn {
+    width: 48px;
+    height: 44px;
+  }
+  /* 选中指示条：手机样式横条置顶 */
+  .cf-navbtn.is-active::before {
+    left: 50%;
+    top: -1px;
+    bottom: auto;
+    transform: translateX(-50%);
+    width: 20px;
+    height: 3px;
+  }
+  .cf-iconrail .cf-spacer {
+    flex: 1;
+  }
+
+  /* ---------------------------- 列表抽屉（全部列表列） ---------------------------- */
+  /* 抽屉宽度：78vw — 86vw 在小屏上占比过大（右缘残影太窄、压迫感强），收窄后仍能容纳
+     列表行主要信息（标题 + 头像），且让遮罩层清晰可见，单手指从右缘滑回即可收起。 */
+  aside.cf-rail {
+    position: fixed;
+    top: 0;
+    bottom: calc(56px + env(safe-area-inset-bottom));
+    left: 0;
+    width: min(78vw, 330px);
+    z-index: 80;
+    transform: translateX(-103%);
+    transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.25, 1);
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.18);
+    will-change: transform;
+    overscroll-behavior: contain;
+  }
+  .cf-shell.is-mobdrawer aside.cf-rail {
+    transform: translateX(0);
+  }
+  .cf-mobbackdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    background: rgba(0, 0, 0, 0.4);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+  .cf-shell.is-mobdrawer .cf-mobbackdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  /* 顶栏抽屉唤起键（仅手机出现） */
+  .cf-mobmenu {
+    display: inline-grid;
+  }
+  .cf-dragbar .cf-mobmenu {
+    position: absolute;
+    left: 8px;
+    top: 4px;
+    z-index: 5;
+  }
+  .cf-dragbar {
+    position: relative;
+    height: 44px;
+  }
+
+  /* ---------------------------- 顶部区 ---------------------------- */
+  .cf-conv__head {
+    padding: 6px 12px 6px 4px;
+    gap: var(--space-2);
+  }
+  .cf-idbtn {
+    padding: 6px 8px;
+  }
+
+  /* ---------------------------- 输入与消息：防横向溢出 ---------------------------- */
+  /* 网格/弹性子项默认 min-width:auto，会按 min-content 把视口撑破（实测 390px 视口下
+     .cf-body 被输入条撑到 396.4px）。逐级归零，任何文案/图标组合都不再溢出。 */
+  .cf-body,
+  .cf-conv,
+  .cf-composer,
+  .cf-composer__inner,
+  .cf-box,
+  .cf-box__bar {
+    min-width: 0;
+  }
+  /* 输入条太窄时允许换行（发送键独占一行并靠右），任意语言文案都不再撑破布局。 */
+  .cf-box__bar {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+  }
+  /* 收紧输入条各项，让「附件 + 挂载 + 模型 + 发送」在 390px 下保持一行（实测刚好差 ~6px）。 */
+  .cf-box__bar {
+    gap: 2px;
+  }
+  .cf-box__bar .cf-iconbtn {
+    width: 28px;
+    height: 28px;
+  }
+  .cf-wschip {
+    padding: 0 6px;
+    max-width: 132px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cf-box__bar .chip__label {
+    max-width: 88px;
+  }
+  .cf-send {
+    margin-left: auto;
+    min-width: 60px;
+    padding: 0 12px;
+  }
+
+  /* ---------------------------- 模型/人格选择菜单：全宽适配 ---------------------------- */
+  /* 桌面端菜单锚在 chip 右缘（right:0）并按内容定宽（248–360px）。手机端 chip 位于工具条中段，
+     向左展开时直接伸出屏幕左缘（390px 实测左缘 -64px、右侧反留下 94px 空白），窄菜单也难精准点选。
+     手机改为把锚点提升到整个输入框（.cf-box），菜单与输入框左右对齐全宽铺开——不再横向溢出，
+     手指够得着任意一侧。 */
+  .cf-box__bar .model-pick {
+    position: static;
+  }
+  .cf-box__bar .model-pick__menu {
+    left: 0;
+    right: 0;
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    z-index: 66;
+    /* 竖向兜底：长列表菜单不得越过视口顶（320×568 实测 340px 菜单越顶 31px）。 */
+    max-height: min(340px, 50vh);
+    max-height: min(340px, 50dvh);
+  }
+  /* 菜单遮罩提级到 65：原 z=40 低于底部标签栏（60），菜单开着点标签栏会穿透切页而非收起菜单。 */
+  .cf-box__bar .model-pick__backdrop {
+    z-index: 65;
+  }
+  /* 任务表单弹窗内的同款选择器可用空间更小（弹窗头 + 表单占位），进一步限高：
+     否则长列表菜单顶部会被 .cf-editor 滚动区裁掉且滚不出来（390×844 实测裁掉 119px）。 */
+  .cf-modal .model-pick__menu {
+    max-height: min(340px, 25vh);
+    max-height: min(340px, 25dvh);
+  }
+
+  /* ---------------------------- 消息与输入 ---------------------------- */
+  .cf-msgs {
+    padding: var(--space-4) 0;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .cf-toc {
+    display: none;
+  }
+  .cf-composer {
+    padding: var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
+  }
+  .cf-composer__inner {
+    max-width: 100%;
+  }
+  /* iOS 聚焦缩放防治：输入控件字号 ≥16px */
+  .cf-box textarea,
+  .cf-search__input,
+  .cf-textarea,
+  .cf-modal input[type='text'],
+  .cf-modal input[type='password'],
+  .cf-modal input[type='number'],
+  .cf-modal input[type='search'],
+  .cf-modal textarea,
+  .cf-modal select {
+    font-size: 16px;
+  }
+
+  /* ---------------------------- 列表行：触摸目标加高 ---------------------------- */
+  .cf-convrow,
+  .cf-trow,
+  .cf-prow {
+    min-height: 56px;
+  }
+  .cf-rail__top {
+    padding-top: calc(var(--space-2) + env(safe-area-inset-top));
+  }
+
+  /* ---------------------------- 设置行：防按钮换行 ---------------------------- */
+  /* 「退出登录」按钮在手机上被左侧标签挤压后文字换行（Sign/out 两行很难看），
+     禁止压缩 + 禁止换行，保持单行完整。 */
+  .cf-set__row > .btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  /* ---------------------------- 快速开启 / 资料卡 ---------------------------- */
+  .cf-quick__inner {
+    padding: 0 18px;
+  }
+  .cf-qcard {
+    width: calc(50% - 8px);
+  }
+  .cf-profile__inner {
+    padding-left: 18px;
+    padding-right: 18px;
+  }
+
+  /* ---------------------------- 弹窗全屏化 ---------------------------- */
+  .cf-modal__backdrop {
+    padding: 0;
+    place-items: stretch;
+  }
+  .cf-modal,
+  .cf-modal.is-editor,
+  .cf-modal.bots-scanmodal,
+  .cf-modal.bots-pickmodal {
+    width: 100%;
+    max-width: none;
+    height: 100vh;
+    height: 100dvh;
+    max-height: none;
+    border: none;
+    border-radius: 0;
+  }
+  .cf-modal__head {
+    padding-top: calc(var(--space-3) + env(safe-area-inset-top));
+  }
+  .cf-modal__body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .cf-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    -webkit-overflow-scrolling: touch;
+  }
+  .cf-nav > * {
+    flex: none;
+    white-space: nowrap;
+  }
+  .cf-pane {
+    padding: var(--space-4);
+  }
+  .cf-pane__title {
+    font-size: 15px;
+  }
+
+  /* 选择/操作条：可换行不溢出 */
+  .cf-turnbar,
+  .cf-selbar {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+  }
+}
+
+/* ---------------------------- 超窄屏微调 ---------------------------- */
+@media (max-width: 380px) {
+  .cf-qcard {
+    width: 100%;
+  }
+  .cf-conv__head {
+    padding-right: 8px;
+  }
+}

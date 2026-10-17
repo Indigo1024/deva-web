@@ -29,6 +29,7 @@ import {
   Lightbulb,
   ListChecks,
   Lock,
+  LogOut,
   MessageCircle,
   Paperclip,
   Pause,
@@ -52,6 +53,7 @@ import {
 } from 'lucide-react'
 import { BotsPane } from './BotsPane'
 import { UpdateSection } from './UpdateSection'
+import { MobileMenuButton } from '../web/MobileMenuButton'
 // 关于页的应用图标：直接用安装包图标的源文件，图形只维护一份
 import devaIcon from '../../../../build/icon.svg'
 import './redesign.css'
@@ -175,7 +177,12 @@ function clipName(s: string, max = 20): string {
  * 窗口拖拽区，补上这些界面缺失的顶部拖拽（对话视图已由 .cf-conv__head 承担）。纯装饰、无交互。
  */
 function DragBar(): React.JSX.Element {
-  return <div className="cf-dragbar" aria-hidden="true" />
+  // 顶部拖拽把手；手机上由 CSS 收起高度、改作「会话抽屉」唤起键的落点（web 移动适配）。
+  return (
+    <div className="cf-dragbar">
+      <MobileMenuButton />
+    </div>
+  )
 }
 
 /**
@@ -319,6 +326,8 @@ export function ChatFirstShell(): React.JSX.Element {
    */
   const [tasksTarget, setTasksTarget] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  /** 手机端列表抽屉（web 适配；桌面/广屏无影响——仅 <720px 生效）。 */
+  const [mobDrawer, setMobDrawer] = useState(false)
   /** 非空时打开角色编辑器（Part G）。 */
   const [editor, setEditor] = useState<EditorState | null>(null)
   /**
@@ -357,11 +366,13 @@ export function ChatFirstShell(): React.JSX.Element {
   const openThread = (id: string): void => {
     selectSession(id)
     setRailTab('chats')
+    setMobDrawer(false) // 手机端：选中即收起抽屉
   }
   // 查看某角色资料 → 切到「角色」tab 并选中该角色（右侧随之显示其资料卡）。
   const openProfile = (personaId: string): void => {
     setViewPersonaId(personaId)
     setRailTab('roster')
+    setMobDrawer(false)
   }
   /** 点角色名片 → 打开预填的编辑器（propose 态，接受才落盘）。 */
   const openProposal = (block: Extract<ChatBlock, { kind: 'agentcard' }>): void =>
@@ -389,10 +400,37 @@ export function ChatFirstShell(): React.JSX.Element {
     return () => off?.()
   }, [selectSession])
 
+  // 手机端抽屉：顶栏菜单键唤起（自定义事件，见 web/MobileMenuButton.tsx）
+  useEffect(() => {
+    const onToggle = (): void => setMobDrawer((v) => !v)
+    const onClose = (): void => setMobDrawer(false)
+    window.addEventListener('deva:mobmenu', onToggle)
+    window.addEventListener('deva:mobdrawer-close', onClose)
+    return () => {
+      window.removeEventListener('deva:mobmenu', onToggle)
+      window.removeEventListener('deva:mobdrawer-close', onClose)
+    }
+  }, [])
+
+  /**
+   * 底栏 tab 点击（web 移动适配）：手机上「切新 tab → 打开抽屉展示该 tab 的列表」，
+   * 「再点当前 tab → 收起抽屉」；桌面/广屏行为不变（is-mobdrawer 类仅在 <720px 生效）。
+   */
+  const onRailTab = (t: RailTab): void => {
+    const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 719px)').matches
+    if (t === railTab) {
+      if (isMobile) setMobDrawer((v) => !v)
+      return
+    }
+    setRailTab(t)
+    if (isMobile) setMobDrawer(true)
+  }
+
   /** 与某身份发起新对话：新建空会话（首发落绑定，并快照该身份当时的偏好模型）→ 回到消息视图。 */
   const startWith = (personaId: string): void => {
     newSession(personaId, undefined, personas.find((p) => p.id === personaId)?.model)
     setRailTab('chats')
+    setMobDrawer(false)
   }
   /**
    * 右键菜单「新开对话」：以选中对话的**原角色**发起一条全新对话（复用 startWith → 新建空会话并
@@ -411,6 +449,7 @@ export function ChatFirstShell(): React.JSX.Element {
   const addPersonaByChat = (): void => {
     newSession(defaultPersonaId, undefined, defaultPersona?.model)
     setRailTab('chats')
+    setMobDrawer(false)
     setComposerPrefill({ text: t('cf.addByChatPrompt'), nonce: Date.now() })
   }
   /**
@@ -420,6 +459,7 @@ export function ChatFirstShell(): React.JSX.Element {
   const addTaskByChat = (): void => {
     newSession(defaultPersonaId, undefined, defaultPersona?.model)
     setRailTab('chats')
+    setMobDrawer(false)
     setComposerPrefill({ text: t('tasks.addByChatPrompt'), nonce: Date.now() })
   }
   const viewPersona = viewPersonaId ? personas.find((p) => p.id === viewPersonaId) : undefined
@@ -486,7 +526,9 @@ export function ChatFirstShell(): React.JSX.Element {
   }
 
   return (
-    <div className="cf-shell">
+    <div className={`cf-shell${mobDrawer ? ' is-mobdrawer' : ''}`}>
+      {/* 手机端抽屉遮罩：点它关抽屉（桌面由 CSS 隐藏） */}
+      <div className="cf-mobbackdrop" onClick={() => setMobDrawer(false)} aria-hidden="true" />
       {/* 无独立标题栏（微信式）：最小化/最大化/关闭用系统原生窗口控件叠加（titleBarOverlay），
           此处不再自绘按钮，避免与原生按钮重影。拖拽交给图标栏与对话头。 */}
       <div
@@ -508,8 +550,11 @@ export function ChatFirstShell(): React.JSX.Element {
         />
         <IconRail
           tab={railTab}
-          onTab={setRailTab}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onTab={onRailTab}
+          onOpenSettings={() => {
+            setSettingsOpen(true)
+            setMobDrawer(false)
+          }}
           chatAlert={chatAlert}
         />
         {railTab === 'bots' ? (
@@ -2198,7 +2243,11 @@ function TasksPane({
       <TasksRail
         groups={groups}
         viewTaskId={viewTask?.id ?? null}
-        onSelect={setViewTaskId}
+        onSelect={(id) => {
+          setViewTaskId(id)
+          // 手机端：选中任务详情后收起列表抽屉（桌面无副作用）
+          window.dispatchEvent(new CustomEvent('deva:mobdrawer-close'))
+        }}
         onDelete={doDelete}
         onAddManual={() => setCreating(true)}
         onAddByChat={onAddByChat}
@@ -3146,6 +3195,7 @@ function Conversation({
   return (
     <main className="cf-conv">
       <div className="cf-conv__head">
+        <MobileMenuButton />
         <button
           className="cf-idbtn"
           onClick={() => owner && onOpenProfile(owner.id)}
@@ -4540,6 +4590,29 @@ function Settings({ onClose }: { onClose: () => void }): React.JSX.Element {
 function GeneralPane(): React.JSX.Element {
   const { t, locale, setLocale } = useI18n()
   const { mode, setMode } = useTheme()
+  const dialog = useDialog()
+  // Web 专属：退出登录（Electron 无会话概念，不渲染）。经 /api/logout 清 Cookie 后回登录页。
+  // 用与 MobileMenuButton 一致的安全 cast：桌面版 platform 类型不含 'web'，直接比较会被 TS 拒绝。
+  const isWeb = (window as { deva?: { platform?: string } }).deva?.platform === 'web'
+  const [signingOut, setSigningOut] = useState(false)
+  const doSignOut = (): void => {
+    void (async () => {
+      const ok = await dialog.confirm({
+        title: t('settings.signOut'),
+        message: t('settings.signOutConfirm'),
+        variant: 'danger',
+        confirmText: t('settings.signOut')
+      })
+      if (!ok) return
+      setSigningOut(true)
+      try {
+        await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' })
+      } catch {
+        /* 网络失败也照样回登录页（下次请求会因无 Cookie 被踢回） */
+      }
+      location.replace('/login')
+    })()
+  }
   // 关窗驻留托盘：仅 Windows 呈现（macOS/Linux 关窗语义不同，主进程亦仅 win32 默认驻留）。
   const isWin = window.deva?.platform === 'win32'
   const [closeToTray, setCloseToTray] = useState<boolean>(() => {
@@ -4586,6 +4659,23 @@ function GeneralPane(): React.JSX.Element {
               {t('settings.closeToTray')}
             </div>
             <Toggle on={closeToTray} onChange={toggleTray} />
+          </div>
+        )}
+        {isWeb && (
+          <div className="cf-set__row">
+            <div className="cf-set__label">
+              {t('settings.signOut')}
+              <span className="cf-set__hint">{t('settings.signOutConfirm')}</span>
+            </div>
+            <button
+              className="btn btn--danger btn--sm"
+              disabled={signingOut}
+              onClick={doSignOut}
+              style={{ marginLeft: 'auto' }}
+            >
+              <LogOut size={14} />
+              {t('settings.signOut')}
+            </button>
           </div>
         )}
       </div>
