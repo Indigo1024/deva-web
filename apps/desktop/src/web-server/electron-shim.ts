@@ -64,11 +64,80 @@ export const ipcMain = {
   }
 }
 
+/**
+ * Web 版「WebContents 发送端」替身。
+ *
+ * 上游有些 handler 会直接用 `e.sender` 做两件事：
+ *   1. `sender.send(channel, ...)` —— 边跑边把中间结果推给发起的那一端
+ *      （如 git:generate-commit-message 的流式片段 git:commit-gen-delta）；
+ *   2. `sender.once('destroyed', fn)` / `sender.isDestroyed()` —— 对端关闭时提前中断。
+ *
+ * 桌面里 sender 是 WebContents，Web 里没有；若给 null，这类 handler 一碰就 TypeError。
+ * 这里给一个能定向推送的最小实现：send 只发给发起该次 invoke 的那条连接（与桌面语义一致，
+ * 不是广播），destroyed 在连接断开时触发。
+ */
+export interface IpcSender {
+  send: (channel: string, ...args: any[]) => void
+  once: (event: 'destroyed', fn: () => void) => void
+  off: (event: 'destroyed', fn: () => void) => void
+  isDestroyed: () => boolean
+  /** 由连接层在对端断开时调用，触发所有 destroyed 监听（桌面 WebContents 的同名时机）。 */
+  markDestroyed: () => void
+}
+
+/** 无连接上下文时（启动期内部调用）的安全空实现。 */
+function nullSender(): IpcSender {
+  return {
+    send: () => {},
+    once: () => {},
+    off: () => {},
+    isDestroyed: () => false,
+    markDestroyed: () => {}
+  }
+}
+
+/** 由 WS 层按连接构造：push 负责把事件塞进那条 socket。 */
+export function makeSender(push: (channel: string, args: any[]) => void): IpcSender {
+  const goneListeners = new Set<() => void>()
+  let gone = false
+  return {
+    send: (channel: string, ...args: any[]) => {
+      if (gone) return
+      push(channel, args)
+    },
+    once: (event: 'destroyed', fn: () => void) => {
+      if (event !== 'destroyed') return
+      goneListeners.add(fn)
+    },
+    off: (event: 'destroyed', fn: () => void) => {
+      if (event !== 'destroyed') return
+      goneListeners.delete(fn)
+    },
+    isDestroyed: () => gone,
+    markDestroyed: () => {
+      if (gone) return
+      gone = true
+      for (const fn of goneListeners) {
+        try {
+          fn()
+        } catch (e) {
+          console.error('[sender destroyed]', e)
+        }
+      }
+      goneListeners.clear()
+    }
+  }
+}
+
 /** 供 WS RPC 调度器调用：执行 handle 注册的处理器。 */
-export async function invokeChannel(channel: string, args: any[]): Promise<any> {
+export async function invokeChannel(
+  channel: string,
+  args: any[],
+  sender?: IpcSender
+): Promise<any> {
   const fn = handlers.get(channel)
   if (!fn) throw new Error(`No handler registered for '${channel}'`)
-  return await fn({ sender: null }, ...args)
+  return await fn({ sender: sender ?? nullSender() }, ...args)
 }
 
 export function hasHandler(channel: string): boolean {

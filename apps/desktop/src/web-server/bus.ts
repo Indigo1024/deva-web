@@ -7,6 +7,7 @@
  * - 其它 hook：dialog（浏览器端文件选择器）、clipboard、openExternal、notify（前端弹通知）。
  */
 import type { WebSocket } from 'ws'
+import { makeSender, type IpcSender } from './electron-shim'
 
 export type ClientSender = (json: string) => void
 
@@ -14,6 +15,8 @@ export interface ClientConn {
   id: number
   ws: WebSocket
   send: ClientSender
+  /** invoke handler 里的 `e.sender`：定向推事件回本连接。 */
+  sender: IpcSender
 }
 
 const clients = new Map<number, ClientConn>()
@@ -23,6 +26,7 @@ export function addClient(ws: WebSocket): ClientConn {
   const conn: ClientConn = {
     id: ++seq,
     ws,
+    sender: null as unknown as IpcSender,
     send: (json) => {
       try {
         if (ws.readyState === ws.OPEN) ws.send(json)
@@ -31,8 +35,18 @@ export function addClient(ws: WebSocket): ClientConn {
       }
     }
   }
+  // invoke handler 里的 `e.sender`：定向把事件推回这条连接（桌面语义），断开时通知 destroyed
+  conn.sender = makeSender((channel, args) => {
+    conn.send(JSON.stringify({ t: 'ev', channel, args }))
+  })
   clients.set(conn.id, conn)
   return conn
+}
+
+/** 连接断开：先通知等待 destroyed 的 handler（让进行中的流式生成提前中断），再摘除。 */
+export function closeClient(conn: ClientConn): void {
+  conn.sender.markDestroyed()
+  clients.delete(conn.id)
 }
 
 export function removeClient(id: number): void {

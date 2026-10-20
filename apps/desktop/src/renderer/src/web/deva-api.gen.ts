@@ -171,8 +171,15 @@ export type DisplayBlock =
   /**
    * exit_plan 计划卡（重建）：计划正文从 tool_use 入参（input.plan）还原，decision 由主进程 plans 边车还原。
    * 恒为终态：'approve'/'keep' = 用户的决定；'cancelled' = 中止 / 未决。重建卡一律只读、不再可点。
+   * feedback = 继续完善时用户写的回复（未写则缺省）。
    */
-  | { kind: 'plan'; id: string; plan: string; decision: 'approve' | 'keep' | 'cancelled' }
+  | {
+      kind: 'plan'
+      id: string
+      plan: string
+      decision: 'approve' | 'keep' | 'ignore' | 'cancelled'
+      feedback?: string
+    }
   /** 已完成的待办清单卡（重建）：画在令清单全部完成的那次 todo_write 处；其余 todo_write 不画。 */
   | { kind: 'todolist'; id: string; title: string; items: TodoItem[] }
 
@@ -268,7 +275,9 @@ export interface AskResponse {
 /** 用户对 exit_plan 计划审阅的决定：approve=批准并执行 / keep=继续完善。 */
 export interface PlanResponse {
   key: string
-  decision: 'approve' | 'keep'
+  decision: 'approve' | 'keep' | 'ignore'
+  /** 选「继续完善」时在卡上直接写的回复；缺省 / 空 = 未写。 */
+  feedback?: string
 }
 
 /** 待办清单的一项（与 services/todos.ts 对齐）。 */
@@ -613,6 +622,8 @@ export type GitGenLocale = 'zh-CN' | 'en'
 export interface GitGenerateResult {
   ok: boolean
   text?: string
+  /** 被用户中断：text 为已生成的部分（可能为空串）。 */
+  aborted?: boolean
   reason?: GitFailReason
   message?: string
 }
@@ -683,6 +694,8 @@ export type ChatStreamEvent =
       reason: 'truncated' | 'empty' | 'context' | 'output_limit' | 'effort'
       attempt: number
       max: number
+      /** context：报错里解析出的真实窗口；output_limit：用户所设输出上限被拒后降到的值。 */
+      limit?: number
     }
   | { type: 'stream_reset' }
   | { type: 'error'; kind: string; message: string }
@@ -699,7 +712,8 @@ export type ChatStreamEvent =
       key: string
       kind: 'ask' | 'plan' | 'mount'
       answers?: string[] | null
-      decision?: 'approve' | 'keep' | null
+      decision?: 'approve' | 'keep' | 'ignore' | null
+      feedback?: string
       path?: string | null
     }
   /** 角色名片 / 定时任务名片已决议（可能来自手机端）；不属于任何回合，turnId 为空串。 */
@@ -1086,13 +1100,26 @@ const api = {
     /** 推送（无 upstream 时传 branch 触发 -u origin <branch> 首推，否则传 null） */
     push: (dir: string, setUpstreamBranch: string | null): Promise<GitOpResult> =>
       ipcRenderer.invoke('git:push', dir, setUpstreamBranch),
-    /** AI 生成提交信息：把「将要提交」的 diff 交模型生成（密钥在主进程解密，不经渲染层）；locale 跟随界面语言 */
+    /**
+     * AI 生成提交信息：把「将要提交」的 diff 交模型生成（密钥在主进程解密，不经渲染层）；locale 跟随界面语言。
+     * 带 reqId 时边生成边经 onCommitMessageDelta 推送原始片段，并可用 cancelCommitMessage 中断。
+     */
     generateCommitMessage: (
       dir: string,
       model: GitGenModel,
-      locale: GitGenLocale
+      locale: GitGenLocale,
+      reqId?: string
     ): Promise<GitGenerateResult> =>
-      ipcRenderer.invoke('git:generate-commit-message', dir, model, locale)
+      ipcRenderer.invoke('git:generate-commit-message', dir, model, locale, reqId),
+    /** 中断 reqId 对应的生成（已结束则无操作） */
+    cancelCommitMessage: (reqId: string): Promise<boolean> =>
+      ipcRenderer.invoke('git:cancel-commit-message', reqId),
+    /** 订阅生成中的原始文本片段，返回取消订阅函数 */
+    onCommitMessageDelta: (cb: (reqId: string, text: string) => void): (() => void) => {
+      const listener = (_e: unknown, reqId: string, text: string): void => cb(reqId, text)
+      ipcRenderer.on('git:commit-gen-delta', listener)
+      return () => ipcRenderer.removeListener('git:commit-gen-delta', listener)
+    }
   },
   /**
    * 定时任务 / 自动任务（全局 ~/.deva/tasks.json）：列出 / 读取 / 创建 / 更新 / 删除 / 启停 / 立即运行。

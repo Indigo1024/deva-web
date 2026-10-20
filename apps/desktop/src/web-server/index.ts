@@ -29,7 +29,7 @@ import {
   fireNotifyClick,
   ipcMain as shimIpcMain
 } from './electron-shim'
-import { addClient, removeClient, requestClient, resolveRequest, clientCount, webWindow, broadcast } from './bus'
+import { addClient, closeClient, requestClient, resolveRequest, clientCount, webWindow, broadcast } from './bus'
 import {
   COOKIE_NAME,
   checkLoginAllowed,
@@ -53,6 +53,7 @@ import { hasActiveTurns, registerChatIpc, settleActiveTurns } from '../main/serv
 import { listSessions, getSession } from '../main/services/chat-store'
 import { sweepCheckpoints } from '../main/services/checkpoints'
 import { sweepSubagents } from '../main/services/subagent-store'
+import { sweepMedia } from '../main/services/media-store'
 import { registerSkillsIpc } from '../main/services/skills'
 import { ensureSeededPersonas, registerPersonasIpc } from '../main/services/personas'
 import { registerProfileIpc } from '../main/services/profile'
@@ -143,6 +144,8 @@ function bootServices(): void {
   registerRemoteIpc(webWindowRef)
   void sweepCheckpoints(listSessions().map((m) => m.id)).catch(() => {})
   void sweepSubagents(listSessions().map((m) => m.id)).catch(() => {})
+  // 图片/PDF 外置 blob 清扫（上游 v0.1.9）：删掉已无任何对话或子智能体引用的文件
+  void sweepMedia().catch((e) => console.warn('[media] 清扫失败：', e))
   registerSkillsIpc(webWindowRef)
   ensureSeededPersonas()
   registerPersonasIpc()
@@ -661,10 +664,12 @@ wss.on('connection', (ws: WebSocket) => {
     if (msg.t === 'invoke' && typeof msg.ch === 'string') {
       const id = msg.id
       const args = decodeArgs(Array.isArray(msg.args) ? msg.args : [])
+      // 定向 sender：handler 里 sender.send 只回给发起这条 invoke 的连接（上游流式片段依赖此语义）
+      const sender = conn.sender
       void (async () => {
         try {
           if (!hasHandler(msg.ch)) throw new Error(`No handler for '${msg.ch}'`)
-          const value = await invokeChannel(msg.ch, args)
+          const value = await invokeChannel(msg.ch, args, sender)
           conn.send(JSON.stringify({ t: 'invoke-res', id, ok: true, value }))
         } catch (e) {
           conn.send(
@@ -700,8 +705,9 @@ wss.on('connection', (ws: WebSocket) => {
     }
   })
 
-  ws.on('close', () => removeClient(conn.id))
-  ws.on('error', () => removeClient(conn.id))
+  // closeClient：先触发 sender 的 destroyed（中断进行中的流式生成），再从广播表摘除
+  ws.on('close', () => closeClient(conn))
+  ws.on('error', () => closeClient(conn))
 })
 
 // 会话过期踢出 + 心跳清理
