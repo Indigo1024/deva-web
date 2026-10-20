@@ -276,6 +276,23 @@ pnpm package:win       # 打 Windows 安装包（exe）
 pnpm package:mac       # 打 macOS 安装包
 ```
 
+## 🌐 Web 版（浏览器访问）
+
+不想装客户端？本仓库同时维护一套 **Web 版**：在 Linux 服务器上跑一个 Node 进程，手机、平板、任意电脑打开网址就能用，带登录认证和多端适配。
+
+```bash
+cd apps/desktop
+node scripts/gen-web-api.mjs     # 生成 window.deva 桥接
+node scripts/build-web.mjs       # 构建服务端 + 前端
+DEVA_WEB_PORT=8790 node out/web/index.cjs
+```
+
+首次启动的登录密码在 `~/.deva/web-login.txt`，默认监听 `127.0.0.1:8790`。
+
+**完整部署说明（系统服务、Cloudflare Tunnel / nginx、移动端结构、合并上游新版本的检查清单）见 [docs/WEB.md](docs/WEB.md)。**
+
+> ⚠️ Web 版把桌面应用的完整能力搬到了浏览器：agent 的文件工具没有路径限制、终端没有命令白名单，唯一的安全边界是登录墙。请勿用弱密码暴露在公网。
+
 ## 📄 许可
 
 [MIT](LICENSE)
