@@ -169,10 +169,25 @@ function devaHome(): string {
   return o && o.length > 0 ? o : nodePath.join(nodeOs.homedir(), '.deva')
 }
 
+/**
+ * 应用版本：构建期由 scripts/build-web.mjs 从 apps/desktop/package.json 注入。
+ * 直接读 package.json 不行（构建产物 out/web 与源码树分离部署），所以走 esbuild define。
+ * 未注入时（直接 tsx 跑源码）回落 0.0.0，不会静默显示一个错误的老版本号。
+ */
+declare const __DEVA_VERSION__: string | undefined
+
+function currentVersion(): string {
+  try {
+    return typeof __DEVA_VERSION__ === 'string' ? __DEVA_VERSION__ : '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+}
+
 export const app = {
   isPackaged: false,
   runningUnderARM64Translation: false,
-  getVersion: (): string => '0.1.8-web',
+  getVersion: (): string => currentVersion(),
   getName: (): string => 'Deva Web',
   getPath: (name: string): string => {
     if (name === 'home') return nodeOs.homedir()

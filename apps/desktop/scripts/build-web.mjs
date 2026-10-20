@@ -25,6 +25,19 @@ const root = resolve(here, '..')
 const outDir = join(root, 'out', 'web')
 const require_ = createRequire(import.meta.url)
 
+/**
+ * 应用版本号：从 apps/desktop/package.json 读取，作为 `__APP_VERSION__` 注入渲染层。
+ * 绝不能写死 —— 写死会随上游升级失真（设置 → 关于 会一直显示老版本）。
+ */
+const appVersion = (() => {
+  try {
+    return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version ?? '0.0.0'
+  } catch {
+    console.warn('[build-web] 读不到 package.json 的 version，回落 0.0.0')
+    return '0.0.0'
+  }
+})()
+
 // 构建产物依赖外置（node_modules 就近解析；hoisted 布局下从 apps/desktop 起向上都能找到）
 const externalDeps = [
   'ws',
@@ -66,7 +79,8 @@ async function buildServer() {
     plugins: [shimPlugin],
     external: externalDeps,
     define: {
-      'process.env.NODE_ENV': '"production"'
+      'process.env.NODE_ENV': '"production"',
+      __DEVA_VERSION__: JSON.stringify(appVersion)
     },
     logLevel: 'info'
   })
@@ -118,7 +132,7 @@ async function buildRenderer() {
     },
     plugins: [react()],
     define: {
-      __APP_VERSION__: JSON.stringify('0.1.7')
+      __APP_VERSION__: JSON.stringify(appVersion)
     },
     build: {
       outDir: rendererOut,
