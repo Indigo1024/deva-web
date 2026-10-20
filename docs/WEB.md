@@ -1,25 +1,47 @@
-# Deva Web 版
+# Deva Web 改版 · 部署与维护
 
-把 Deva（原本只做桌面端 Electron）改造成**浏览器直接访问**的 Web 应用：一个 Linux 服务器跑起来，手机、平板、别人的电脑打开网址就能用，不用装客户端。
+把 [Deva](https://github.com/sqfcyily/deva) 桌面客户端搬到浏览器里用。
 
-本仓库基于上游 [sqfcyily/deva](https://github.com/sqfcyily/deva) 的 **v0.1.9**，在 `main` 分支上额外维护一层 Web 适配代码。
+> **这是非官方的第三方改版，不是 Deva 官方项目。**
+> 作者与上游开发者无关联，未获授权，也不代表上游立场。
+>
+> - 上游项目：**[sqfcyily/deva](https://github.com/sqfcyily/deva)**
+> - 上游官网：**https://sqfcyily.github.io/deva/**
+> - 上游许可：MIT
+>
+> 本仓库不发布 Electron 安装包，需要桌面客户端请去上游下载。
+
+本文档只讲**本改版自己的东西**：Web 层怎么搭的、怎么部署、怎么跟随上游更新。
+上游 Deva 本身有哪些功能，属于上游的成果，请查阅[上游项目](https://github.com/sqfcyily/deva)。
+
+当前跟随的上游版本：**v0.1.9**。
+
+---
+
+## 改版做了什么
+
+上游是 Electron 桌面应用，一人装一份。本改版把它改成 **一个 Node 进程 + 浏览器前端**，服务端装一次即可多设备访问。
+
+实现方式是**在 Electron 边界打替身**，不重写业务逻辑：构建时把 `'electron'` 模块替换成纯 Node 替身，让主进程服务代码原样运行；再把 preload 的 `window.deva` 经 WebSocket 一比一桥接到浏览器。
 
 ---
 
 ## 和桌面版的区别
 
-| | 桌面版 | Web 版（本仓库） |
+下表描述的是**运行形态的差异**，不是功能对比：
+
+| 维度 | 上游桌面版 | 本改版 |
 | --- | --- | --- |
 | 运行形态 | Electron 应用 | 纯 Node.js 进程 + 浏览器 |
-| 多设备 | 一人一台 | 一个服务，多人多设备 |
+| 分发方式 | 每人装一份 | 服务端一份，多设备访问 |
 | 登录 | 系统账户 | 用户名 + 强密码（scrypt）+ HttpOnly Cookie |
 | 文件选择器 | 系统原生对话框 | 服务端目录浏览（浏览服务器文件系统） |
-| 终端 | 本地 PTY | 服务器上的 PTY（**注意：等于给了服务器 shell**） |
+| 终端 | 本机 PTY | 服务器上的 PTY（**等于给了服务器 shell**） |
 | 系统通知 | 桌面通知 | 浏览器 Notification / 页面内提示 |
 | 交付文件 | 用默认应用打开 | 浏览器下载 |
 | 自动更新 | electron-updater | 不适用（更新 = 重新构建部署） |
 
-⚠️ **Web 版把桌面应用的完整权力搬到了浏览器**：agent 的文件工具**没有路径限制**，终端命令**没有命令白名单**。唯一的安全边界就是那道登录墙。**不要把这个服务暴露在公网且用弱密码**，也不要在多人共用的机器上跑。
+⚠️ **本改版把桌面应用的完整权力搬到了浏览器**：agent 的文件工具**没有路径限制**，终端命令**没有命令白名单**。唯一的安全边界就是那道登录墙。**不要把这个服务暴露在公网且用弱密码**，也不要在多人共用的机器上跑。
 
 ---
 
@@ -31,7 +53,7 @@
 git clone https://github.com/Indigo1024/deva-web.git
 cd deva-web
 
-pnpm install                       # 安装依赖（Electron 不会被下载，Web 版用不到）
+pnpm install                       # 安装依赖（Electron 不会被下载，本改版用不到）
 cd apps/desktop
 node scripts/gen-web-api.mjs       # 生成 window.deva 的 Web 桥接（改了 preload 就要重跑）
 node scripts/build-web.mjs         # 构建：服务端 bundle + 前端静态资源
@@ -162,7 +184,7 @@ location / {
 
 ## 架构
 
-Web 版没有重写业务逻辑，而是在 Electron 边界上做替身，让 `src/main/services/*`（约 1.7 万行）原样跑在纯 Node 里。
+本改版没有重写业务逻辑，而是在 Electron 边界上做替身，让 `src/main/services/*`（约 1.7 万行）原样跑在纯 Node 里。
 
 ```
 浏览器
@@ -292,7 +314,7 @@ function hideSplash() { if (splashGone) return; splashGone = true; ... }
 
 ## 维护：合并上游新版本
 
-本仓库同时是上游的 fork，合并上游是常规操作，但**必须做 Web 适配检查**。
+本仓库跟随上游发布同步（不是 GitHub 上的 fork，是独立仓库按版本合并）。合并本身是常规操作，但**必须做 Web 适配检查**。
 
 ```bash
 git fetch origin --tags
