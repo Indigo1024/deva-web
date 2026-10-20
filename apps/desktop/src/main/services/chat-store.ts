@@ -10,6 +10,7 @@ import {
 } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './config'
+import { hydrateMessages, mediaReplacer } from './media-store'
 import type { EffortLevel, Message } from '../providers/types'
 import type { CheckpointRec } from './checkpoints'
 import type { TodoEntry } from './todos'
@@ -122,11 +123,12 @@ export interface StoredSession {
   /**
    * 计划模式（plan mode）exit_plan 的决定态边车，按 toolUseId 记录用户对该计划的决定。
    * 计划正文可从 tool_use 入参（input.plan）重解析还原，故此边车**只需记决定态**（同 proposals）：
-   * 'approve'=已批准（该回合已退出计划模式转执行）/'keep'=用户选择继续完善/null=中止未决。
+   * 'approve'=已批准（该回合已退出计划模式转执行）/'keep'=用户选择继续完善/'ignore'=用户忽略该计划/
+   * null=中止未决。feedback = 继续完善时用户在卡上写的回复（未写则缺省）。
    * 缺省即未决（pending）。按 toolUseId 记录，压缩重排 messages 时无需调整。
    * 见 chat.ts:toDisplayMessages / runTurn 的 onPlanDecided。
    */
-  plans?: Record<string, { decision: 'approve' | 'keep' | null }>
+  plans?: Record<string, { decision: 'approve' | 'keep' | 'ignore' | null; feedback?: string }>
   /**
    * 定时任务确认名片（create_task 提议）的终态边车，按 toolUseId 记录用户对该名片的决定。
    * 名片本体随 Message[] 天然存活（tool_use 入参含 title/kind/prompt/schedule），但其「已创建 / 已忽略」
@@ -319,6 +321,7 @@ function loadSessionFile(id: string): StoredSession | undefined {
   try {
     const s = JSON.parse(readFileSync(fileForId(id), 'utf8')) as StoredSession
     if (s && typeof s.id === 'string') {
+      if (Array.isArray(s.messages)) hydrateMessages(s.messages)
       sessionCache.set(id, s)
       return s
     }
@@ -336,7 +339,8 @@ export function save(id: string): void {
   const s = sessionCache.get(id)
   if (!s) return
   try {
-    writeFileAtomic(fileForId(id), JSON.stringify(s, null, 2))
+    // 图片 / PDF 的 base64 外置为 blob 引用（见 media-store.ts），对话文件只留哈希。
+    writeFileAtomic(fileForId(id), JSON.stringify(s, mediaReplacer, 2))
   } catch {
     /* 单条对话落盘失败静默，不影响内存态 */
     return
@@ -395,6 +399,20 @@ export function ensureSession(
     if (opts && opts.effort !== undefined) s.effort = opts.effort
   }
   return s
+}
+
+/**
+ * 改绑对话角色：仅当当前绑定的是 `from` 时改为 `to`，返回是否改动。常规对话的角色一次性绑定
+ * （见 ensureSession）；这里只供「绑定的角色被删、由别的角色接管」时用。不动 updatedAt，列表顺序不变。
+ */
+export function rebindSessionPersona(id: string, from: string, to: string): boolean {
+  // 先查索引：不相干的对话不必读整份历史。
+  if (ensureIndex().get(id)?.personaId !== from) return false
+  const s = loadSessionFile(id)
+  if (!s || s.personaId !== from) return false
+  s.personaId = to
+  save(id)
+  return true
 }
 
 /** 删除某对话：清缓存 + 索引 + 磁盘文件。 */

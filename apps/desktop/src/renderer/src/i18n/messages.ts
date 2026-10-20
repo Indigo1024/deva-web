@@ -231,6 +231,9 @@ const zhCN: MessageTree = {
       compacted: '较早的对话已压缩为摘要，以节省上下文。',
       compactNone: '当前对话较短，无需压缩。',
       compactFailed: '压缩失败，历史保持不变。',
+      contextLimitLearned:
+        '服务商返回该模型的实际上下文上限约为 {n}，此后将按此判断何时压缩。可在「设置 › 模型」中调整该模型的上下文窗口。',
+      outputLimitRejected: '服务商不接受所设的最大输出长度，已按 {n} 重发。可在「设置 › 模型」中调整。',
       restored: '已将代码回滚到较早的检查点，对话保留；下一条消息会告知模型这些文件已恢复。',
       aborted: '已停止本轮回复，以上为停止前已产出的内容。'
     },
@@ -413,11 +416,17 @@ const zhCN: MessageTree = {
       cardTitle: '待批准的计划',
       approve: '批准并执行',
       keep: '继续完善',
+      ignore: '忽略',
       approved: '已批准',
       kept: '继续完善',
+      ignored: '已忽略',
       cancelled: '已取消',
       expand: '展开计划',
-      collapse: '收起计划'
+      collapse: '收起计划',
+      feedbackPlaceholder: '输入修改意见或问题，回车提交，Shift+回车换行',
+      sendFeedback: '提交',
+      back: '返回',
+      feedbackLabel: '回复'
     },
     mount: {
       cardTitle: '需要挂载工作区',
@@ -542,6 +551,8 @@ const zhCN: MessageTree = {
       downloadInstaller: '下载安装包',
       manualHintMac: '下载后打开安装包，先退出 Deva，再把 Deva 拖进「应用程序」替换旧版。',
       manualHint: '下载后运行安装包，直接覆盖安装即可。',
+      downloadPortable: '下载便携版',
+      portableHint: '下载后退出 Deva，解压新版本并替换原文件夹即可，设置与对话不受影响。',
       downloading: '正在下载 {percent}%',
       downloaded: '新版本 {version} 已下载',
       install: '重启并安装',
@@ -607,7 +618,22 @@ const zhCN: MessageTree = {
     selectProvider: '供应商',
     presetCustomOption: '自定义（手动配置）',
     selectProviderHint: '选择官方供应商可一键套用地址、协议与模型清单',
-    applyPresetConfirm: '套用该供应商预置将替换当前模型清单，确定继续？'
+    applyPresetConfirm: '套用该供应商预置将替换当前模型清单，确定继续？',
+    editModel: '编辑模型',
+    backTo: '返回 {name}',
+    displayName: '模型名称',
+    displayNameHint: '仅用于显示，请求使用模型 ID：{id}',
+    contextWindow: '上下文窗口',
+    contextWindowHint: '用量达约 75% 时自动压缩历史。可下拉选择，或直接输入 200K、1M 等。',
+    maxOutput: '最大输出长度',
+    maxOutputHint: '单次回复的 token 上限。可下拉选择，或直接输入 32K、64K、128K 等。',
+    providerDefault: '服务商默认',
+    limitAuto: '自动 · {v}',
+    limitCustom: '自定义',
+    limitInvalid: '请输入 {min} 至 {max} 之间的 token 数',
+    windowTooSmall: '上下文窗口须大于最大输出长度（{n}）',
+    outputTooLarge: '最大输出长度须小于上下文窗口（{n}）',
+    resetModel: '恢复默认'
   },
   status: {
     ready: '就绪',
@@ -869,7 +895,7 @@ const zhCN: MessageTree = {
       commitPlaceholder: '填写提交信息…',
       commitDo: '提交',
       aiGenerate: 'AI 生成',
-      aiGenerating: '生成中…',
+      aiStop: '停止生成',
       aiHint: '用当前模型据改动生成提交信息',
       aiNoModel: '需先在设置中配置可用模型与密钥',
       err: {
@@ -1204,6 +1230,10 @@ const en: MessageTree = {
       compacted: 'Earlier conversation was compacted into a summary to save context.',
       compactNone: 'This conversation is still short — nothing to compact.',
       compactFailed: 'Compaction failed; history is unchanged.',
+      contextLimitLearned:
+        "The provider reports this model's actual context limit as about {n}; it will be used from now on to decide when to compact. You can adjust the context window under Settings › Models.",
+      outputLimitRejected:
+        'The provider rejected the configured max output length; retried with {n}. You can adjust it under Settings › Models.',
       restored:
         'Code was rolled back to an earlier checkpoint; the conversation is kept. Your next message will tell the model which files were restored.',
       aborted: 'Response stopped. Everything above was produced before stopping.'
@@ -1381,11 +1411,17 @@ const en: MessageTree = {
       cardTitle: 'Plan for review',
       approve: 'Approve & run',
       keep: 'Keep planning',
+      ignore: 'Ignore',
       approved: 'Approved',
       kept: 'Kept planning',
+      ignored: 'Ignored',
       cancelled: 'Cancelled',
       expand: 'Show plan',
-      collapse: 'Hide plan'
+      collapse: 'Hide plan',
+      feedbackPlaceholder: 'Enter changes or questions. Enter to submit, Shift+Enter for a new line',
+      sendFeedback: 'Submit',
+      back: 'Back',
+      feedbackLabel: 'Reply'
     },
     mount: {
       cardTitle: 'Workspace needed',
@@ -1516,6 +1552,9 @@ const en: MessageTree = {
       manualHintMac:
         'Open the downloaded installer, quit Deva, then drag Deva into Applications to replace the old version.',
       manualHint: 'Run the downloaded installer to install over the current version.',
+      downloadPortable: 'Download portable version',
+      portableHint:
+        'Quit Deva, then extract the new version and replace the old folder. Your settings and conversations are not affected.',
       downloading: 'Downloading {percent}%',
       downloaded: 'Version {version} downloaded',
       install: 'Restart and install',
@@ -1583,7 +1622,24 @@ const en: MessageTree = {
     selectProvider: 'Provider',
     presetCustomOption: 'Custom (configure manually)',
     selectProviderHint: 'Pick an official provider to auto-fill host, protocol and model list',
-    applyPresetConfirm: 'Applying this preset will replace the current model list. Continue?'
+    applyPresetConfirm: 'Applying this preset will replace the current model list. Continue?',
+    editModel: 'Edit model',
+    backTo: 'Back to {name}',
+    displayName: 'Model name',
+    displayNameHint: 'Display only. Requests use model ID: {id}',
+    contextWindow: 'Context window',
+    contextWindowHint:
+      'History is compacted at ~75% usage. Pick from the list or type a value such as 200K or 1M.',
+    maxOutput: 'Max output length',
+    maxOutputHint:
+      'Token limit per reply. Pick from the list or type a value such as 32K, 64K or 128K.',
+    providerDefault: 'provider default',
+    limitAuto: 'Auto · {v}',
+    limitCustom: 'Custom',
+    limitInvalid: 'Enter a token count between {min} and {max}',
+    windowTooSmall: 'Must be larger than the max output length ({n})',
+    outputTooLarge: 'Must be smaller than the context window ({n})',
+    resetModel: 'Reset to defaults'
   },
   status: {
     ready: 'Ready',
@@ -1844,7 +1900,7 @@ const en: MessageTree = {
       commitPlaceholder: 'Enter a commit message…',
       commitDo: 'Commit',
       aiGenerate: 'AI generate',
-      aiGenerating: 'Generating…',
+      aiStop: 'Stop generating',
       aiHint: 'Generate a commit message from the changes using the current model',
       aiNoModel: 'Configure an available model and API key in Settings first',
       err: {

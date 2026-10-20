@@ -2718,6 +2718,56 @@ textarea {
   gap: var(--space-2);
   margin-top: var(--space-3);
 }
+/* 右侧按钮组（忽略 / 批准并执行、提交）：左侧只留「继续完善 / 返回」。 */
+.msg__plan-actions-end {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+/* 「继续完善」展开的回复输入框：观感同问答卡的自由输入框，多行可拖高。 */
+.msg__plan-refine {
+  margin-top: var(--space-3);
+}
+.msg__plan-refine .msg__plan-actions {
+  margin-top: var(--space-2);
+}
+.msg__plan-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 64px;
+  padding: var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+}
+.msg__plan-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* 已决态回显用户写的回复：收起时也常显，左侧竖线标出是用户原话。 */
+.msg__plan-feedback {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-2);
+  padding-left: var(--space-2);
+  border-left: 2px solid var(--border-strong);
+  font-size: 13px;
+}
+.msg__plan-feedback-label {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.msg__plan-feedback-text {
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 /* 挂载工作区请求卡：与计划卡同构（accent 观感、is-decided 淡化），正文是纯文本说明而非 Markdown。 */
 .msg__mount {
   border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
@@ -4207,6 +4257,109 @@ button.projmenu__item:disabled {
   background: var(--bg-inset);
   color: var(--fg-muted);
   font-size: 10px;
+}
+/* 改过显示名时，名称后附真实模型 ID */
+.model-row__id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--fg-subtle);
+}
+
+/* 模型详情页（模型名称 / 上下文窗口 / 最大输出长度） */
+/* token 上限：组合输入框（输入 + 单位 + 下拉档位），始终一行 */
+.model-limit {
+  position: relative;
+  max-width: 280px;
+}
+.model-limit__box {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.model-limit__box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.model-limit__input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--space-3);
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  font-family: inherit;
+}
+/* 占位文字即自动值，比常规占位稍深，读作「当前生效值」 */
+.model-limit__input::placeholder {
+  color: var(--fg-muted);
+}
+.model-limit__unit {
+  padding-right: var(--space-2);
+  font-size: 12px;
+  color: var(--fg-subtle);
+}
+.model-limit__toggle {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 100%;
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: transparent;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.model-limit__toggle:hover,
+.model-limit__toggle.is-open {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.model-limit__menu {
+  /* 位置由组件按输入框实时计算（fixed，不撑开滚动区） */
+  position: fixed;
+  z-index: 50;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow);
+  animation: deva-pick-pop 0.14s ease;
+}
+.model-limit__sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border);
+}
+.model-limit__exact {
+  margin-left: var(--space-2);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--fg-subtle);
+}
+.model-limit__badge {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: var(--radius-full);
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 500;
+}
+.model-detail__reset {
+  max-width: 620px;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
 }
 
 /* 服务商详情：可编辑名称 / 删除 / 无钥提醒 */

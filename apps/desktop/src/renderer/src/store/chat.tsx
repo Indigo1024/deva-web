@@ -22,6 +22,7 @@ import { useI18n } from '../i18n/i18n'
 import { useToast } from '../components/ToastProvider'
 import { useModels, findActive, hasUsableModel } from './models'
 import { useWorkspace } from './workspace'
+import { formatTokens } from '../../../shared/context'
 
 /**
  * 会话状态（渲染层）。
@@ -149,7 +150,9 @@ export type ChatBlock =
       kind: 'plan'
       key: string
       plan: string
-      decided?: 'approve' | 'keep' | 'cancelled'
+      decided?: 'approve' | 'keep' | 'ignore' | 'cancelled'
+      /** 选「继续完善」时用户在卡上写的回复（未写则缺省），已决态在卡上回显。 */
+      feedback?: string
     }
   | {
       /**
@@ -275,7 +278,13 @@ type DisplayBlock =
       taskId?: string
     }
   | { kind: 'ask'; id: string; questions: AskQuestion[]; answers?: string[] | null }
-  | { kind: 'plan'; id: string; plan: string; decision: 'approve' | 'keep' | 'cancelled' }
+  | {
+      kind: 'plan'
+      id: string
+      plan: string
+      decision: 'approve' | 'keep' | 'ignore' | 'cancelled'
+      feedback?: string
+    }
   | { kind: 'todolist'; id: string; title: string; items: TodoItem[] }
 type DisplayMessage =
   | { role: 'user'; text: string; attachments: { name: string; kind: AttachKind }[]; notify?: true }
@@ -318,6 +327,8 @@ type StreamEvent =
       reason: 'truncated' | 'empty' | 'context' | 'output_limit' | 'effort'
       attempt: number
       max: number
+      /** context：报错里解析出的真实窗口；output_limit：用户所设上限被拒后降到的值（见主进程 chat.ts）。 */
+      limit?: number
     }
   | { type: 'stream_reset' }
   | { type: 'error'; kind: string; message: string }
@@ -332,7 +343,8 @@ type StreamEvent =
       key: string
       kind: 'ask' | 'plan' | 'mount'
       answers?: string[] | null
-      decision?: 'approve' | 'keep' | null
+      decision?: 'approve' | 'keep' | 'ignore' | null
+      feedback?: string
       path?: string | null
     }
   | {
@@ -360,7 +372,11 @@ function resolveCard(
     if (ev.kind === 'ask' && b.kind === 'ask' && b.key === ev.key && !b.answers)
       return { ...b, answers: ev.answers ?? [] }
     if (ev.kind === 'plan' && b.kind === 'plan' && b.key === ev.key && !b.decided)
-      return { ...b, decided: ev.decision ?? ('cancelled' as const) }
+      return {
+        ...b,
+        decided: ev.decision ?? ('cancelled' as const),
+        ...(ev.feedback ? { feedback: ev.feedback } : {})
+      }
     if (ev.kind === 'mount' && b.kind === 'mount' && b.key === ev.key && !b.decided)
       return { ...b, decided: ev.path ? ('mounted' as const) : ('skipped' as const), root: ev.path ?? undefined }
     return b
@@ -447,7 +463,7 @@ interface ChatContextValue {
    * 回应 exit_plan 计划审阅（approve=批准并执行 / keep=继续完善），并把该计划卡就地收敛为已决态。
    * approve 后主进程循环继续、按计划执行；无渲染层临时态需清除。
    */
-  respondPlan: (key: string, decision: 'approve' | 'keep') => void
+  respondPlan: (key: string, decision: 'approve' | 'keep' | 'ignore', feedback?: string) => void
   /**
    * 回应「请求挂载工作区」：path=用户已选目录（调用方须先经 fs.openFolder 受信）、null=暂不挂载。
    * 挂载成功时**同步更新本对话绑定覆盖层**（等价于 mountFocus）——否则下次 chat:send 会用旧覆盖层
@@ -530,7 +546,14 @@ function displayToMessages(dms: DisplayMessage[]): ChatMessage[] {
         return { kind: 'ask', key: b.id, questions: b.questions, answers: b.answers === null ? [] : b.answers }
       // 历史回填：exit_plan 计划卡。主进程已把 decision 归一为终态（approve/keep/cancelled），此处原样
       // 复原为只读展示——历史里的计划卡必定属于已结束的回合，画出按钮只会是点不动的摆设。
-      if (b.kind === 'plan') return { kind: 'plan', key: b.id, plan: b.plan, decided: b.decision }
+      if (b.kind === 'plan')
+        return {
+          kind: 'plan',
+          key: b.id,
+          plan: b.plan,
+          decided: b.decision,
+          ...(b.feedback ? { feedback: b.feedback } : {})
+        }
       // 历史回填：已完成的待办清单卡（条目取自主进程 todos 边车里令其完成的那次快照）。
       if (b.kind === 'todolist') return { kind: 'todolist', id: b.id, title: b.title, items: b.items }
       const status: ToolStatus = b.status === 'error' ? 'error' : b.status === 'running' ? 'running' : 'ok'
@@ -1328,6 +1351,18 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
           ...r,
           reconnecting: { attempt: ev.attempt, max: ev.max, reason: ev.reason }
         }))
+        // 自愈用到的上限与模型设置不符（窗口实际更小 / 所设输出上限被拒）：横幅转瞬即逝，另弹 toast
+        // 说明实际值并指向模型设置，用户才知道该去改哪里。
+        if (ev.limit && (ev.reason === 'context' || ev.reason === 'output_limit'))
+          toast.show({
+            variant: 'warning',
+            message: tRef.current(
+              ev.reason === 'context'
+                ? 'chat.notice.contextLimitLearned'
+                : 'chat.notice.outputLimitRejected'
+            ).replace('{n}', formatTokens(ev.limit)),
+            duration: 8000
+          })
         return
       }
       // 重连即将重跑当前步骤：丢弃这一步已画出的残缺尾部，避免重复内容。
@@ -1803,16 +1838,21 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       )
     }
 
-    const respondPlan = (key: string, decision: 'approve' | 'keep'): void => {
+    const respondPlan = (key: string, decision: 'approve' | 'keep' | 'ignore', feedback?: string): void => {
       const sid = sessionIdRef.current
-      // 计划卡属当前所视会话 → 就地收敛为已决态。
+      const fb = decision === 'keep' ? feedback?.trim() || undefined : undefined
+      // 计划卡属当前所视会话 → 就地收敛为已决态（连同回复一起回显）。
       patchCardBlocks(sid, (blocks) =>
-        blocks.map((b) => (b.kind === 'plan' && b.key === key ? { ...b, decided: decision } : b))
+        blocks.map((b) =>
+          b.kind === 'plan' && b.key === key
+            ? { ...b, decided: decision, ...(fb ? { feedback: fb } : {}) }
+            : b
+        )
       )
       // 主进程回 {ok:false} = 这把待决键已经没人接了（回合早已结束）→ 把卡片改记为「已取消」，
       // 而不是留一个看起来生效、实则什么都没发生的「已批准」。
       void (async () => {
-        const r = await window.deva.chat.respondPlan({ key, decision })
+        const r = await window.deva.chat.respondPlan({ key, decision, ...(fb ? { feedback: fb } : {}) })
         if (r?.ok) return
         patchCardBlocks(sid, (blocks) =>
           blocks.map((b) =>

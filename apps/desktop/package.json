@@ -1,6 +1,6 @@
 {
   "name": "@deva/desktop",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Deva 桌面应用",
   "main": "./out/main/index.js",
   "author": "sqfcy",
@@ -44,7 +44,7 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "33.4.11",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.17.0",
     "electron-vite": "^2.3.0",
     "typescript": "^5.7.2",
     "vite": "^5.4.11"

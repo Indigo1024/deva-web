@@ -13,6 +13,7 @@ import {
   type ToolSpec
 } from '../providers/types'
 import { clampEffort, effortRequest, type EffortRequest } from '../../shared/effort'
+import { OUTPUT_BUDGET_SAFE, autoOutputBudget } from '../../shared/context'
 import {
   executeTool,
   isMcpTool,
@@ -47,8 +48,13 @@ import {
   subagentIdFor,
   type SubagentRecord
 } from './subagent-store'
-import { enabledPersonas, getPersona } from './personas'
-import { resolveDefaultModel, resolveModelRef, resolveModelRefOrNull } from './model-resolve'
+import { DEFAULT_PERSONA_ID, enabledPersonas, getPersona } from './personas'
+import {
+  modelOverrides,
+  resolveDefaultModel,
+  resolveModelRef,
+  resolveModelRefOrNull
+} from './model-resolve'
 import { sealedDecision } from './sealed'
 import { createTask, type CreateTaskResult } from './tasks'
 import type { TaskCreateInput, TaskRecord } from './tasks-types'
@@ -77,6 +83,7 @@ import {
   type StoredNotice,
   type StoredSession
 } from './chat-store'
+import { trimHistoryImages } from './image-trim'
 import { ATTACH_TEXT_PREFIX, buildAttachmentPart } from './attachments'
 import {
   applyFiles,
@@ -108,6 +115,7 @@ import {
   needsCompaction,
   needsCompactionMidTurn,
   NOTIFY_MARKER,
+  rememberContextLimit,
   stripMarker,
   type CompactModelConfig,
   type CompactStatus
@@ -314,8 +322,15 @@ type DisplayBlock =
    * decision 由 StoredSession.plans 边车还原：'approve'/'keep' = 用户的决定；'cancelled' = 中止 / 未决。
    * **恒为终态、绝不留「待批准」**：历史重建只发生在回合结束之后，主进程的 pendingPlan 待决键早已随
    * 回合解开删除（且重建卡用的是 toolUseId，本就与那把键不同名），此时若还画出按钮，点了必然石沉大海。
+   * feedback = 选「继续完善」时用户在卡上写的回复（边车同记）；未写则缺省。
    */
-  | { kind: 'plan'; id: string; plan: string; decision: 'approve' | 'keep' | 'cancelled' }
+  | {
+      kind: 'plan'
+      id: string
+      plan: string
+      decision: 'approve' | 'keep' | 'ignore' | 'cancelled'
+      feedback?: string
+    }
   /**
    * 已完成的待办清单卡：画在令清单全部完成的那次 todo_write 处，条目取自 todos 边车里该次写入的快照。
    * 其余 todo_write 调用在对话流里不画（进度只在输入框上方的胶囊里显示）。
@@ -351,7 +366,7 @@ function toDisplayMessages(
   notices: StoredNotice[] = [],
   asks: Record<string, { answers: string[] | null }> = {},
   summaries: Record<string, string> = {},
-  plans: Record<string, { decision: 'approve' | 'keep' | null }> = {},
+  plans: NonNullable<StoredSession['plans']> = {},
   autotasks: Record<string, { status: 'created' | 'dismissed'; taskId?: string }> = {},
   todos: TodoEntry[] = [],
   /** 子智能体 id → 类型与任务标题（来自子智能体记录索引），给续聊卡补标题。 */
@@ -455,7 +470,8 @@ function toDisplayMessages(
                 ? (plans[p.id].decision ?? 'cancelled')
                 : resultIds.has(p.id)
                   ? 'keep'
-                  : 'cancelled'
+                  : 'cancelled',
+              ...(plans[p.id]?.feedback ? { feedback: plans[p.id].feedback } : {})
             })
           else if (kind === 'todo_write') {
             // 只有令清单全部完成的那次写入落成「已完成清单」卡；其余写入不画（进度在胶囊里）。
@@ -784,8 +800,13 @@ export interface AskResponse {
 /** 用户对 exit_plan 计划审阅的决定：approve=批准并执行 / keep=继续完善。 */
 export interface PlanResponse {
   key: string
-  decision: 'approve' | 'keep'
+  decision: 'approve' | 'keep' | 'ignore'
+  /** 选「继续完善」时在卡上直接写的回复；缺省 / 空 = 未写，等用户下一条消息再给。 */
+  feedback?: string
 }
+
+/** 计划审阅的结果（PlanResponse 去掉键，feedback 已清洗：仅 keep 且非空时才有）。 */
+type PlanVerdict = { decision: 'approve' | 'keep' | 'ignore'; feedback?: string }
 
 /** 用户对「请求挂载工作区」的回应：path=已选目录（渲染层已经 fs.openFolder 受信）；null=暂不挂载。 */
 export interface MountResponse {
@@ -971,8 +992,10 @@ export type ChatStreamEvent =
    * truncated=输出撞上长度上限，已引导模型续写 / 拆小；empty=上一步无任何输出，已追问；
    * context=上下文超限，已压缩后重试；output_limit=输出预算超出模型允许范围，已降档重发；
    * effort=模型 / 网关不认所选思考等级，已去掉该参数重发。
+   * limit：context 时 = 报错里解析出的真实窗口（比配置小才带）；output_limit 时 = 降档后的输出上限
+   * （仅当被拒的是用户在模型详情页填的值才带）。渲染层据此弹 toast，提示去模型设置里改。
    */
-  | { type: 'auto_retry'; reason: AutoRetryReason; attempt: number; max: number }
+  | { type: 'auto_retry'; reason: AutoRetryReason; attempt: number; max: number; limit?: number }
   | { type: 'error'; kind: string; message: string }
   /**
    * 上下文压缩结果（自动或手动 /compact）。渲染层据此在助手气泡追加软提示块；
@@ -989,7 +1012,9 @@ export type ChatStreamEvent =
       key: string
       kind: 'ask' | 'plan' | 'mount'
       answers?: string[] | null
-      decision?: 'approve' | 'keep' | null
+      decision?: 'approve' | 'keep' | 'ignore' | null
+      /** 计划卡「继续完善」时附的回复。 */
+      feedback?: string
       path?: string | null
     }
   /**
@@ -1029,22 +1054,29 @@ const RECONNECT_MAX_DELAY_MS = 30_000
 export type AutoRetryReason = 'truncated' | 'empty' | 'context' | 'output_limit' | 'effort'
 
 /**
- * 每步输出预算（max_tokens）。旧的固定 8192 对带思考的新模型太小：思考吃光预算、一字未出就撞限，
- * 回合戛然而止（sess_muje1nu3_a 即此例）。Claude 系给宽裕值；其余维持原先的适配器默认，
- * 以免撞上不认大预算的网关。某模型拒绝该预算（400 output_limit）则进程内记住，降回保守值。
+ * 每步输出预算（max_tokens）：用户在模型详情页填的值 > 自动（shared/context.ts 的 autoOutputBudget：
+ * Claude 系 32K——旧的固定 8192 对带思考的新模型太小，思考吃光预算、一字未出就撞限，sess_muje1nu3_a
+ * 即此例；其余维持适配器 / 服务商默认，以免撞上不认大预算的网关）。
+ * 某模型拒绝该预算（400 output_limit）则进程内记住，降回保守值。键带预算值：用户改了设置就按新值重试。
  */
-const OUTPUT_BUDGET_WIDE = 32_000
-const OUTPUT_BUDGET_SAFE = 8192
-const outputBudgetDowngraded = new Set<string>()
-function outputBudget(model: { providerId: string; model: string }): number | undefined {
-  const key = `${model.providerId}:${model.model}`
-  if (outputBudgetDowngraded.has(key)) return OUTPUT_BUDGET_SAFE
-  return /claude/i.test(model.model) ? OUTPUT_BUDGET_WIDE : undefined
+const outputBudgetRejected = new Set<string>()
+function wantedOutputBudget(model: ChatModelConfig): number | undefined {
+  return (
+    modelOverrides(model.providerId, model.model).maxOutput ??
+    autoOutputBudget(model.adapter, model.model)
+  )
+}
+function outputBudgetKey(model: ChatModelConfig, budget: number | undefined): string {
+  return `${model.providerId}:${model.model}:${budget ?? 'default'}`
+}
+function outputBudget(model: ChatModelConfig): number | undefined {
+  const want = wantedOutputBudget(model)
+  return outputBudgetRejected.has(outputBudgetKey(model, want)) ? OUTPUT_BUDGET_SAFE : want
 }
 
 /**
  * 被拒过的思考等级（键 `providerId:model:level`）：某模型 / 网关不认该档参数（400 effort_unsupported）则进程内
- * 记住，此后按「默认」发（不带参数），同 outputBudgetDowngraded。键带档位：OpenAI 系常只缺 xhigh，换低一档仍可用。
+ * 记住，此后按「默认」发（不带参数），同 outputBudgetRejected。键带档位：OpenAI 系常只缺 xhigh，换低一档仍可用。
  */
 const effortRejected = new Set<string>()
 function effortKey(model: { providerId: string; model: string }, level: EffortLevel): string {
@@ -1151,7 +1183,7 @@ const pendingAsk = new Map<
 /** 待用户批准的 exit_plan 计划审阅（键 → resolve + 所属轮次）；null 表示取消/中止。 */
 const pendingPlan = new Map<
   string,
-  { resolve: (decision: 'approve' | 'keep' | null) => void; turnId: string; sessionId: string }
+  { resolve: (verdict: PlanVerdict | null) => void; turnId: string; sessionId: string }
 >()
 /** 待用户处理的「请求挂载工作区」（键 → resolve + 所属轮次）；null 表示暂不挂载/取消/中止。 */
 const pendingMount = new Map<
@@ -1431,7 +1463,7 @@ function systemPrompt(
     '【工程纪律】① 只做用户要求的事：不擅自加功能、不做没要求的重构或「顺手优化」，也不为不可能发生的情况堆防御代码；修 bug 就修 bug。② 改代码先读周边：贴合所在文件既有的命名、风格、惯用写法与注释密度，优先复用现有函数与工具，不另起炉灶。③ 如实汇报：改完能验证就验证（跑类型检查、测试或构建）；测试失败就说失败并给出关键输出，跳过了哪步就说跳过了，没验证过的不要说成「已完成、已通过」。④ 提到代码位置时用「路径:行号」的写法，方便用户定位。',
     `【执行与安全边界】写入/修改文件、执行命令都无需任何授权：直接调用对应工具即可，本应用没有授权弹框。文件读写与命令执行均不设任何限制（工作区外、主目录、隐藏目录、.git 均可直接读写，任何命令都会直接执行），删除、覆盖、强推等破坏性操作执行前请自行核对目标无误。切勿在回复文字里询问「是否允许写入 / 是否同意覆盖 / 请确认」之类的话：不存在授权界面，用户也无法用文字给你授权，这只会让任务白白停滞——需要用户拍板时用 ask_user。`,
     '【决策与澄清】当需求确有歧义、存在多个各有取舍的可行方案需用户抉择、或缺少无法合理默认的关键信息时，调用 ask_user 抛出一个或多个问题（每题可给候选项、可单选或多选，界面另有内置「自己输入」入口），用户在同一张卡片里一次性作答后回灌给你再继续；能合理默认就直接做，别为琐碎选择打断用户。注意区分：ask_user 只用于征求决策/澄清；写入与执行本就无需授权，切勿用它去问「是否允许写入/执行」。',
-    '【计划先行】遇到非平凡的实现类任务（新功能、跨多文件改动、有多个各有取舍的方案、或需求尚不明确等），先用只读工具（read_file / list_dir / glob / grep / web_fetch）充分调研理解现状——调研面较大时（要翻多个目录、追多条调用链、或需摸清一整套既有约定）可先用 `run_subagent` 派发 `Plan` 子智能体在隔离上下文里完成调研并带回方案要点，再由你综合判断——然后调用 `exit_plan` 提交一份面向用户批准的完整实施计划（Markdown）；**在计划获批前不要写入文件或执行命令**。用户批准后你直接按计划执行、无需再次征求授权；用户若选择继续完善，请依其反馈调整后再重新提交，在收到新反馈前不要重复调用 exit_plan。琐碎、单点、只读或答疑类任务直接做，不必先出计划。',
+    '【计划先行】遇到非平凡的实现类任务（新功能、跨多文件改动、有多个各有取舍的方案、或需求尚不明确等），先用只读工具（read_file / list_dir / glob / grep / web_fetch）充分调研理解现状——调研面较大时（要翻多个目录、追多条调用链、或需摸清一整套既有约定）可先用 `run_subagent` 派发 `Plan` 子智能体在隔离上下文里完成调研并带回方案要点，再由你综合判断——然后调用 `exit_plan` 提交一份面向用户批准的完整实施计划（Markdown）；**在计划获批前不要写入文件或执行命令**。提交前若仍有影响方案的未决问题（包括 Plan 子智能体标注的不确定项），先用 ask_user 问清，得到答复后再提交；计划里不得留有待用户回答的问题，确需假设的写成「默认采用 X」，也不要用 ask_user 询问「计划是否可行」。用户批准后你直接按计划执行、无需再次征求授权；用户若选择继续完善，请依其回复（随结果附上，或在用户下一条消息里）回应、需要时调整后再重新提交，在收到回复前不要重复调用 exit_plan；用户若忽略计划，不要执行也不要重新提交。琐碎、单点、只读或答疑类任务直接做，不必先出计划。',
     '【任务清单】执行需要 3 步及以上的任务时（尤其是计划获批后开始执行、或用户一次交代了多件事），先用 `todo_write` 列出待办清单，界面会在输入框上方以进度胶囊实时显示给用户；执行中持续更新：同一时刻只保留一项 in_progress，做完一项立即标为 completed，发现新步骤随时补进清单。每次调用传完整清单。任务被暂停、用户转向别的事而不再进行当前清单时，调用 todo_write 传 cancel: true 取消它。单步、琐碎或纯答疑的任务不要建清单。'
   ]
   if (skills.length) {
@@ -1530,6 +1562,7 @@ function buildSubagentTool(): ToolSpec {
       '任务对得上下面某种子智能体、有彼此独立可以并行的工作、或者回答需要跨多个文件阅读时，交给子智能体——你拿回结论，而不是一堆文件内容。已经知道具体文件、符号或取值的单点查找，直接自己查。检索交出去之后就不要自己再做一遍，等它的结论。' +
       '彼此独立的多项工作，在同一条回复里发起多个调用，它们会并行执行。' +
       '除 fork 外，子智能体看不到主对话，prompt 要写清背景、目标和期望的回报形式；派 Explore 时在 prompt 里说明检索力度（「中等」或「非常彻底」）。' +
+      '在 prompt 里写明期望它只做调研，还是动手修改文件或执行有副作用的命令——没说清时它可能多做或少做。' +
       '子智能体的结论不会直接显示给用户，把要紧的部分转述给用户。' +
       '结论末尾附有子智能体 ID：用 send_to_subagent 给它发消息，它会在保留原有上下文的基础上继续；再次调用 run_subagent 则是全新开始。' +
       '前台还是后台：需要它的结论才能往下做时用前台（默认），调用会等它跑完再返回；手头确有不依赖其结论、可以同时推进的工作时，设 run_in_background 让它在后台跑——调用立即返回，它结束后系统会自动通知你。后台运行期间不要轮询、等待或去查它的进度，接着做别的事或先回复用户。它的结论只会以系统通知的形式送达，送达之前绝不要猜测或编造它的结果；用户若在此期间问起，如实说它还在运行。' +
@@ -1683,6 +1716,10 @@ function skillDirNote(dir: string | undefined): string {
     : ''
 }
 
+/** 子智能体与 fork 共用：动过手就在结论里附改动清单（主智能体看不到其过程）。 */
+const CHANGE_REPORT_RULE =
+  '若写入了文件或执行了有副作用的命令，在结论中逐条列出：改了哪些文件（绝对路径）、各做了什么改动、执行了哪些命令及结果摘要——主智能体看不到你的过程，要靠这份清单接着做并向用户如实转述。'
+
 /**
  * fork 的起始历史：主对话历史的浅拷贝（消息对象按不可变对待、与主对话共享）+ 一条合成的回灌消息。
  * 派发时主历史的末条是本步含全部 tool_use 的 assistant 消息，协议要求每个 tool_use 紧跟结果：本次 fork
@@ -1711,7 +1748,9 @@ export function buildForkHistory(history: Message[], forkCallId: string, prompt:
         type: 'text',
         text:
           '你是主智能体派生出的分身（fork），上面是你们共享的全部对话。现在只专注完成下面这项子任务：' +
-          '直接动手，不要再派发子智能体，也不要向用户提问；完成后给出简洁的结论，作为交回主智能体的答复。\n\n任务：' +
+          '直接动手，不要再派发子智能体，也不要向用户提问；完成后给出简洁的结论，作为交回主智能体的答复。' +
+          CHANGE_REPORT_RULE +
+          '\n\n任务：' +
           prompt
       }
     ]
@@ -1762,6 +1801,7 @@ function buildSubagentSystem(def: SubagentDef, workspaceRoot: string | null): st
     loc,
     '请只专注完成这项子任务；完成后用简洁的简体中文直接给出结论/产物，作为交回主智能体的答复，不要反问。',
     '结论要能被主智能体直接使用：给出结论与依据，点名相关文件（**路径写绝对路径**）与必要的代码/取值片段；不要复述过程流水账。',
+    CHANGE_REPORT_RULE,
     '彼此没有依赖的工具调用（同时读几个文件、同时搜几个关键词）务必在同一次回复里一并发出，只读调用会并发执行；查找与阅读请用 glob / grep / read_file / list_dir，不要用 run_command 跑 find、grep、cat 代替。',
     '你无法向用户提问（没有 ask_user 工具），也不能再派生其它子智能体；若信息不足，基于合理默认完成，并在结论中说明所做的假设。',
     '你的工具调用默认直接执行、无需授权，文件读写与命令执行均不设任何限制。调用失败时改用其它方式或在结论中说明，切勿原样反复重试。'
@@ -1843,9 +1883,13 @@ interface AgentLoopArgs {
   onToolSummary?: (toolUseId: string, summary: string) => void
   /**
    * exit_plan 得到用户决定即回调（主轮据此把决定存入 StoredSession.plans 边车，供重开还原计划卡）。
-   * decision=null 表示取消/中止。仅主轮传入。
+   * decision=null 表示取消/中止；feedback = 继续完善时附的回复。仅主轮传入。
    */
-  onPlanDecided?: (toolUseId: string, decision: 'approve' | 'keep' | null) => void
+  onPlanDecided?: (
+    toolUseId: string,
+    decision: 'approve' | 'keep' | 'ignore' | null,
+    feedback?: string
+  ) => void
   /**
    * todo_write 执行：写入会话的待办清单边车并推送进度，返回回灌给模型的结果。仅主轮传入；
    * 缺省（子智能体 / 定时任务，工具集本就不含它）时按幻觉调用回指导性错误。
@@ -1982,13 +2026,13 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
 
   /**
    * 提交计划、暂停循环等用户批准（不过权限闸门）。返回 'approve'（批准，直接按计划执行）/
-   * 'keep'（继续完善）/ null（取消/中止）。批准本身不授予任何能力——仅让循环继续。
+   * 'keep'（继续完善，可附回复）/ 'ignore'（忽略）/ null（取消/中止）。批准本身不授予任何能力——仅让循环继续。
    */
   function reviewPlan(
     turnId: string,
     sessionId: string,
     plan: string
-  ): Promise<'approve' | 'keep' | null> {
+  ): Promise<PlanVerdict | null> {
     const key = genId('plan')
     emit(turnId, sessionId, { type: 'plan_review', key, plan })
     notifyPending(turnId, sessionId, { kind: 'plan' })
@@ -2414,7 +2458,7 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
         step > 0 &&
         args.compact &&
         !controller.signal.aborted &&
-        needsCompactionMidTurn(history, model.model, usedInput, usedAt) &&
+        needsCompactionMidTurn(history, model, usedInput, usedAt) &&
         (await args.compact())
       )
         usedInput = 0 // 历史已改写，旧读数作废：回退估算，直到本步拿到新读数
@@ -2440,19 +2484,22 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
         let fatal = false
         // 不可重试错误先扣下、不立即画红框：其中几类引擎能自愈（输出预算降档、上下文压缩后重发），
         // 流结束后再定夺；自愈不了才上报。
-        let fatalErr: { kind: string; message: string } | null = null
+        let fatalErr: { kind: string; message: string; limit?: number } | null = null
         // 每次（含重发）现算：本步刚因不认思考等级被拒时，重发即不再带该参数。
         const stepEffort = sentEffort(model, effort)
+        // 同理现算：本步刚因输出预算被拒时，重发即降回保守值。
+        const stepBudget = outputBudget(model)
 
         for await (const ev of streamChat(
           { adapter: model.adapter, providerId: model.providerId, baseURL: model.baseURL },
           {
             model: model.model,
             system,
-            messages: history,
+            // 旧回合的工具图片换成文字说明、本回合超预算的较早图片也裁掉（只影响本次请求，历史不动）。
+            messages: trimHistoryImages(history),
             tools,
             signal: controller.signal,
-            maxTokens: outputBudget(model),
+            maxTokens: stepBudget,
             effort: stepEffort?.req,
             // 工具循环每步都要把 system + tools + 全量历史整个重发一遍，是提示缓存最典型的受益者
             // （Anthropic 才需显式断点；OpenAI/DeepSeek 自动命中，此开关对它们无作用）。
@@ -2521,7 +2568,7 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
               retryAfterMs = ev.error.retryAfterMs
             } else {
               fatal = true
-              fatalErr = { kind: ev.error.kind, message: ev.error.message }
+              fatalErr = { kind: ev.error.kind, message: ev.error.message, limit: ev.error.limit }
             }
           } else if (ev.type === 'done') {
             stopReason = ev.stopReason
@@ -2547,13 +2594,30 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
             attempt--
             continue reconnect
           }
+          // 报错里写着真实窗口（中转把上游窗口开小、或用户填大了）→ 记住，此后压缩按它来。
+          const limitLearned =
+            fatalErr.limit !== undefined && rememberContextLimit(model, fatalErr.limit)
           // 自愈①：输出预算超出该模型允许范围 → 记住并降回保守值，重发本步（不计入重连次数）。
-          const key = `${model.providerId}:${model.model}`
-          if (fatalErr.kind === 'output_limit' && !outputBudgetDowngraded.has(key)) {
-            outputBudgetDowngraded.add(key)
+          // 本步已是保守值（或更小）时降档无益，直接交给下面的压缩自愈。
+          const wanted = wantedOutputBudget(model)
+          const budgetKey = outputBudgetKey(model, wanted)
+          if (
+            fatalErr.kind === 'output_limit' &&
+            (stepBudget === undefined || stepBudget > OUTPUT_BUDGET_SAFE) &&
+            !outputBudgetRejected.has(budgetKey)
+          ) {
+            outputBudgetRejected.add(budgetKey)
             console.warn('[chat] 输出预算被拒，降档重发：', fatalErr.message)
             if (!isSub) {
-              emit(turnId, sessionId, { type: 'auto_retry', reason: 'output_limit', attempt: 1, max: 1 })
+              // 被拒的是用户填的值：带上降档后的值，渲染层提示去模型设置里改。
+              const userSet = modelOverrides(model.providerId, model.model).maxOutput !== undefined
+              emit(turnId, sessionId, {
+                type: 'auto_retry',
+                reason: 'output_limit',
+                attempt: 1,
+                max: 1,
+                ...(userSet ? { limit: OUTPUT_BUDGET_SAFE } : {})
+              })
               emit(turnId, sessionId, { type: 'stream_reset' })
             }
             attempt--
@@ -2567,7 +2631,14 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
             !contextRetried
           ) {
             contextRetried = true
-            if (!isSub) emit(turnId, sessionId, { type: 'auto_retry', reason: 'context', attempt: 1, max: 1 })
+            if (!isSub)
+              emit(turnId, sessionId, {
+                type: 'auto_retry',
+                reason: 'context',
+                attempt: 1,
+                max: 1,
+                ...(limitLearned ? { limit: fatalErr.limit } : {})
+              })
             if (await args.compact()) {
               usedInput = 0
               if (!isSub) emit(turnId, sessionId, { type: 'stream_reset' })
@@ -2765,9 +2836,11 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
           }
           const pa = (tc.args ?? {}) as { plan?: unknown }
           const plan = typeof pa.plan === 'string' ? pa.plan : ''
-          const decision = await reviewPlan(turnId, sessionId, plan)
+          const verdict = await reviewPlan(turnId, sessionId, plan)
+          const decision = verdict?.decision ?? null
+          const feedback = verdict?.feedback
           // 决定存入 plans 边车（按 toolUseId），供重开还原计划卡；null=取消。仅主轮回调。
-          args.onPlanDecided?.(tc.id, decision)
+          args.onPlanDecided?.(tc.id, decision, feedback)
           if (decision === 'approve') {
             resultParts.push({
               type: 'tool_result',
@@ -2777,11 +2850,22 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
               isError: false
             })
           } else if (decision === 'keep') {
+            // 卡上直接写了回复 → 随结果回灌，循环不停、模型当轮回应（改计划重提 / 先答疑）；
+            // 没写（远程通道只有按钮）→ 等用户下一条消息。
+            resultParts.push({
+              type: 'tool_result',
+              toolUseId: tc.id,
+              content: feedback
+                ? `用户暂不批准，对计划的回复如下：\n\n${feedback}\n\n请据此回应（暂不执行）：若是修改意见，调整计划后重新调用 exit_plan 提交；若是提问或想讨论，先直接回答，需要时再重新提交。回复中若有需要澄清的地方，先用 ask_user 问清。`
+                : '用户希望继续完善计划（暂不执行）。请依据用户接下来的反馈调整计划；在收到新反馈前不要重复调用 exit_plan。',
+              isError: false
+            })
+          } else if (decision === 'ignore') {
             resultParts.push({
               type: 'tool_result',
               toolUseId: tc.id,
               content:
-                '用户希望继续完善计划（暂不执行）。请依据用户接下来的反馈调整计划；在收到新反馈前不要重复调用 exit_plan。',
+                '用户忽略了这份计划：不要执行，也不要重新提交。请用一句话确认后结束本轮，等待用户的新指示。',
               isError: false
             })
           } else {
@@ -3111,7 +3195,7 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
 
     // 自动压缩：接近上下文窗口时，先把较早历史摘要替换，再进入本轮（一轮进行中另有逐步检查，见 compact）。
     // 失败 / 无需压缩都发事件供渲染层弱提示，且绝不阻断本轮（宁可这一轮不压也要照常回答）。
-    if (!controller.signal.aborted && needsCompaction(session, turnModel.model)) {
+    if (!controller.signal.aborted && needsCompaction(session, turnModel)) {
       try {
         const r = await compactSession({ session, model: turnModel, signal: controller.signal })
         // 失败原因落主进程日志：渲染层虽已展示，但后台回合（定时任务）无人盯着，日志是唯一痕迹。
@@ -3252,8 +3336,8 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
           ;(session.summaries ??= {})[id] = summary
         },
         // exit_plan 决定 → plans 边车（按 toolUseId），供重开还原计划卡的已决态。
-        onPlanDecided: (id, decision) => {
-          ;(session.plans ??= {})[id] = { decision }
+        onPlanDecided: (id, decision, feedback) => {
+          ;(session.plans ??= {})[id] = { decision, ...(feedback ? { feedback } : {}) }
         },
         // todo_write → todos 边车（写入日志），推送进度；令清单全部完成的那次另发 todo_done 落卡。
         // cancel → 记进已取消集合，胶囊收起。字段一律整体重新赋值（不原地改）：回滚撤销快照存的是引用。
@@ -3355,8 +3439,11 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
     pendingUndo.delete(sessionId)
     // 密封任务无固定工作目录：相对路径回落进程 cwd，文件操作应用绝对路径。读写不设路径限制。
     const effectiveRoot: string | null = null
+    // 角色：信封未指定或角色已删 → 默认角色 Deva（删角色时任务已改绑 Deva，这里兜旧数据与手动删文件）。
+    const persona =
+      (auth.personaId ? getPersona(auth.personaId) : null) ?? getPersona(DEFAULT_PERSONA_ID)
     const session = ensureSession(sessionId, {
-      personaId: auth.personaId ?? undefined,
+      personaId: persona?.id ?? auth.personaId ?? undefined,
       model: auth.modelRef ?? undefined
     })
     // 首次触发派生标题（沿用任务标题；缺失则从 prompt 派生）。
@@ -3375,7 +3462,6 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
     }
 
     const ctx: ToolContext = { workspaceRoot: effectiveRoot, signal: controller.signal }
-    const persona = auth.personaId ? getPersona(auth.personaId) : null
     const personas =
       persona && persona.prompt.trim() ? [{ name: persona.name, prompt: persona.prompt }] : []
 
@@ -3388,7 +3474,7 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
 
     // 自动压缩：任务多次触发累积于同一会话，接近窗口即先摘要替换早期历史（失败/无需都不阻断本轮）。
     // history 已在上面捕获——compactSession 就地改写 messages，这个引用压缩后依然有效。
-    if (!controller.signal.aborted && needsCompaction(session, turnModel.model)) {
+    if (!controller.signal.aborted && needsCompaction(session, turnModel)) {
       try {
         const r = await compactSession({ session, model: turnModel, signal: controller.signal })
         // 失败原因落主进程日志：渲染层虽已展示，但后台回合（定时任务）无人盯着，日志是唯一痕迹。
@@ -4083,12 +4169,18 @@ export function registerChatIpc(getWindow: () => BrowserWindow | null): void {
     const p = pendingPlan.get(payload.key)
     if (!p) return false
     pendingPlan.delete(payload.key)
-    p.resolve(payload.decision)
+    // 回复要回灌进模型上下文：只认「继续完善」附带的非空字符串。
+    const feedback =
+      payload.decision === 'keep' && typeof payload.feedback === 'string'
+        ? payload.feedback.trim() || undefined
+        : undefined
+    p.resolve({ decision: payload.decision, ...(feedback ? { feedback } : {}) })
     emit(p.turnId, p.sessionId, {
       type: 'interaction_resolved',
       key: payload.key,
       kind: 'plan',
-      decision: payload.decision
+      decision: payload.decision,
+      ...(feedback ? { feedback } : {})
     })
     return true
   }
