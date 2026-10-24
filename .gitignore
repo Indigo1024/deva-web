@@ -29,3 +29,7 @@ Thumbs.db
 
 #files
 AGENTS.md
+# 在线更新运行时标记与构建临时目录
+.deva-update-pending.json
+.deva-update-build/
+web.bak.*

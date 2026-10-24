@@ -176,8 +176,8 @@ async function check(): Promise<void> {
     }
 
     const release: UpdateRelease = {
-      // 显示用版本号：上游有新版就显示上游版本，否则显示 Web 改版版本
-      version: sourceNewer ? version : `web ${remoteWeb}`,
+      // 显示用版本号：上游有新版就显示上游版本；只有 Web 层更新时显示 Web 版本号
+      version: sourceNewer ? version : String(remoteWeb ?? version),
       pageUrl: `https://github.com/${REPO}/commit/${sha}`
     }
     found = { release, mode: 'auto', target: sha }
