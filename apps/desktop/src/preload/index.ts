@@ -815,12 +815,18 @@ const api = {
       ipcRenderer.invoke('fs:write-file', path, content),
     /** 原生多选对话框挑选附件；返回描述（含是否受支持），base64 留在主进程 */
     pickAttachments: (): Promise<PickedAttachment[]> => ipcRenderer.invoke('fs:pick-attachments'),
-    /** 粘贴的文件（截图 / 复制的文件）：交字节由主进程落临时目录并授权；data=null 表示过大不读，仅报体积 */
+    /**
+     * 登记粘贴/上传的附件。两种模式：
+     *  - `data`：内联字节（小文件），主进程落临时目录并授权；
+     *  - `serverPath`：文件已在服务端磁盘上（大文件经 /api/upload-chunk 分片上传），只登记白名单。
+     * 两者互斥，serverPath 优先。
+     */
     pasteAttachment: (file: {
       name: string
       mime: string
       size: number
-      data: Uint8Array | null
+      data?: Uint8Array | null
+      serverPath?: string
     }): Promise<PickedAttachment> => ipcRenderer.invoke('fs:paste-attachment', file)
   },
   /** 应用配置（~/.deva/config.json 非敏感项）：同步读（首帧防闪烁）+ 异步读/写。 */

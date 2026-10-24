@@ -69,38 +69,83 @@
   }
 
   /* ---------------------------- 底部标签栏（原图标栏） ---------------------------- */
+  /*
+   * 移动端改成标准 Tab Bar：
+   *  - 头像从底栏移走（放在抽屉顶部），底栏只留 5 个导航图标；
+   *  - 用 flex:1 均分宽度，不再依赖 .cf-spacer 把图标推到两边（旧版左挤右空）；
+   *  - 每个 tab 是整块可点区域（最小 48×48），符合触摸目标规范；
+   *  - 顶部细线 + 毛玻璃背景，滚动时与内容分层。
+   */
   .cf-iconrail {
     order: 99;
     flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    gap: 2px;
+    align-items: stretch;
+    justify-content: space-around;
+    gap: 0;
     min-height: 56px;
-    padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
+    padding: 0 4px env(safe-area-inset-bottom);
     border-right: none;
     border-top: 1px solid var(--border);
-    background: var(--bg-inset);
+    background: color-mix(in srgb, var(--bg-inset) 88%, transparent);
+    -webkit-backdrop-filter: saturate(180%) blur(12px);
+    backdrop-filter: saturate(180%) blur(12px);
     z-index: 60;
   }
+  /*
+   * 头像作为「我的」放在底栏最左，跟其他 tab 一样等宽——6 项均分 390px 约 63px/项，
+   * 比原来固定 48px + spacer 的排法均匀得多。
+   */
   .cf-iconrail__me {
-    margin-bottom: 0;
-    margin-right: 2px;
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    height: 52px;
+    margin: 2px 1px;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
   }
-  .cf-navbtn {
-    width: 48px;
-    height: 44px;
+  .cf-iconrail__me:active {
+    background: var(--bg-hover);
   }
-  /* 选中指示条：手机样式横条置顶 */
-  .cf-navbtn.is-active::before {
-    left: 50%;
-    top: -1px;
-    bottom: auto;
-    transform: translateX(-50%);
-    width: 20px;
-    height: 3px;
+  .cf-iconrail__me .avatar,
+  .cf-iconrail__me > * {
+    width: 26px;
+    height: 26px;
   }
   .cf-iconrail .cf-spacer {
-    flex: 1;
+    display: none;
+  }
+  .cf-navbtn {
+    flex: 1 1 0;
+    width: auto;
+    min-width: 0;
+    height: 52px;
+    border-radius: 10px;
+    margin: 2px 1px;
+    transition: background 0.16s ease, color 0.16s ease;
+  }
+  .cf-navbtn:active {
+    background: var(--bg-hover);
+  }
+  /* 选中态：淡色底 + 顶部指示条 */
+  .cf-navbtn.is-active {
+    background: var(--accent-tint);
+    color: var(--accent);
+  }
+  .cf-navbtn.is-active::before {
+    left: 50%;
+    top: 0;
+    bottom: auto;
+    transform: translateX(-50%);
+    width: 18px;
+    height: 2.5px;
+    border-radius: 0 0 2px 2px;
+  }
+  /* 图标放大一点，手机上更好认 */
+  .cf-navbtn svg {
+    width: 21px;
+    height: 21px;
   }
 
   /* ---------------------------- 列表抽屉（全部列表列） ---------------------------- */
@@ -178,27 +223,99 @@
     flex-wrap: wrap;
     row-gap: var(--space-2);
   }
-  /* 收紧输入条各项，让「附件 + 挂载 + 模型 + 发送」在 390px 下保持一行（实测刚好差 ~6px）。 */
+  /*
+   * 输入条：手机上一行放不下「附件 + 挂载 + 模型 + 思考档 + 发送」五项，
+   * 早期用 flex-wrap 让它换行，结果发送键单独占一行、输入区高度涨到 190px+。
+   *
+   * 现在改成：**单行不换行 + 极端情况横向滚动**。
+   *  - 附件/挂载固定 36×36 图标按钮；
+   *  - 模型 chip 可收缩（min-width:0 + 省略号），吃掉剩余空间；
+   *  - 发送键固定宽度贴右；
+   *  - 思考档（EffortPicker）在窄屏隐藏——它的选项在模型菜单里也能改。
+   */
   .cf-box__bar {
-    gap: 2px;
+    gap: 4px;
+    align-items: center;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    padding-bottom: 2px;
+  }
+  .cf-box__bar::-webkit-scrollbar {
+    display: none;
   }
   .cf-box__bar .cf-iconbtn {
-    width: 28px;
-    height: 28px;
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+    flex: 0 0 auto;
   }
   .cf-wschip {
-    padding: 0 6px;
-    max-width: 132px;
+    height: 36px;
+    padding: 0;
+    width: 36px;
+    min-width: 36px;
     overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    justify-content: center;
+  }
+  /* 挂载按钮里的文字在窄屏隐藏，只留 FolderPlus 图标 */
+  .cf-box__bar > .cf-wschip:not(.cf-wschip--mounted) {
+    font-size: 0;
+    gap: 0;
+  }
+  .cf-box__bar > .cf-wschip:not(.cf-wschip--mounted) svg {
+    margin: 0;
+  }
+  /* 已挂载的工作区 chip：显示名字但可收缩 */
+  .cf-wschip--mounted {
+    width: auto;
+    min-width: 0;
+    max-width: 96px;
+    padding: 0 6px;
+    font-size: 11.5px;
+    flex: 0 1 auto;
+  }
+  /* 模型 chip：唯一可伸缩的项，吃掉剩余空间 */
+  .cf-box__bar .model-pick {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .cf-box__bar .model-pick .chip {
+    height: 36px;
+    width: 100%;
+    max-width: none;
+    padding: 0 8px;
+    justify-content: flex-start;
+    overflow: hidden;
   }
   .cf-box__bar .chip__label {
-    max-width: 88px;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+  }
+  /*
+   * 思考档在窄屏隐藏：选项在模型菜单里也能改，不值得占一行宽度。
+   * EffortPicker 与 ModelPicker 共用 .model-pick 类，靠顺序区分：
+   * 工具条里第一个 .model-pick 是模型选择（保留），第二个是思考档（隐藏）。
+   */
+  .cf-box__bar > .model-pick ~ .model-pick {
+    display: none;
   }
   .cf-send {
-    margin-left: auto;
-    min-width: 60px;
-    padding: 0 12px;
+    margin-left: 0;
+    min-width: 56px;
+    height: 36px;
+    padding: 0 14px;
+    border-radius: 9px;
+    flex: 0 0 auto;
   }
 
   /* ---------------------------- 模型/人格选择菜单：全宽适配 ---------------------------- */
@@ -240,11 +357,21 @@
   .cf-toc {
     display: none;
   }
+  /*
+   * 输入区在手机上占太多竖向空间（实测 390×844 下 .cf-box 高 177px），
+   * 挤压消息区。做法：限制草稿区最大高度，输入框整体跟随内容收缩。
+   */
   .cf-composer {
-    padding: var(--space-2) var(--space-3) calc(var(--space-3) + env(safe-area-inset-bottom));
+    padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
   }
   .cf-composer__inner {
     max-width: 100%;
+  }
+  .cf-draft {
+    max-height: 132px;
+  }
+  .cf-box {
+    border-radius: 16px;
   }
   /* iOS 聚焦缩放防治：输入控件字号 ≥16px */
   .cf-box textarea,
@@ -313,18 +440,35 @@
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
+  /* 设置页导航：横向滚动的分段控件。隐藏滚动条、加惯性、贴边留白，
+     点选后由 JS 的 scrollIntoView 保证选中项在视野内。 */
   .cf-nav {
     flex-direction: row;
     overflow-x: auto;
-    gap: var(--space-1);
-    padding: var(--space-2);
+    overflow-y: hidden;
+    gap: 4px;
+    padding: 8px 12px;
     border-right: none;
     border-bottom: 1px solid var(--border);
     -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    scroll-behavior: smooth;
+    overscroll-behavior-x: contain;
+  }
+  .cf-nav::-webkit-scrollbar {
+    display: none;
   }
   .cf-nav > * {
     flex: none;
     white-space: nowrap;
+    min-height: 36px;
+    padding: 0 14px;
+    border-radius: 999px;
+  }
+  .cf-nav > .is-active {
+    background: var(--accent-tint);
+    color: var(--accent);
   }
   .cf-pane {
     padding: var(--space-4);

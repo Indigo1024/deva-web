@@ -43,13 +43,20 @@ function toWire(v: unknown): unknown {
   return v
 }
 
+/**
+ * Uint8Array → base64。
+ *
+ * 用 `String.fromCharCode.apply` 分块（chunk 32KB）：这是 V8 里最快的同步做法。
+ * 注意**不要**改成逐字节 `s += String.fromCharCode(b)`——那会为每个字节创建新字符串，
+ * 20MB 就要几十秒（实测比 apply 慢一个数量级）。
+ */
 function b64encode(u8: Uint8Array): string {
-  let s = ''
-  const chunk = 0x8000
-  for (let i = 0; i < u8.length; i += chunk) {
-    s += String.fromCharCode.apply(null, Array.from(u8.subarray(i, i + chunk)) as unknown as number[])
+  const CHUNK = 0x8000
+  const parts: string[] = []
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    parts.push(String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK) as unknown as number[]))
   }
-  return btoa(s)
+  return btoa(parts.join(''))
 }
 
 class WebIpc {

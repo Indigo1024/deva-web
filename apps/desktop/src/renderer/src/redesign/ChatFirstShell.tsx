@@ -4260,26 +4260,111 @@ function Composer({
 
   // 粘贴 / 拖入的文件：与「附加文件」同一条链路（主进程落盘授权 → pending 附件条）。
   // 只交字节不交路径，渲染层仍无法让主进程读任意路径；拖入的文件夹读不出字节，直接跳过。
+  //
+  // 体积策略：**不拒绝任何文件**。
+  //  - 小文件（< 8MB）走 WS 内联字节，快；
+  //  - 大文件走 HTTP 分片上传（/api/upload-chunk），有进度、不受 WS 帧限制与 invoke 超时约束。
+  const INLINE_LIMIT = 8 * 1024 * 1024
+  const CHUNK_SIZE = 4 * 1024 * 1024
+
+  /** 分片上传一个大文件，返回服务端落盘路径。 */
+  const uploadInChunks = async (
+    f: File,
+    onProgress?: (percent: number) => void
+  ): Promise<string> => {
+    const uploadId = `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+    const total = Math.max(1, Math.ceil(f.size / CHUNK_SIZE))
+    for (let i = 0; i < total; i++) {
+      const blob = f.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, f.size))
+      const qs = new URLSearchParams({
+        uploadId,
+        index: String(i),
+        total: String(total),
+        name: f.name
+      })
+      const r = await fetch(`/api/upload-chunk?${qs}`, {
+        method: 'POST',
+        body: blob,
+        signal: AbortSignal.timeout(180_000)
+      })
+      if (!r.ok) throw new Error(`分片 ${i + 1}/${total} 上传失败：HTTP ${r.status}`)
+      const data = (await r.json()) as { ok: boolean; path?: string; error?: string }
+      if (!data.ok) throw new Error(data.error || '上传失败')
+      onProgress?.(Math.round(((i + 1) / total) * 100))
+      if (data.path) return data.path
+    }
+    throw new Error('上传未返回文件路径')
+  }
+
   const addFiles = async (files: File[]): Promise<void> => {
     const results = await Promise.allSettled(
-      files.map(async (f) =>
-        window.deva.fs.pasteAttachment({
+      files.map(async (f) => {
+        if (f.size <= INLINE_LIMIT) {
+          return window.deva.fs.pasteAttachment({
+            name: f.name,
+            mime: f.type,
+            size: f.size,
+            data: new Uint8Array(await f.arrayBuffer())
+          })
+        }
+        // 大文件：分片上传到服务端，再登记白名单
+        const serverPath = await uploadInChunks(f, (pct) => {
+          if (pct === 100) toast.show({ variant: 'success', message: `${f.name} 上传完成` })
+        })
+        return window.deva.fs.pasteAttachment({
           name: f.name,
           mime: f.type,
           size: f.size,
-          // 超过最大附件上限（PDF 20MB）的不读字节，只报体积，主进程据此判「过大」。
-          data: f.size > 20 * 1024 * 1024 ? null : new Uint8Array(await f.arrayBuffer())
+          serverPath
         })
-      )
+      })
     )
     // 同一文件多次粘贴 / 拖入只留一份：主进程按内容去重、重复的返回同一路径，addPicked 按路径过滤即可。
-    addPicked(results.flatMap((r) => (r.status === 'fulfilled' ? [r.value as Picked] : [])))
+    // 失败的（网络中断、服务端异常）要给出提示——早期用 allSettled 静默吞掉，表现为「粘贴了但什么都没发生」。
+    const ok: Picked[] = []
+    const failed: string[] = []
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') ok.push(r.value as Picked)
+      else failed.push(files[i]?.name ?? '文件')
+    })
+    if (failed.length) {
+      toast.show({
+        variant: 'error',
+        message: `附件上传失败：${failed.join('、')}`
+      })
+    }
+    addPicked(ok)
   }
 
-  // 剪贴板带纯文本时一律按文本粘贴——Word / Excel 复制内容会顺带一张渲染图，不能把它变成附件。
+  /**
+   * 粘贴处理。要点：
+   *  1. `clipboardData.files` 在 iOS Safari / 部分安卓浏览器上是空的，图片藏在 `items` 里，
+   *     所以两处都要取（`items` 里 kind==='file' 的转成 File）。
+   *  2. 桌面 Office 复制会同时带纯文本 + 一张渲染图，那种情况应该按文本粘贴，不能变成附件。
+   *     但**只在「没有真正的文件项」时才让位给文本**——手机上复制图片常带一段空文本或 URL，
+   *     早期写法直接 return false，图片就被当文本吞了。
+   */
   const onPaste = (e: ClipboardEvent): boolean => {
-    const files = Array.from(e.clipboardData?.files ?? [])
-    if (!files.length || e.clipboardData?.getData('text/plain')) return false
+    const dt = e.clipboardData
+    if (!dt) return false
+
+    // 先从 items 收文件（覆盖 files 为空的浏览器）
+    const fromItems: File[] = []
+    for (const it of Array.from(dt.items ?? [])) {
+      if (it.kind === 'file') {
+        const f = it.getAsFile()
+        if (f) fromItems.push(f)
+      }
+    }
+    const files = fromItems.length ? fromItems : Array.from(dt.files ?? [])
+    if (!files.length) return false
+
+    // 判定：这堆文件里有没有「非图片」的（zip/pdf/json…）。有 → 一定是用户想传文件。
+    // 全是图片时，若同时带非空文本，通常是 Office 复制顺带的渲染图 → 按文本粘贴。
+    const text = dt.getData('text/plain')
+    const hasNonImage = files.some((f) => !f.type.startsWith('image/'))
+    if (text.trim() && !hasNonImage && files.every((f) => /^image\//i.test(f.type))) return false
+
     e.preventDefault()
     if (!streaming) void addFiles(files)
     return true
@@ -5101,6 +5186,12 @@ type SettingsSection = 'general' | 'models' | 'extensions' | 'about'
 function Settings({ onClose }: { onClose: () => void }): React.JSX.Element {
   const { t } = useI18n()
   const [section, setSection] = useState<SettingsSection>('general')
+  const navRef = useRef<HTMLElement | null>(null)
+  // 手机端导航是横向滚动条：切换分页后把选中项滚进视野（桌面端不滚动，无副作用）
+  useEffect(() => {
+    const el = navRef.current?.querySelector('.cf-nav__item.is-active') as HTMLElement | null
+    el?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
+  }, [section])
   const nav: Array<{ id: SettingsSection; icon: React.ReactNode; label: string }> = [
     { id: 'general', icon: <Cog size={15} />, label: t('settings.general') },
     { id: 'models', icon: <Brain size={15} />, label: t('settings.models') },
@@ -5118,7 +5209,7 @@ function Settings({ onClose }: { onClose: () => void }): React.JSX.Element {
           </button>
         </div>
         <div className="cf-modal__body">
-          <nav className="cf-nav">
+          <nav className="cf-nav" ref={navRef}>
             {nav.map((n) => (
               <button
                 key={n.id}

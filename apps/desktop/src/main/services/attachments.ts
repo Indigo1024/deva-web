@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { promises as fs } from 'fs'
 import { basename, dirname, extname, join, resolve } from 'path'
 import type { ContentPart } from '../providers/types'
+import { prepareImage, sniffImageMime, formatBytes } from './image-read'
 
 /**
  * 附加文件服务（主进程）。
@@ -59,9 +60,26 @@ const ARCHIVE_EXT = new Set(['.zip', '.tar', '.gz', '.tgz', '.tar.gz', '.bz2', '
 const MAX_ARCHIVE_MEMBERS = 60
 const MAX_ARCHIVE_TEXT = 512 * 1024
 
-const MAX_IMAGE = 5 * 1024 * 1024 // 5MB
-const MAX_PDF = 20 * 1024 * 1024 // 20MB（Anthropic 上限约 32MB，留余量）
-const MAX_TEXT = 512 * 1024 // 512KB（避免文本注入撑爆上下文）
+/**
+ * 附件策略：**接收不设限，发送时自适应**。
+ *
+ * 用户选中 / 粘贴什么就收什么，不在「添加」这一步拒绝——那会让用户觉得功能坏了。
+ * 真正的约束放在发送时（buildAttachmentPart）按模型能力整形：
+ *  - 图片：任意大小 → prepareImage 缩放/转码到 API 上限（3.75MB / 长边 1568）
+ *  - PDF：超过 API 上限的部分无法发送，会明确告知
+ *  - 文本：超长按预算截断并标注「已截断」
+ *  - 压缩包：任意大小 → 解包抽取文本成员，总量限流
+ *  - 未知二进制：不发送内容，给文件名/类型/大小，让模型知道有这么个文件
+ *
+ * 这里只保留一个「发送时」的软上限用于预算计算，不再用于拒绝。
+ */
+const MAX_PDF = 20 * 1024 * 1024 // PDF 发送上限（API 侧限制）
+const MAX_TEXT = 512 * 1024 // 单个文本文件注入上限
+
+/** 字节数转成「N MB」用于提示文案。 */
+function formatMb(n: number): string {
+  return `${Math.round(n / 1024 / 1024)}MB`
+}
 
 function classify(ext: string): AttachmentKind {
   const e = ext.toLowerCase()
@@ -89,29 +107,23 @@ const PASTE_DIR = join(tmpdir(), 'deva-paste')
  */
 const pasted = new Map<string, PickedAttachment>()
 
-/** 统一的类型/体积判定：合规者登记白名单。选择框与粘贴两路共用，限额只此一处。 */
+/**
+ * 登记一个附件。
+ *
+ * **不在这里拒绝任何文件**——用户加进来什么就收什么，`supported` 恒为 true。
+ * 类型和体积的处理全部推到发送时（buildAttachmentPart）按模型能力决定：
+ * 图片压缩、文本截断、压缩包抽取、二进制给元信息。
+ *
+ * 这样「添加附件」这个动作永远成功，不会出现「点了没反应 / 提示太大」的挫败感；
+ * 真发不出去的内容会在发送时以说明文字的形式告诉模型和用户。
+ */
 function inspect(abs: string, size: number): PickedAttachment {
   const name = basename(abs)
   const ext = extname(abs).toLowerCase()
   const kind = classify(ext)
-  let supported = kind !== 'unsupported'
-  let reason: string | undefined
-  if (kind === 'unsupported') reason = '暂不支持的文件类型'
-  else if (kind === 'image' && size > MAX_IMAGE) {
-    supported = false
-    reason = '图片过大（>5MB）'
-  } else if (kind === 'document' && size > MAX_PDF) {
-    supported = false
-    reason = 'PDF 过大（>20MB）'
-  } else if (kind === 'text' && size > MAX_TEXT) {
-    supported = false
-    reason = '文本过大（>512KB）'
-  } else if (kind === 'archive' && size > MAX_PDF) {
-    supported = false
-    reason = '压缩包过大（>20MB）'
-  }
-  if (supported) allowed.add(abs)
-  return { path: abs, name, ext, size, kind, supported, reason }
+  // 所有文件都登记进白名单（后续读取需要），包括未知类型
+  allowed.add(abs)
+  return { path: abs, name, ext, size, kind, supported: true }
 }
 
 /** 粘贴文件名：剥掉路径与 Windows 非法字符；截图等无名/通用名（image.png）按时间戳重命名。 */
@@ -132,12 +144,39 @@ export function registerAttachmentsIpc(getWindow: () => BrowserWindow | null): v
 
   // 粘贴（截图 / 资源管理器里复制的文件）：渲染层交文件名 + 字节，超 PDF 上限的大文件渲染层不读、
   // 只交体积（data=null），由此处统一给出「过大」判定，免得几百 MB 过一遍 IPC。
+  /**
+   * 登记一个粘贴/上传的附件。
+   *
+   * 两种模式：
+   *  - 内联字节（小文件）：`{name, mime, size, data: Uint8Array}`，落盘到 PASTE_DIR
+   *  - 服务端已有文件（大文件分片上传后）：`{name, mime, size, serverPath}`，
+   *    文件已由 /api/upload-chunk 写到磁盘，这里只登记白名单，不再复制。
+   *
+   * 大文件走第二种：HTTP 分片上传有原生进度、不受 WS 帧大小与超时限制。
+   */
   ipcMain.handle(
     'fs:paste-attachment',
     async (
       _e,
-      file: { name: string; mime: string; size: number; data: Uint8Array | null }
+      file: {
+        name: string
+        mime: string
+        size: number
+        data?: Uint8Array | null
+        serverPath?: string
+      }
     ): Promise<PickedAttachment> => {
+      // 服务端已有文件：校验存在 + 大小，直接登记
+      if (file.serverPath) {
+        const abs = resolve(file.serverPath)
+        let size = file.size
+        try {
+          size = (await fs.stat(abs)).size
+        } catch {
+          throw new Error('上传的文件不存在')
+        }
+        return inspect(abs, size)
+      }
       const key = file.data
         ? createHash('sha256').update(file.data).digest('hex')
         : `big:${file.name}:${file.size}`
@@ -213,12 +252,12 @@ export function registerAttachmentsIpc(getWindow: () => BrowserWindow | null): v
  * zip 用 fflate（已有依赖）在内存解；tar 系解到临时目录再读。
  */
 async function readArchiveAsText(abs: string): Promise<string> {
-  const ext = extname(abs).toLowerCase()
+  const lower = abs.toLowerCase()
   const lines: string[] = []
   /** 统一成「相对路径 + 大小 + 可选文本内容」。 */
   const files: Array<{ path: string; size: number; text?: string }> = []
 
-  if (ext === '.zip') {
+  if (lower.endsWith('.zip')) {
     const { unzipSync } = await import('fflate')
     const buf = await fs.readFile(abs)
     const entries = unzipSync(new Uint8Array(buf))
@@ -233,13 +272,17 @@ async function readArchiveAsText(abs: string): Promise<string> {
       })
     }
   } else {
+    // 7z 需要 p7zip，多数机器没装；直接给出可读提示，别让用户以为文件坏了
+    if (lower.endsWith('.7z')) {
+      throw new Error('暂不支持 7z，请解压后上传其中的文件（或改传 zip/tar.gz）')
+    }
     // tar / tar.gz / tgz / bz2 / xz：交给系统 tar
     const tmp = join(tmpdir(), `deva-archive-${randomUUID()}`)
     await fs.mkdir(tmp, { recursive: true })
     try {
       await new Promise<void>((resolvePromise, reject) => {
         execFile('tar', ['-xf', abs, '-C', tmp], { timeout: 60_000 }, (err) =>
-          err ? reject(err) : resolvePromise()
+          err ? reject(new Error(`解压失败：${err.message}`)) : resolvePromise()
         )
       })
       const walk = async (dir: string, prefix = ''): Promise<void> => {
@@ -289,12 +332,16 @@ async function readArchiveAsText(abs: string): Promise<string> {
 }
 
 /**
- * 把一个「已授权」的附件读成归一化内容块。
- * - 图片 → ImagePart（base64）
- * - PDF → Anthropic（document 块）与 OpenAI Responses（input_file）可原生读取，给 DocumentPart；
- *   仅 OpenAI Chat Completions 无 PDF 通道，跳过并回一条说明
- * - 文本/代码 → 带前缀标记的 TextPart（注入正文）
- * 未授权 / 超限 / 读取失败 → 返回 note（不产出内容块）。
+ * 把一个附件读成可发给模型的内容块。**这里不拒绝，只整形**。
+ *
+ * 处理策略按类型：
+ *  - 图片 → prepareImage 自动缩放/转码到 API 上限；解不了的格式给元信息
+ *  - PDF  → Anthropic / OpenAI Responses 原生读取；超上限或不支持的协议给说明
+ *  - 文本 → 超长截断并标注；保留头尾，中间省略（比只留开头有用）
+ *  - 压缩包 → 解包，目录清单 + 文本成员内容（总量限流）
+ *  - 其它二进制 → 不发内容，给文件名 / 类型 / 大小
+ *
+ * 任何情况下都返回可用的内容（part 或 note），不会让整条消息发不出去。
  */
 export async function buildAttachmentPart(
   path: string,
@@ -303,45 +350,81 @@ export async function buildAttachmentPart(
   const abs = resolve(path)
   const name = basename(abs)
   if (!allowed.has(abs)) return { note: `已忽略未授权文件：${name}` }
-  const kind = classify(extname(abs).toLowerCase())
+  const ext = extname(abs).toLowerCase()
+  const kind = classify(ext)
   try {
+    const stat = await fs.stat(abs)
+    const size = stat.size
+
     if (kind === 'image') {
       const buf = await fs.readFile(abs)
-      if (buf.length > MAX_IMAGE) return { note: `图片过大已忽略：${name}` }
-      return {
-        part: {
-          type: 'image',
-          mediaType: IMAGE_MIME[extname(abs).toLowerCase()],
-          data: buf.toString('base64'),
-          name
+      const mime = sniffImageMime(buf)
+      if (!mime) {
+        return { note: `图片「${name}」（${formatBytes(size)}）格式无法识别，未发送内容` }
+      }
+      const prepared = prepareImage(buf, mime, name)
+      if (!prepared.ok) {
+        return { note: `图片「${name}」处理失败：${prepared.reason}` }
+      }
+      // 缩放/转码过就在正文里说明一句，用户知道发出去的不是原图
+      if (prepared.resized && prepared.sentBytes !== undefined) {
+        return {
+          part: prepared.part,
+          note: `图片「${name}」已自动压缩：${formatBytes(size)} → ${formatBytes(prepared.sentBytes)}`
         }
       }
+      return { part: prepared.part }
     }
+
     if (kind === 'document') {
-      // 仅 OpenAI Chat Completions 无 PDF 通道；Anthropic 与 OpenAI Responses 均可原生读取。
-      if (adapter === 'openai')
+      if (adapter === 'openai') {
         return { note: `PDF「${name}」需使用 Anthropic 或 OpenAI Responses 协议的模型才能读取，本次已跳过` }
+      }
+      if (size > MAX_PDF) {
+        return { note: `PDF「${name}」${formatBytes(size)} 超过接口上限 ${formatMb(MAX_PDF)}，未发送` }
+      }
       const buf = await fs.readFile(abs)
-      if (buf.length > MAX_PDF) return { note: `PDF 过大已忽略：${name}` }
       return {
         part: { type: 'document', mediaType: 'application/pdf', data: buf.toString('base64'), name }
       }
     }
+
     if (kind === 'text') {
       const buf = await fs.readFile(abs)
-      if (buf.length > MAX_TEXT) return { note: `文本过大已忽略：${name}` }
+      if (size <= MAX_TEXT) {
+        return {
+          part: {
+            type: 'text',
+            text: `${ATTACH_TEXT_PREFIX}${name}\n\`\`\`\n${buf.toString('utf8')}\n\`\`\``
+          }
+        }
+      }
+      // 超长：保留头尾，中间标注省略了多少
+      const text = buf.toString('utf8')
+      const head = text.slice(0, MAX_TEXT * 0.7)
+      const tail = text.slice(-MAX_TEXT * 0.25)
+      const omitted = text.length - head.length - tail.length
       return {
-        part: { type: 'text', text: `${ATTACH_TEXT_PREFIX}${name}\n\`\`\`\n${buf.toString('utf8')}\n\`\`\`` }
+        part: {
+          type: 'text',
+          text: `${ATTACH_TEXT_PREFIX}${name}（原文件 ${formatBytes(size)}，已截断）\n\`\`\`\n${head}\n\n…（中间省略 ${formatBytes(omitted)}）…\n\n${tail}\n\`\`\``
+        }
       }
     }
+
     if (kind === 'archive') {
       const text = await readArchiveAsText(abs)
       return {
         part: { type: 'text', text: `${ATTACH_TEXT_PREFIX}${name}（压缩包内容）\n${text}` }
       }
     }
-    return { note: `已忽略不支持的文件：${name}` }
-  } catch {
-    return { note: `读取失败已忽略：${name}` }
+
+    // 未知二进制：不发内容，但告诉模型有这么一个文件
+    return {
+      note: `附件「${name}」（${ext || '无扩展名'}，${formatBytes(size)}）为二进制类型，未发送内容`
+    }
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e)
+    return { note: `读取附件「${name}」失败：${reason}` }
   }
 }

@@ -16,7 +16,17 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { readFile, readdir, stat } from 'fs/promises'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync
+} from 'fs'
 import { extname, join, normalize, resolve, dirname, basename, isAbsolute } from 'path'
 import { randomUUID } from 'node:crypto'
 import { WebSocketServer, type WebSocket } from 'ws'
@@ -580,6 +590,49 @@ const server = createServer(async (req, res) => {
       return
     }
 
+    // ── 分片上传（大附件用） ──────────────────────────────────────────────
+    // 大文件走 WS 会卡在 base64 编码和单帧大小上（实测 20MB 要 10 秒）。
+    // 改成 HTTP 分片：前端按 4MB 切片顺序 POST，服务端追加写入同一个临时文件。
+    // 这样有原生上传进度、不占 WS、也不受 invoke 120s 超时限制。
+    if (path === '/api/upload-chunk' && req.method === 'POST') {
+      const uploadId = url.searchParams.get('uploadId') || ''
+      const index = Number(url.searchParams.get('index') ?? '0')
+      const total = Number(url.searchParams.get('total') ?? '1')
+      const name = url.searchParams.get('name') || 'upload.bin'
+      if (!/^[\w-]{8,64}$/.test(uploadId)) {
+        json(res, 400, { ok: false, error: 'bad uploadId' })
+        return
+      }
+      const raw = await readBody(req, 64 * 1024 * 1024)
+      const dir = join(process.env.HOME || '/root', '.deva', 'web-uploads', uploadId)
+      mkdirSync(dir, { recursive: true })
+      const partPath = join(dir, `${String(index).padStart(5, '0')}.part`)
+      writeFileSync(partPath, raw)
+      // 最后一片到达时合并
+      if (index + 1 >= total) {
+        const safe = basename(name).replace(/[^\w.@()-]+/g, '_') || 'upload.bin'
+        const dest = join(dir, safe)
+        const fd = openSync(dest, 'w')
+        try {
+          for (let i = 0; i < total; i++) {
+            const p = join(dir, `${String(i).padStart(5, '0')}.part`)
+            if (!existsSync(p)) throw new Error(`缺少分片 ${i}`)
+            writeSync(fd, readFileSync(p))
+          }
+        } finally {
+          closeSync(fd)
+        }
+        // 清理分片
+        for (let i = 0; i < total; i++) {
+          rmSync(join(dir, `${String(i).padStart(5, '0')}.part`), { force: true })
+        }
+        json(res, 200, { ok: true, path: dest, size: statSync(dest).size })
+        return
+      }
+      json(res, 200, { ok: true, received: index + 1 })
+      return
+    }
+
     // ── 上传（技能包等；落临时目录后由 /api/skills/import-upload 导入） ──
     if (path === '/api/upload' && req.method === 'POST') {
       const name = url.searchParams.get('name') || 'upload.bin'
@@ -633,7 +686,9 @@ const server = createServer(async (req, res) => {
 })
 
 // ── WebSocket RPC ───────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ noServer: true, maxPayload: 160 * 1024 * 1024 })
+// 附件走 WS 传字节（base64 后约 +33%）。用户可能传几十上百 MB 的文件，
+// 给到 512MB 上限；再大的在浏览器侧读进内存本身也不现实。
+const wss = new WebSocketServer({ noServer: true, maxPayload: 512 * 1024 * 1024 })
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
