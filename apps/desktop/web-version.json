@@ -1,4 +1,4 @@
 {
-  "webVersion": "1.2.0",
+  "webVersion": "1.3.0",
   "note": "Web 改版自身的版本号，与上游 Deva 版本无关。上游版本从 apps/desktop/package.json 读取。"
 }

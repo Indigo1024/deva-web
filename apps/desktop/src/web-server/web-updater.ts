@@ -78,10 +78,11 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-/** 比较 x.y.z，忽略「-」之后的预发布后缀（同上游）。 */
+/** 比较 x.y.z，忽略「-」之后的预发布后缀（同上游）；容忍 "web 1.2.0" 这类前缀。 */
 function compareVersions(a: string, b: string): number {
-  const pa = a.split('-')[0].split('.').map(Number)
-  const pb = b.split('-')[0].split('.').map(Number)
+  const clean = (s: string): string => s.replace(/^[a-z]+\s+/i, '').trim()
+  const pa = clean(a).split('-')[0].split('.').map(Number)
+  const pb = clean(b).split('-')[0].split('.').map(Number)
   for (let i = 0; i < 3; i++) {
     const d = (pa[i] || 0) - (pb[i] || 0)
     if (d !== 0) return Math.sign(d)
@@ -130,6 +131,23 @@ async function remoteWebVersion(sha: string): Promise<string | null> {
   }
 }
 
+/** 读本地 Web 改版版本（web-version.json），读不到返回 null。 */
+function localWebVersion(): string | null {
+  try {
+    const dir = __dirname
+    for (const d of [dir, join(dir, '..', '..')]) {
+      const p = join(d, 'web-version.json')
+      if (existsSync(p)) {
+        const o = JSON.parse(readFileSync(p, 'utf8')) as { webVersion?: string }
+        return o.webVersion ?? null
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null
+}
+
 async function check(): Promise<void> {
   if (state.phase === 'checking' || state.phase === 'downloading' || state.phase === 'downloaded')
     return
@@ -143,24 +161,31 @@ async function check(): Promise<void> {
     const data = (await res.json()) as { sha: string }
     const sha = data.sha
     const version = await remoteVersion(sha)
+    const remoteWeb = await remoteWebVersion(sha)
     const current = app.getVersion()
-    if (compareVersions(version, current) <= 0) {
+    const currentWeb = localWebVersion()
+
+    // 两个版本都要比：上游版本（package.json）和 Web 改版版本（web-version.json）。
+    // 只比上游版本的话，纯 Web 层更新永远检测不到——那正是这个改版最常发的更新。
+    const sourceNewer = compareVersions(version, current) > 0
+    const webNewer = Boolean(remoteWeb && currentWeb && compareVersions(remoteWeb, currentWeb) > 0)
+    if (!sourceNewer && !webNewer) {
       found = null
       setState({ phase: 'latest' })
       return
     }
-    const webVersion = await remoteWebVersion(sha)
+
     const release: UpdateRelease = {
-      version,
+      // 显示用版本号：上游有新版就显示上游版本，否则显示 Web 改版版本
+      version: sourceNewer ? version : `web ${remoteWeb}`,
       pageUrl: `https://github.com/${REPO}/commit/${sha}`
     }
     found = { release, mode: 'auto', target: sha }
-    // file 字段借用一下：有 web-version 时带上，前端可显示「含 Web 层 x.y.z」
     setState({
       phase: 'available',
       release,
       mode: 'auto',
-      file: webVersion ? `web-${webVersion}` : null
+      file: remoteWeb ? `web-${remoteWeb}` : null
     } as UpdateState)
   } catch (e) {
     setState({ phase: 'error', stage: 'check', message: errorText(e) })
