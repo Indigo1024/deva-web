@@ -123,6 +123,10 @@ async function buildServer() {
   // 目标宿主模块路径写进 worker 引导：不同构建布局下文件名保持一致
   cpSync(join(root, 'src', 'web-server', 'pty-worker.cjs'), join(outDir, 'pty-worker.cjs'))
 
+  // 版本文件：服务端运行时读取（关于页「源码版 / Web 改版」双版本），必须随产物一起走
+  cpSync(join(root, 'package.json'), join(outDir, 'package.json'))
+  cpSync(join(root, 'web-version.json'), join(outDir, 'web-version.json'))
+
   // 管理工具 ctl（重置密码等）
   await esbuild({
     entryPoints: [join(root, 'src', 'web-server', 'ctl.ts')],

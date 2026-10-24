@@ -102,7 +102,7 @@ export interface ChatRenameSessionRequest {
 }
 
 /** 附件类型（与 services/attachments.ts 对齐）。 */
-export type AttachmentKind = 'image' | 'document' | 'text' | 'unsupported'
+export type AttachmentKind = 'image' | 'document' | 'text' | 'archive' | 'unsupported'
 
 /** 一次挑选返回的附件描述（不含正文/base64）。 */
 export interface PickedAttachment {
@@ -195,7 +195,7 @@ export type DisplayMessage =
   | {
       role: 'user'
       text: string
-      attachments: { name: string; kind: 'image' | 'document' | 'text' }[]
+      attachments: { name: string; kind: 'image' | 'document' | 'text' | 'archive' }[]
       /** 后台任务通知：展示为一行系统通知而非用户气泡，text 为其标题。 */
       notify?: true
     }
@@ -742,7 +742,7 @@ export type ChatStreamEvent =
   | {
       type: 'turn_start'
       /** notify：本轮由后台任务通知自动发起，text 为通知标题。 */
-      user: { text: string; attachments: { name: string; kind: 'image' | 'document' | 'text' }[]; notify?: true }
+      user: { text: string; attachments: { name: string; kind: 'image' | 'document' | 'text' | 'archive' }[]; notify?: true }
     }
   /** durationMs：本轮耗时（扣除等用户处置的时间）。 */
   | { type: 'done'; stopReason: string; durationMs?: number }

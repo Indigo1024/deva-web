@@ -14,7 +14,7 @@
 本文档只讲**本改版自己的东西**：Web 层怎么搭的、怎么部署、怎么跟随上游更新。
 上游 Deva 本身有哪些功能，属于上游的成果，请查阅[上游项目](https://github.com/sqfcyily/deva)。
 
-当前跟随的上游版本：**v0.1.9**。
+当前跟随的上游版本：**v0.1.10**。
 
 ---
 
@@ -39,7 +39,7 @@
 | 终端 | 本机 PTY | 服务器上的 PTY（**等于给了服务器 shell**） |
 | 系统通知 | 桌面通知 | 浏览器 Notification / 页面内提示 |
 | 交付文件 | 用默认应用打开 | 浏览器下载 |
-| 自动更新 | electron-updater | 不适用（更新 = 重新构建部署） |
+| 自动更新 | electron-updater | 设置里点一下，服务器自己拉源码重建重启 |
 
 ⚠️ **本改版把桌面应用的完整权力搬到了浏览器**：agent 的文件工具**没有路径限制**，终端命令**没有命令白名单**。唯一的安全边界就是那道登录墙。**不要把这个服务暴露在公网且用弱密码**，也不要在多人共用的机器上跑。
 
@@ -311,6 +311,56 @@ function hideSplash() { if (splashGone) return; splashGone = true; ... }
 正确做法是 `showSplash()` 要把 `splashGone` 重置回 `false` 并清掉待执行的隐藏定时器。历史上这个 bug 的表现是：连接已经恢复（WS 重连成功），但界面被"正在重连…"永久盖死。
 
 ---
+
+## 在线更新
+
+设置 → 关于 →「检查更新」查的是**本改版仓库**（默认 `Indigo1024/deva-web`）的 main 分支，不是上游的 Electron Releases。
+
+点「立即安装并重启」之后，服务器会：
+
+1. `git archive` 把目标 commit 导出到 `.deva-update-build/`（不动工作区，本地改动不受影响）
+2. 复用现有 `node_modules`；`package.json` 里的依赖变了才重新装
+3. 跑 `gen-web-api.mjs` + `build-web.mjs`
+4. 校验产物完整，然后把旧的 `out/web` 改名成 `web.bak.<时间戳>`，新产物就位
+5. `systemctl restart deva-web`
+
+构建失败不会动线上产物，旧版继续跑。切换过程中失败会自动回滚。产物备份保留最近 2 份。
+
+因为重启会断开当前连接，前端点完安装后进入等待态，轮询 `/api/health`，服务回来之后自动刷新页面。安装日志写在 `$DEVA_HOME/web-update.log`，也可以在浏览器里打开 `/api/update-log` 看。
+
+### 老版本怎么升上来
+
+如果部署的是还没有在线更新功能的旧构建（v0.1.9 及更早），界面里没有这个入口。在服务器上跑一次：
+
+```bash
+bash scripts/deva-update.sh          # 更新到远端最新
+bash scripts/deva-update.sh --check  # 只看有没有新版
+bash scripts/deva-update.sh --rollback  # 回滚到上一份产物
+```
+
+升上来之后就能在界面里点了。
+
+### 换更新源
+
+自建部署可以改环境变量：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `DEVA_WEB_UPDATE_REPO` | `https://github.com/Indigo1024/deva-web` | 更新源仓库 |
+| `DEVA_WEB_UPDATE_BRANCH` | `main` | 跟踪的分支 |
+
+## 附件上传
+
+支持两种方式：粘贴（Ctrl+V / 手机长按粘贴）和点输入框左边的回形针选择文件。
+
+- 图片（png/jpg/gif/webp，≤5MB）：作为图片块发给模型
+- PDF（≤20MB）：Anthropic 和 OpenAI Responses 协议能直接读，OpenAI Chat Completions 会跳过并提示
+- 文本类（代码、json、yaml、csv 等，≤512KB）：作为文本注入
+- 压缩包（zip/tar/gz/tgz/bz2/xz/7z，≤20MB）：解开后把目录清单和里面的文本文件内容一起发给模型
+
+粘贴的字节经 WebSocket 以 base64 传到服务端，落在 `$TMPDIR/deva-paste/`，发送时转成内容块进历史。文件名里的路径和非法字符会被清掉，重名内容按 sha256 去重。
+
+**实现注意**：WS 的二进制编码 `{__u8: base64}` 必须**递归**处理嵌套对象。早期只解顶层，附件参数里的 `data` 字段是嵌套的，服务端拿到的是普通对象，`createHash().update()` 直接抛错——表现就是「粘贴和上传都没反应」。
 
 ## 维护：合并上游新版本
 

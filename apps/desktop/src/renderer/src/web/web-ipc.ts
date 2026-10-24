@@ -23,16 +23,22 @@ const INVOKE_TIMEOUT = 120_000
 /** 连接升级看门狗：CONNECTING 挂起超过此时长（CF 隧道偶发）→ 放弃本次、走重连。 */
 const CONNECT_WATCHDOG = 8000
 
+/**
+ * 把调用参数转成可 JSON 传输的形状：二进制 → `{__u8: base64}`。
+ *
+ * 必须**递归**进对象和数组。附件上传把字节放在对象字段里
+ * （`{name, mime, size, data: Uint8Array}`），早期只处理顶层和一个写死的 data 字段，
+ * 其他位置（数组里的对象、别的字段名）会原样进 JSON.stringify，
+ * 变成 `{"0":137,"1":80,...}` 这种垃圾，服务端解不回来。
+ */
 function toWire(v: unknown): unknown {
   if (v instanceof Uint8Array) return { __u8: b64encode(v) }
   if (v instanceof ArrayBuffer) return { __u8: b64encode(new Uint8Array(v)) }
   if (Array.isArray(v)) return v.map(toWire)
   if (v && typeof v === 'object') {
-    const o = v as Record<string, unknown>
-    const data = o.data
-    if (data instanceof Uint8Array || data instanceof ArrayBuffer) {
-      return { ...o, data: { __u8: b64encode(data instanceof ArrayBuffer ? new Uint8Array(data) : data) } }
-    }
+    const out: Record<string, unknown> = {}
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = toWire(val)
+    return out
   }
   return v
 }

@@ -354,7 +354,7 @@ export type DisplayMessage =
   | {
       role: 'user'
       text: string
-      attachments: { name: string; kind: 'image' | 'document' | 'text' }[]
+      attachments: { name: string; kind: 'image' | 'document' | 'text' | 'archive' }[]
       /** 后台任务通知（见 NOTIFY_MARKER）：展示为一行系统通知而非用户气泡，text 为其标题。 */
       notify?: true
     }
@@ -576,7 +576,7 @@ function toDisplayMessages(
     }
 
     // 真实用户消息（可能带附件）：附件在前、提问正文在最后一个 text 块
-    const atts: { name: string; kind: 'image' | 'document' | 'text' }[] = []
+    const atts: { name: string; kind: 'image' | 'document' | 'text' | 'archive' }[] = []
     const textParts = parts.filter((p): p is Extract<ContentPart, { type: 'text' }> => p.type === 'text')
     for (const p of parts) {
       if (p.type === 'image') atts.push({ name: p.name ?? '图片', kind: 'image' })
@@ -1057,7 +1057,7 @@ export type ChatStreamEvent =
   | {
       type: 'turn_start'
       /** notify：本轮由后台任务通知自动发起（见 NOTIFY_MARKER），text 为通知标题。 */
-      user: { text: string; attachments: { name: string; kind: 'image' | 'document' | 'text' }[]; notify?: true }
+      user: { text: string; attachments: { name: string; kind: 'image' | 'document' | 'text' | 'archive' }[]; notify?: true }
     }
   /** durationMs：本轮耗时（扣除等用户处置的时间），渲染层据此给工作过程折叠条显示「已处理 X」。 */
   | { type: 'done'; stopReason: StopReason; durationMs?: number }

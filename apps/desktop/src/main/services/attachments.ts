@@ -1,5 +1,6 @@
 import { dialog, ipcMain, type BrowserWindow, type OpenDialogOptions } from 'electron'
 import { createHash, randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { promises as fs } from 'fs'
 import { basename, dirname, extname, join, resolve } from 'path'
@@ -13,7 +14,7 @@ import type { ContentPart } from '../providers/types'
  * 防止渲染层伪造任意路径读盘。大文件 base64 只在主进程内产生，绝不回传渲染层。
  */
 
-export type AttachmentKind = 'image' | 'document' | 'text' | 'unsupported'
+export type AttachmentKind = 'image' | 'document' | 'text' | 'archive' | 'unsupported'
 
 export interface PickedAttachment {
   path: string
@@ -48,6 +49,16 @@ const TEXT_EXT = new Set([
   '.env', '.r', '.dart', '.lua', '.pl', '.dockerfile', '.makefile', '.cmake'
 ])
 
+/**
+ * 压缩包：模型 API 不能直接吃二进制，这里解包后按文本读取（目录清单 + 文本文件内容）。
+ * 只读文本类成员，跳过图片/二进制，避免把上下文撑爆。
+ */
+const ARCHIVE_EXT = new Set(['.zip', '.tar', '.gz', '.tgz', '.tar.gz', '.bz2', '.xz', '.7z'])
+
+/** 解包时最多读多少个文本成员、总共多少字节。 */
+const MAX_ARCHIVE_MEMBERS = 60
+const MAX_ARCHIVE_TEXT = 512 * 1024
+
 const MAX_IMAGE = 5 * 1024 * 1024 // 5MB
 const MAX_PDF = 20 * 1024 * 1024 // 20MB（Anthropic 上限约 32MB，留余量）
 const MAX_TEXT = 512 * 1024 // 512KB（避免文本注入撑爆上下文）
@@ -56,6 +67,7 @@ function classify(ext: string): AttachmentKind {
   const e = ext.toLowerCase()
   if (e in IMAGE_MIME) return 'image'
   if (e === '.pdf') return 'document'
+  if (ARCHIVE_EXT.has(e)) return 'archive'
   if (TEXT_EXT.has(e)) return 'text'
   return 'unsupported'
 }
@@ -94,6 +106,9 @@ function inspect(abs: string, size: number): PickedAttachment {
   } else if (kind === 'text' && size > MAX_TEXT) {
     supported = false
     reason = '文本过大（>512KB）'
+  } else if (kind === 'archive' && size > MAX_PDF) {
+    supported = false
+    reason = '压缩包过大（>20MB）'
   }
   if (supported) allowed.add(abs)
   return { path: abs, name, ext, size, kind, supported, reason }
@@ -159,11 +174,13 @@ export function registerAttachmentsIpc(getWindow: () => BrowserWindow | null): v
             'png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf',
             'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'toml', 'csv', 'log',
             'js', 'jsx', 'ts', 'tsx', 'vue', 'svelte', 'html', 'css', 'scss', 'xml',
-            'py', 'go', 'rs', 'java', 'kt', 'c', 'h', 'cpp', 'cs', 'php', 'sh', 'sql'
+            'py', 'go', 'rs', 'java', 'kt', 'c', 'h', 'cpp', 'cs', 'php', 'sh', 'sql',
+            'zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z'
           ]
         },
         { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
         { name: 'PDF', extensions: ['pdf'] },
+        { name: '压缩包', extensions: ['zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z'] },
         { name: '所有文件', extensions: ['*'] }
       ]
     }
@@ -183,6 +200,92 @@ export function registerAttachmentsIpc(getWindow: () => BrowserWindow | null): v
     }
     return out
   })
+}
+
+/**
+ * 把压缩包读成可注入模型的文本：目录清单 + 各文本成员内容。
+ *
+ * 模型 API 只吃文本/图片/PDF，二进制压缩包没法直接发。这里解包后：
+ *  - 先列目录清单（含大小），让模型知道包里有什么；
+ *  - 再挑文本类成员贴内容，总量受 MAX_ARCHIVE_TEXT 限制；
+ *  - 图片等二进制成员只列名不贴内容。
+ *
+ * zip 用 fflate（已有依赖）在内存解；tar 系解到临时目录再读。
+ */
+async function readArchiveAsText(abs: string): Promise<string> {
+  const ext = extname(abs).toLowerCase()
+  const lines: string[] = []
+  /** 统一成「相对路径 + 大小 + 可选文本内容」。 */
+  const files: Array<{ path: string; size: number; text?: string }> = []
+
+  if (ext === '.zip') {
+    const { unzipSync } = await import('fflate')
+    const buf = await fs.readFile(abs)
+    const entries = unzipSync(new Uint8Array(buf))
+    for (const [p, data] of Object.entries(entries)) {
+      if (p.endsWith('/')) continue
+      const e = extname(p).toLowerCase()
+      const isText = TEXT_EXT.has(e) && data.length <= MAX_TEXT
+      files.push({
+        path: p,
+        size: data.length,
+        text: isText ? Buffer.from(data).toString('utf8') : undefined
+      })
+    }
+  } else {
+    // tar / tar.gz / tgz / bz2 / xz：交给系统 tar
+    const tmp = join(tmpdir(), `deva-archive-${randomUUID()}`)
+    await fs.mkdir(tmp, { recursive: true })
+    try {
+      await new Promise<void>((resolvePromise, reject) => {
+        execFile('tar', ['-xf', abs, '-C', tmp], { timeout: 60_000 }, (err) =>
+          err ? reject(err) : resolvePromise()
+        )
+      })
+      const walk = async (dir: string, prefix = ''): Promise<void> => {
+        for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+          const rel = prefix ? `${prefix}/${e.name}` : e.name
+          const full = join(dir, e.name)
+          if (e.isDirectory()) {
+            await walk(full, rel)
+            continue
+          }
+          const st = await fs.stat(full)
+          const fe = extname(rel).toLowerCase()
+          let text: string | undefined
+          if (TEXT_EXT.has(fe) && st.size <= MAX_TEXT) {
+            text = await fs.readFile(full, 'utf8').catch(() => undefined)
+          }
+          files.push({ path: rel, size: st.size, text })
+        }
+      }
+      await walk(tmp)
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  const total = files.reduce((s, f) => s + f.size, 0)
+  lines.push(`共 ${files.length} 个文件，解压后约 ${(total / 1024).toFixed(1)} KB`)
+  lines.push('', '目录：')
+  for (const f of files.slice(0, 200)) lines.push(`  ${f.path}  (${f.size} B)`)
+  if (files.length > 200) lines.push(`  …还有 ${files.length - 200} 个文件`)
+
+  const withText = files.filter((f) => typeof f.text === 'string')
+  let used = 0
+  const chunks: string[] = []
+  for (const f of withText.slice(0, MAX_ARCHIVE_MEMBERS)) {
+    if (used + f.size > MAX_ARCHIVE_TEXT) break
+    used += f.size
+    chunks.push(`--- ${f.path} ---\n${f.text}`)
+  }
+  if (chunks.length) {
+    lines.push('', `文本文件内容（${chunks.length} 个，共 ${(used / 1024).toFixed(1)} KB）：`)
+    lines.push(chunks.join('\n\n'))
+  } else {
+    lines.push('', '（包内没有可读的文本文件）')
+  }
+  return lines.join('\n')
 }
 
 /**
@@ -229,6 +332,12 @@ export async function buildAttachmentPart(
       if (buf.length > MAX_TEXT) return { note: `文本过大已忽略：${name}` }
       return {
         part: { type: 'text', text: `${ATTACH_TEXT_PREFIX}${name}\n\`\`\`\n${buf.toString('utf8')}\n\`\`\`` }
+      }
+    }
+    if (kind === 'archive') {
+      const text = await readArchiveAsText(abs)
+      return {
+        part: { type: 'text', text: `${ATTACH_TEXT_PREFIX}${name}（压缩包内容）\n${text}` }
       }
     }
     return { note: `已忽略不支持的文件：${name}` }

@@ -100,11 +100,47 @@ function loadAppTemplate(): string {
   return appTemplate
 }
 
+/**
+ * 版本信息：**运行时读取**，不写死也不依赖构建期常量。
+ *  - source：上游源码版本，读 apps/desktop/package.json（升级源码后重启即变）
+ *  - web：Web 改版版本，读 apps/desktop/web-version.json
+ * 关于页从 __DEVA_BOOT__ 里取，所以刷新页面就能看到最新值。
+ */
+function readVersionInfo(): { source: string; web: string } {
+  const read = (p: string, key: string): string => {
+    try {
+      const o = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>
+      return String(o[key] ?? '0.0.0')
+    } catch {
+      return '0.0.0'
+    }
+  }
+  // 构建产物：out/web/index.cjs → __dirname = out/web，版本文件同目录
+  // 开发模式：src/web-server/index.ts → 往上两级到 apps/desktop
+  const candidates = [__dirname, join(__dirname, '..', '..')]
+  for (const dir of candidates) {
+    const pkg = join(dir, 'package.json')
+    if (existsSync(pkg)) {
+      return {
+        source: read(pkg, 'version'),
+        web: read(join(dir, 'web-version.json'), 'webVersion')
+      }
+    }
+  }
+  return { source: '0.0.0', web: '0.0.0' }
+}
+
 function renderAppHtml(): string {
   const tpl = loadAppTemplate()
   if (!tpl) return ''
   const config = (syncToMain('config:get-sync', []) ?? {}) as Record<string, unknown>
-  const json = JSON.stringify({ user: auth.user, config, version: '0.1.7' }).replace(/</g, '\\u003c')
+  const versions = readVersionInfo()
+  const json = JSON.stringify({
+    user: auth.user,
+    config,
+    version: versions.source,
+    versions
+  }).replace(/</g, '\\u003c')
   return tpl.replace(
     /<script id="deva-boot"[^>]*>[\s\S]*?<\/script>/,
     `<script id="deva-boot" type="application/json">${json}</script>`
@@ -470,7 +506,13 @@ const server = createServer(async (req, res) => {
     // ── 首帧引导（同步配置；防闪烁） ──
     if (path === '/api/boot.js') {
       const config = (syncToMain('config:get-sync', []) ?? {}) as Record<string, unknown>
-      const js = `window.__DEVA_BOOT__=${JSON.stringify({ user: auth.user, config, version: app.getVersion() })};`
+      const versions = readVersionInfo()
+      const js = `window.__DEVA_BOOT__=${JSON.stringify({
+        user: auth.user,
+        config,
+        version: versions.source,
+        versions
+      })};`
       res.statusCode = 200
       res.setHeader('Content-Type', 'text/javascript; charset=utf-8')
       res.setHeader('Cache-Control', 'no-store')
@@ -633,10 +675,24 @@ function encodeArgs(args: unknown[]): unknown[] {
   })
 }
 
+/**
+ * 解码 WS 传参：把 `{__u8: base64}` 还原成 Uint8Array。
+ *
+ * 必须**递归**进对象和数组 —— 附件上传这类调用把字节放在对象字段里
+ * （`{name, mime, size, data: {__u8}}`），只解顶层会让主进程拿到普通对象，
+ * 后续 `createHash().update()` 直接抛错，表现为「粘贴/上传附件没反应」。
+ */
 function decodeArgs(args: unknown[]): unknown[] {
   const dec = (v: unknown): unknown => {
-    if (v && typeof v === 'object' && (v as any).__u8) {
+    if (v === null || v === undefined) return v
+    if (typeof v === 'object' && typeof (v as any).__u8 === 'string') {
       return new Uint8Array(Buffer.from((v as any).__u8, 'base64'))
+    }
+    if (Array.isArray(v)) return v.map(dec)
+    if (typeof v === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = dec(val)
+      return out
     }
     return v
   }

@@ -36,7 +36,7 @@ import { formatTokens } from '../../../shared/context'
 
 export type ToolStatus = 'running' | 'ok' | 'error' | 'denied'
 
-export type AttachKind = 'image' | 'document' | 'text'
+export type AttachKind = 'image' | 'document' | 'text' | 'archive'
 
 /** ask_user 候选项（与 preload/主进程对齐）。 */
 export interface AskOption {

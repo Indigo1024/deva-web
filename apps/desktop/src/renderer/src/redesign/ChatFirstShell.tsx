@@ -26,6 +26,7 @@ import {
   Download,
   ExternalLink,
   FileText,
+  FileArchive,
   FileCode2,
   FolderOpen,
   FolderPlus,
@@ -178,6 +179,7 @@ function iconFor(kind: AttachKind): React.ReactNode {
   if (kind === 'image') return <ImageIcon size={13} />
   if (kind === 'document') return <FileText size={13} />
   if (kind === 'text') return <FileCode2 size={13} />
+  if (kind === 'archive') return <FileArchive size={13} />
   return <Paperclip size={13} />
 }
 
@@ -282,7 +284,7 @@ interface Picked {
   name: string
   ext: string
   size: number
-  kind: 'image' | 'document' | 'text' | 'unsupported'
+  kind: 'image' | 'document' | 'text' | 'archive' | 'unsupported'
   supported: boolean
   reason?: string
 }
@@ -5831,10 +5833,19 @@ function McpKvEditor({
 
 function AboutPane(): React.JSX.Element {
   const { t } = useI18n()
-  // Web 构建才有这两个常量（桌面构建为 undefined）
-  const webVersion = typeof __WEB_VERSION__ === 'string' ? __WEB_VERSION__ : null
+  // Web 构建才有这些常量（桌面构建为 undefined）
   const upstreamRepo = typeof __UPSTREAM_REPO__ === 'string' ? __UPSTREAM_REPO__ : null
   const webRepo = typeof __WEB_REPO__ === 'string' ? __WEB_REPO__ : null
+  /**
+   * 版本优先取服务端注入的运行时值（window.__DEVA_VERSIONS__，每次渲染页面时读取文件），
+   * 这样升级源码后刷新页面就能看到新版本，不需要等前端重新构建。
+   * 取不到时回落到构建期常量。
+   */
+  const runtimeVersions = (window as unknown as { __DEVA_VERSIONS__?: { source?: string; web?: string } })
+    .__DEVA_VERSIONS__
+  const sourceVersion = runtimeVersions?.source ?? __APP_VERSION__
+  const webVersion =
+    runtimeVersions?.web ?? (typeof __WEB_VERSION__ === 'string' ? __WEB_VERSION__ : null)
   return (
     <>
       <h2 className="cf-pane__title">{t('settings.about')}</h2>
@@ -5842,8 +5853,7 @@ function AboutPane(): React.JSX.Element {
         <img className="cf-about__icon" src={devaIcon} alt="" aria-hidden />
         <div className="cf-about__name">{t('app.name')}</div>
         <div className="cf-about__ver">
-          {t('settings.version')} {__APP_VERSION__}
-          {webVersion && <span className="cf-about__ver-tag">上游</span>}
+          源码版 v{sourceVersion}
         </div>
         {webVersion && (
           <div className="cf-about__ver cf-about__ver--web">

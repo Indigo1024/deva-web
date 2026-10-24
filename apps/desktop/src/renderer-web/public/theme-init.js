@@ -16,6 +16,8 @@
       }
     }
     var b = window.__DEVA_BOOT__ || {}
+    // 运行时版本（服务端每次渲染页面时读取 package.json / web-version.json 注入）
+    if (b.versions) window.__DEVA_VERSIONS__ = b.versions
     var m = (b.config || {}).theme
     if (!m) m = localStorage.getItem('deva.theme')
     var dark = m === 'dark' || ((m === 'system' || !m) && matchMedia('(prefers-color-scheme: dark)').matches)
