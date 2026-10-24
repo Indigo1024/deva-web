@@ -2639,11 +2639,63 @@ body.cf-resizing-y * {
   font-size: 12px;
   color: var(--fg-subtle);
 }
+/* 版本行里的小标签：区分「上游」与「Web 改版」 */
+.cf-about__ver-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  vertical-align: 1px;
+}
 .cf-about__desc {
   margin-top: var(--space-4);
   font-size: 13px;
   line-height: 1.7;
   color: var(--fg-muted);
+}
+/* Web 改版版本行：与上游版本并排时稍作区分 */
+.cf-about__ver--web {
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+/* 关于页的两个 GitHub 入口（上游源码 / 本改版仓库） */
+.cf-about__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: var(--space-4);
+}
+.cf-about__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: 12px;
+  text-decoration: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.cf-about__link:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+.cf-about__link-ext {
+  color: var(--fg-subtle);
 }
 /* 关于页「检查更新」（UpdateSection.tsx） */
 .cf-update {

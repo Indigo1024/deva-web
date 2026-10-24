@@ -33,6 +33,7 @@ import {
   GitBranch,
   GitCommitHorizontal,
   GitMerge,
+  Github,
   Image as ImageIcon,
   Info,
   Lightbulb,
@@ -530,17 +531,25 @@ export function ChatFirstShell(): React.JSX.Element {
   }, [])
 
   /**
-   * 底栏 tab 点击（web 移动适配）：手机上「切新 tab → 打开抽屉展示该 tab 的列表」，
-   * 「再点当前 tab → 收起抽屉」；桌面/广屏行为不变（is-mobdrawer 类仅在 <720px 生效）。
+   * 底栏 tab 点击。两套语义合并：
+   *  - 上游 v0.1.10：点亮着的「对话」图标 = 收起 / 展开会话列表；
+   *  - Web 移动端（<720px，is-mobdrawer 生效时）：切新 tab → 打开抽屉展示该 tab 列表，
+   *    再点当前 tab → 收起抽屉。桌面/广屏行为保持上游原样。
    */
   const onRailTab = (t: RailTab): void => {
     const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 719px)').matches
-    if (t === railTab) {
-      if (isMobile) setMobDrawer((v) => !v)
+    if (isMobile) {
+      if (t === railTab) {
+        setMobDrawer((v) => !v)
+        return
+      }
+      setRailTab(t)
+      setMobDrawer(true)
       return
     }
-    setRailTab(t)
-    if (isMobile) setMobDrawer(true)
+    // 桌面：完全沿用上游语义
+    if (t === 'chats' && railTab === 'chats') setCollapsed(!listCollapsed)
+    else setRailTab(t)
   }
 
   /** 与某身份发起新对话：新建空会话（首发落绑定，并快照该身份当时的偏好模型）→ 回到消息视图。 */
@@ -704,8 +713,8 @@ export function ChatFirstShell(): React.JSX.Element {
         )}
         <IconRail
           tab={railTab}
-          // 点亮着的「对话」图标 = 收起 / 展开会话列表；点别的图标照常切页。
-          onTab={(tab) => (tab === 'chats' && railTab === 'chats' ? setCollapsed(!listCollapsed) : setRailTab(tab))}
+          // 移动端抽屉逻辑与上游「点对话图标收起侧栏」在 onRailTab 里统一处理
+          onTab={onRailTab}
           listCollapsed={collapsed}
           onChatsHover={peekEnter}
           onChatsLeave={peekLeave}
@@ -5822,6 +5831,10 @@ function McpKvEditor({
 
 function AboutPane(): React.JSX.Element {
   const { t } = useI18n()
+  // Web 构建才有这两个常量（桌面构建为 undefined）
+  const webVersion = typeof __WEB_VERSION__ === 'string' ? __WEB_VERSION__ : null
+  const upstreamRepo = typeof __UPSTREAM_REPO__ === 'string' ? __UPSTREAM_REPO__ : null
+  const webRepo = typeof __WEB_REPO__ === 'string' ? __WEB_REPO__ : null
   return (
     <>
       <h2 className="cf-pane__title">{t('settings.about')}</h2>
@@ -5830,8 +5843,32 @@ function AboutPane(): React.JSX.Element {
         <div className="cf-about__name">{t('app.name')}</div>
         <div className="cf-about__ver">
           {t('settings.version')} {__APP_VERSION__}
+          {webVersion && <span className="cf-about__ver-tag">上游</span>}
         </div>
+        {webVersion && (
+          <div className="cf-about__ver cf-about__ver--web">
+            Web 改版 v{webVersion}
+          </div>
+        )}
         {t('app.tagline') && <p className="cf-about__desc">{t('app.tagline')}</p>}
+        {webVersion && (
+          <div className="cf-about__links">
+            {upstreamRepo && (
+              <a className="cf-about__link" href={upstreamRepo} target="_blank" rel="noreferrer">
+                <Github size={13} />
+                上游源码
+                <ExternalLink size={11} className="cf-about__link-ext" />
+              </a>
+            )}
+            {webRepo && (
+              <a className="cf-about__link" href={webRepo} target="_blank" rel="noreferrer">
+                <Github size={13} />
+                Web 改版仓库
+                <ExternalLink size={11} className="cf-about__link-ext" />
+              </a>
+            )}
+          </div>
+        )}
         <UpdateSection />
       </div>
     </>

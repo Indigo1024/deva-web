@@ -95,6 +95,12 @@ export interface ChatSetFocusRequest {
   focusRoot: string | null
 }
 
+export interface ChatRenameSessionRequest {
+  sessionId: string
+  /** 新标题；空串 = 恢复自动标题（由首条用户消息派生）。 */
+  title: string
+}
+
 /** 附件类型（与 services/attachments.ts 对齐）。 */
 export type AttachmentKind = 'image' | 'document' | 'text' | 'unsupported'
 
@@ -147,8 +153,10 @@ export type DisplayBlock =
   | { kind: 'tool'; id: string; name: string; args: unknown; status: 'ok' | 'error' | 'running'; summary?: string }
   | {
       kind: 'notice'
-      code: 'compacted' | 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
+      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
     }
+  /** 较早历史已压缩：一行提示，摘要正文（已去掉写给模型的开头）默认折叠。 */
+  | { kind: 'compaction'; summary: string }
   | { kind: 'error'; message: string }
   | { kind: 'agentcard'; id: string; draft: AgentDraft; status: 'pending' | 'accepted' | 'rejected' }
   /**
@@ -191,7 +199,8 @@ export type DisplayMessage =
       /** 后台任务通知：展示为一行系统通知而非用户气泡，text 为其标题。 */
       notify?: true
     }
-  | { role: 'assistant'; blocks: DisplayBlock[] }
+  /** durationMs：本轮耗时（未记录则缺省）。 */
+  | { role: 'assistant'; blocks: DisplayBlock[]; durationMs?: number }
 
 /** 回滚列表里每轮自身的改动量（与 services/checkpoints.ts 的 RewindTurnStat 对齐）。 */
 export interface RewindTurnStat {
@@ -314,6 +323,9 @@ export interface SkillRecord {
   description: string
   trigger: string
   allowedTools: string[]
+  license: string
+  compatibility: string
+  metadata: Record<string, string>
   instructions: string
   enabled: boolean
   /** 来源：`builtin` = 应用内置（不可删/编辑、恒启用）；`custom` = 用户创建/导入。 */
@@ -706,6 +718,8 @@ export type ChatStreamEvent =
       status: 'compacted' | 'none' | 'failed'
       message?: string
     }
+  /** 正在压缩上下文：开始请求摘要时 active=true，结束（不论结果）active=false，成对出现。 */
+  | { type: 'compacting'; active: boolean }
   /** 某张交互卡已被答复（可能来自手机端）：渲染层据此把同 key 的卡收成已决态。 */
   | {
       type: 'interaction_resolved'
@@ -730,7 +744,8 @@ export type ChatStreamEvent =
       /** notify：本轮由后台任务通知自动发起，text 为通知标题。 */
       user: { text: string; attachments: { name: string; kind: 'image' | 'document' | 'text' }[]; notify?: true }
     }
-  | { type: 'done'; stopReason: string }
+  /** durationMs：本轮耗时（扣除等用户处置的时间）。 */
+  | { type: 'done'; stopReason: string; durationMs?: number }
 
 /** IM 机器人（远程通道）状态，与 services/remote/index.ts 的 BotView / ScanEvent 对齐。 */
 export type BotPlatform = 'feishu' | 'telegram'
@@ -824,9 +839,16 @@ const api = {
     list: (): Promise<SkillRecord[]> => ipcRenderer.invoke('skills:list'),
     get: (id: string): Promise<SkillRecord | null> => ipcRenderer.invoke('skills:get', id),
     import: (): Promise<SkillImportResult> => ipcRenderer.invoke('skills:import'),
-    remove: (id: string): Promise<{ ok: true }> => ipcRenderer.invoke('skills:remove', id),
+    /** 删除 = 技能文件夹移到系统回收站；ok:false 表示未能移入，技能原样保留。 */
+    remove: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('skills:remove', id),
     setEnabled: (id: string, enabled: boolean): Promise<{ ok: true }> =>
-      ipcRenderer.invoke('skills:set-enabled', id, enabled)
+      ipcRenderer.invoke('skills:set-enabled', id, enabled),
+    /** 订阅 skills:changed（技能目录变化后推送的全表），返回取消订阅函数（仿 tasks.onChanged）。 */
+    onChanged: (cb: (skills: SkillRecord[]) => void): (() => void) => {
+      const listener = (_e: unknown, skills: SkillRecord[]): void => cb(skills)
+      ipcRenderer.on('skills:changed', listener)
+      return () => ipcRenderer.removeListener('skills:changed', listener)
+    }
   },
   /** 本机用户资料（个人资料面板）：头像 spec 存 config.json，图片另存 ~/.deva/profile/。 */
   profile: {
@@ -936,6 +958,9 @@ const api = {
     /** 挂载 / 卸载本对话的聚焦工作区并立即落库（不等下一次发送）。 */
     setFocus: (req: ChatSetFocusRequest): Promise<{ ok: true }> =>
       ipcRenderer.invoke('chat:set-focus', req),
+    /** 重命名对话并立即落库，回传最终标题（清空即恢复自动标题）；尚未建档的会话回 null。 */
+    renameSession: (req: ChatRenameSessionRequest): Promise<{ title: string } | null> =>
+      ipcRenderer.invoke('chat:rename-session', req),
     abort: (turnId: string): Promise<{ ok: true }> => ipcRenderer.invoke('chat:abort', turnId),
     /** 停止一个后台运行的子智能体（toolUseId = 其 Task 卡 id）；已结束 / 不存在回 ok:false。 */
     stopSubagent: (sessionId: string, toolUseId: string): Promise<{ ok: boolean }> =>

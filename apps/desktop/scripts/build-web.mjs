@@ -38,6 +38,23 @@ const appVersion = (() => {
   }
 })()
 
+/**
+ * Web 改版自身的版本号：独立于上游 Deva 的版本（改版可以只改 Web 层而不跟上游）。
+ * 放 apps/desktop/web-version.json，关于页同时展示「上游版本」与「Web 改版版本」。
+ */
+const webVersion = (() => {
+  try {
+    return JSON.parse(readFileSync(join(root, 'web-version.json'), 'utf8')).webVersion ?? '0.0.0'
+  } catch {
+    console.warn('[build-web] 读不到 web-version.json，回落 0.0.0')
+    return '0.0.0'
+  }
+})()
+
+/** 两个 GitHub 入口：上游源码仓库 + 本改版仓库。 */
+const UPSTREAM_REPO = 'https://github.com/sqfcyily/deva'
+const WEB_REPO = process.env.DEVA_WEB_REPO?.trim() || 'https://github.com/Indigo1024/deva-web'
+
 // 构建产物依赖外置（node_modules 就近解析；hoisted 布局下从 apps/desktop 起向上都能找到）
 const externalDeps = [
   'ws',
@@ -80,7 +97,9 @@ async function buildServer() {
     external: externalDeps,
     define: {
       'process.env.NODE_ENV': '"production"',
-      __DEVA_VERSION__: JSON.stringify(appVersion)
+      __DEVA_VERSION__: JSON.stringify(appVersion),
+      __WEB_VERSION__: JSON.stringify(webVersion),
+      __WEB_REPO__: JSON.stringify(WEB_REPO)
     },
     logLevel: 'info'
   })
@@ -132,7 +151,10 @@ async function buildRenderer() {
     },
     plugins: [react()],
     define: {
-      __APP_VERSION__: JSON.stringify(appVersion)
+      __APP_VERSION__: JSON.stringify(appVersion),
+      __WEB_VERSION__: JSON.stringify(webVersion),
+      __UPSTREAM_REPO__: JSON.stringify(UPSTREAM_REPO),
+      __WEB_REPO__: JSON.stringify(WEB_REPO)
     },
     build: {
       outDir: rendererOut,

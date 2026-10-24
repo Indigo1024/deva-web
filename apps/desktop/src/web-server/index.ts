@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto'
 import { WebSocketServer, type WebSocket } from 'ws'
 
 import {
+  app,
   invokeChannel,
   emitToMain,
   syncToMain,
@@ -54,7 +55,7 @@ import { listSessions, getSession } from '../main/services/chat-store'
 import { sweepCheckpoints } from '../main/services/checkpoints'
 import { sweepSubagents } from '../main/services/subagent-store'
 import { sweepMedia } from '../main/services/media-store'
-import { registerSkillsIpc } from '../main/services/skills'
+import { registerSkillsIpc, startSkillsWatcher } from '../main/services/skills'
 import { ensureSeededPersonas, registerPersonasIpc } from '../main/services/personas'
 import { registerProfileIpc } from '../main/services/profile'
 import { registerMemoryIpc } from '../main/services/memory'
@@ -70,7 +71,8 @@ import { registerClipboardIpc } from '../main/services/clipboard'
 import { registerTasksIpc } from '../main/services/tasks'
 import { startScheduler } from '../main/services/scheduler'
 import { registerRemoteIpc, stopAllChannels } from '../main/services/remote'
-import { registerUpdaterIpc } from '../main/services/updater'
+// Web 版更新走自己的实现：数据源是改版仓库，安装 = 服务端拉取重建重启
+import { registerWebUpdaterIpc, readUpdateLog } from './web-updater'
 
 const __dirname_ = __dirname
 const PORT = Number(process.env.DEVA_WEB_PORT ?? 8790)
@@ -147,6 +149,8 @@ function bootServices(): void {
   // 图片/PDF 外置 blob 清扫（上游 v0.1.9）：删掉已无任何对话或子智能体引用的文件
   void sweepMedia().catch((e) => console.warn('[media] 清扫失败：', e))
   registerSkillsIpc(webWindowRef)
+  // 技能目录监听：变化后向所有客户端推 skills:changed（输入框 / 联想与扩展页随之刷新）
+  startSkillsWatcher(webWindowRef)
   ensureSeededPersonas()
   registerPersonasIpc()
   registerProfileIpc()
@@ -157,7 +161,7 @@ function bootServices(): void {
   registerGitIpc()
   registerClipboardIpc()
   registerTasksIpc(webWindowRef)
-  registerUpdaterIpc(webWindowRef)
+  registerWebUpdaterIpc(webWindowRef)
 
   // Web 专属通道
   registerWebChannels()
@@ -466,11 +470,20 @@ const server = createServer(async (req, res) => {
     // ── 首帧引导（同步配置；防闪烁） ──
     if (path === '/api/boot.js') {
       const config = (syncToMain('config:get-sync', []) ?? {}) as Record<string, unknown>
-      const js = `window.__DEVA_BOOT__=${JSON.stringify({ user: auth.user, config, version: '0.1.7' })};`
+      const js = `window.__DEVA_BOOT__=${JSON.stringify({ user: auth.user, config, version: app.getVersion() })};`
       res.statusCode = 200
       res.setHeader('Content-Type', 'text/javascript; charset=utf-8')
       res.setHeader('Cache-Control', 'no-store')
       res.end(js)
+      return
+    }
+
+    // ── 在线更新的安装日志（设置 → 关于 → 更新失败时排障用） ──
+    if (path === '/api/update-log' && req.method === 'GET') {
+      res.statusCode = 200
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+      res.setHeader('Cache-Control', 'no-store')
+      res.end(readUpdateLog() || '(暂无日志)')
       return
     }
 
