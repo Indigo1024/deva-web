@@ -350,3 +350,22 @@
     padding-right: 8px;
   }
 }
+
+/* 关于页：窄屏下两个 GitHub 入口等宽两列，避免长文案按钮把另一个挤扁 */
+@media (max-width: 719px) {
+  .cf-about__links {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    width: 100%;
+    max-width: 320px;
+    gap: 8px;
+  }
+  .cf-about__link {
+    justify-content: center;
+    padding: 8px 6px;
+    font-size: 11.5px;
+  }
+  .cf-about__link-ext {
+    display: none;
+  }
+}
