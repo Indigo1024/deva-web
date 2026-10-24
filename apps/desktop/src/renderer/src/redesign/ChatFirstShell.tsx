@@ -8,6 +8,7 @@ import {
   useState,
   useSyncExternalStore
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   AlarmClock,
   AlertTriangle,
@@ -855,7 +856,13 @@ function IconRail({
       >
         <Avatar user size={34} />
       </button>
-      {profileOpen && <ProfilePanel onClose={() => setProfileOpen(false)} />}
+      {/*
+       * ProfilePanel 必须 portal 到 body：它内部是 position:fixed 的遮罩，
+       * 而移动端 .cf-iconrail 有 backdrop-filter —— 那会创建包含块，
+       * 让 fixed 相对 56px 高的底栏定位，面板就掉到屏幕最底下。
+       */}
+      {profileOpen &&
+        createPortal(<ProfilePanel onClose={() => setProfileOpen(false)} />, document.body)}
       <button
         className={`cf-navbtn${tab === 'chats' ? ' is-active' : ''}`}
         title={chatsLabel}

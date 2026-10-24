@@ -86,9 +86,13 @@
     padding: 0 4px env(safe-area-inset-bottom);
     border-right: none;
     border-top: 1px solid var(--border);
-    background: color-mix(in srgb, var(--bg-inset) 88%, transparent);
-    -webkit-backdrop-filter: saturate(180%) blur(12px);
-    backdrop-filter: saturate(180%) blur(12px);
+    /*
+     * 注意：这里**不要**加 backdrop-filter / filter / transform。
+     * 它们会给元素创建「包含块」，让任何后代里 position:fixed 的弹层
+     * 相对这 56px 高的底栏定位，而不是视口——个人资料面板曾因此掉到屏幕最底下。
+     * 用不透明背景即可。
+     */
+    background: var(--bg-inset);
     z-index: 60;
   }
   /*
@@ -416,13 +420,16 @@
     padding-right: 18px;
   }
 
-  /* ---------------------------- 弹窗全屏化 ---------------------------- */
+  /* ---------------------------- 弹窗 ----------------------------
+   * 设置、任务表单这类内容多的：全屏铺满，把竖向空间都用上。
+   * 个人资料（is-editor 且内容不多）：居中卡片，留白更自然，
+   * 不要强行拉满一屏然后在底部空一大片。
+   */
   .cf-modal__backdrop {
     padding: 0;
     place-items: stretch;
   }
   .cf-modal,
-  .cf-modal.is-editor,
   .cf-modal.bots-scanmodal,
   .cf-modal.bots-pickmodal {
     width: 100%;
@@ -432,6 +439,19 @@
     max-height: none;
     border: none;
     border-radius: 0;
+  }
+  /* 个人资料面板：居中卡片，高度按内容走，最高 88dvh */
+  .cf-modal__backdrop:has(> .cf-modal.is-editor) {
+    padding: 16px;
+    place-items: center;
+  }
+  .cf-modal.is-editor {
+    width: 100%;
+    max-width: 560px;
+    height: auto;
+    max-height: 88dvh;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
   }
   .cf-modal__head {
     padding-top: calc(var(--space-3) + env(safe-area-inset-top));
