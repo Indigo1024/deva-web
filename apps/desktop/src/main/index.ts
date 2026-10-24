@@ -11,7 +11,7 @@ import { listSessions } from './services/chat-store'
 import { sweepCheckpoints } from './services/checkpoints'
 import { sweepSubagents } from './services/subagent-store'
 import { sweepMedia } from './services/media-store'
-import { registerSkillsIpc } from './services/skills'
+import { registerSkillsIpc, startSkillsWatcher } from './services/skills'
 import { ensureSeededPersonas, registerPersonasIpc } from './services/personas'
 import { registerProfileIpc } from './services/profile'
 import { registerMemoryIpc } from './services/memory'
@@ -30,11 +30,58 @@ import { startScheduler } from './services/scheduler'
 import { registerRemoteIpc, stopAllChannels } from './services/remote'
 import { registerUpdaterIpc } from './services/updater'
 import { registerToastIdentity } from './services/portable'
+import { integrateAppImage } from './services/appimage'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
 /** 关窗驻留托盘时，真正退出由此标志放行（before-quit / 托盘「退出」置 true）。 */
 let isQuitting = false
+
+/**
+ * Linux 密钥存储后端：Electron 只按 `XDG_CURRENT_DESKTOP` 的**硬编码白名单**挑后端
+ * （GNOME / XFCE / X-Cinnamon / Deepin / Pantheon / UKUI / unity），其余一律落到 `basic_text`。
+ * 而 `basic_text` 下 `safeStorage.isEncryptionAvailable()` 恒为 false，API 密钥就存不进去
+ * （见 services/secrets.ts：宁可拒绝也不明文落盘）。
+ *
+ * 问题是 niri / sway / Hyprland 这类独立合成器都不在白名单里——用户明明装了 gnome-keyring、
+ * 钥匙环也解锁了，Electron 却根本不问它。故在 app ready 之前显式补一个 `--password-store`
+ * 绕过白名单；用户自己传了同名参数则完全尊重（不覆盖）。
+ */
+function ensureLinuxPasswordStore(): void {
+  if (process.platform !== 'linux') return
+  if (app.commandLine.hasSwitch('password-store')) return
+  const desktop =
+    `${process.env.XDG_CURRENT_DESKTOP ?? ''} ${process.env.XDG_SESSION_DESKTOP ?? ''}`.toLowerCase()
+  const isKde = desktop.includes('kde') || desktop.includes('plasma')
+  // KWallet 5 / 6 的接口不通用，按会话版本选；KDE_SESSION_VERSION 由 Plasma 自己设置
+  const kdeBackend = process.env.KDE_SESSION_VERSION === '5' ? 'kwallet5' : 'kwallet6'
+  app.commandLine.appendSwitch('password-store', isKde ? kdeBackend : 'gnome-libsecret')
+}
+
+// 必须早于 app ready：Chromium 在初始化 OSCrypt 时读一次，之后再改就没用了
+ensureLinuxPasswordStore()
+
+/** 明暗主题下的窗口控件叠加配色（与 tokens.css 的 --bg / --fg 对齐）。 */
+const OVERLAY_SYMBOL = { light: '#3a3a3d', dark: '#e4e4e7' } as const
+const OVERLAY_BG = { light: '#ffffff', dark: '#1e1e20' } as const
+
+/**
+ * 窗口控件叠加（Window Controls Overlay）参数；macOS 返回 undefined（红绿灯由系统绘制）。
+ * - Windows：透明底 + 显式 symbolColor，图标颜色随主题即时切换（见 window:set-overlay）。
+ * - Linux：不支持透明叠加区与 symbolColor（Electron 按 color 自动算对比色），只能用实色底，
+ *   所以跟着主题给底色，否则深色主题下会顶一条白条。
+ */
+function overlayOptions(
+  dark: boolean
+): { color: string; symbolColor?: string; height: number } | undefined {
+  if (process.platform === 'win32') {
+    return { color: '#00000000', symbolColor: dark ? OVERLAY_SYMBOL.dark : OVERLAY_SYMBOL.light, height: 40 }
+  }
+  if (process.platform === 'linux') {
+    return { color: dark ? OVERLAY_BG.dark : OVERLAY_BG.light, height: 40 }
+  }
+  return undefined
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -46,16 +93,12 @@ function createWindow(): void {
     autoHideMenuBar: true,
     icon: getAppIcon(),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#1e1e20' : '#ffffff',
-    // 无边框 + 原生窗口控件叠加，做出干净的自定义顶栏（Windows / macOS）
+    // 无边框 + 原生窗口控件叠加，做出干净的自定义顶栏（Windows / Linux；macOS 用红绿灯）
     titleBarStyle: 'hidden',
-    titleBarOverlay:
-      process.platform === 'win32'
-        ? {
-            color: '#00000000',
-            symbolColor: nativeTheme.shouldUseDarkColors ? '#e4e4e7' : '#3a3a3d',
-            height: 40
-          }
-        : undefined,
+    // Linux 也支持 Window Controls Overlay：不给它就只有无边框窗口、没有任何 min/max/close 按钮。
+    // 与 Windows 的差别：Linux 不支持透明叠加区，也不支持 symbolColor（Electron 按 color 自动算对比色），
+    // 故这里用与标题栏底色一致的实色。
+    titleBarOverlay: overlayOptions(nativeTheme.shouldUseDarkColors),
     // macOS 红绿灯整组约 54px 宽：在 72px 宽的图标栏内水平居中，垂直居中于栏顶预留的 40px（见 redesign.css .has-traffic-lights）
     trafficLightPosition: { x: 9, y: 13 },
     webPreferences: {
@@ -227,15 +270,27 @@ if (!app.requestSingleInstanceLock()) {
   electronApp.setAppUserModelId('dev.sqfcy.deva')
   // 便携版没有开始菜单快捷方式：注册通知显示名与图标，否则通知标题是原始 ID（须早于第一条通知）
   registerToastIdentity('dev.sqfcy.deva')
+  // Linux AppImage：把 desktop 入口与图标写到用户目录，启动器里才找得到 Deva（后台进行，不阻塞启动）
+  void integrateAppImage()
+  // Linux X11：窗口的 WM_CLASS 取自应用名（默认是 package.json 的 @deva/desktop），与 deva.desktop 的
+  // StartupWMClass=deva 对不上，任务栏就归不到 Deva 图标下（Wayland 的 app_id 取 desktopName，不受影响）。
+  // 必须在 ready 之后改：应用名同时决定 userData 目录与钥匙环里加密密钥的条目名（application=@deva/desktop），
+  // ready 前改会换目录、找不到原密钥，已存的 API 密钥就解不开了；ready 后两者都已定下，只影响之后建的窗口。
+  if (process.platform === 'linux') app.setName('deva')
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  // 渲染层通知主进程：主题变化时同步原生标题栏控件配色
+  // 渲染层通知主进程：主题变化时同步原生标题栏控件配色。
+  // 参数是渲染层算好的 symbolColor（Windows 用）；Linux 不吃 symbolColor，改按明暗换实色底。
   ipcMain.handle('window:set-overlay', (_evt, symbolColor: string) => {
-    if (process.platform === 'win32' && mainWindow) {
+    if (!mainWindow) return
+    if (process.platform === 'win32') {
       mainWindow.setTitleBarOverlay({ color: '#00000000', symbolColor, height: 40 })
+    } else if (process.platform === 'linux') {
+      const dark = symbolColor === OVERLAY_SYMBOL.dark
+      mainWindow.setTitleBarOverlay({ color: dark ? OVERLAY_BG.dark : OVERLAY_BG.light, height: 40 })
     }
   })
 
@@ -279,10 +334,12 @@ if (!app.requestSingleInstanceLock()) {
 
   // 技能（Skills，全局 ~/.deva/skills/*/SKILL.md；渐进式披露，启用态入 config.json）
   registerSkillsIpc(() => mainWindow)
+  startSkillsWatcher(() => mainWindow)
 
   // Agent 提示词（Personas，全局 ~/.deva/personas/*.md；已启用者追加进主智能体系统提示词，启用态入 config.json）
   // 首启种子：逐条种入默认角色（Deva / 小码酱 …，见 default-personas.ts），对话优先外壳默认身份；
   // 按 id 幂等 + 防删除后复活 + 将来新增默认角色可增量补种（守卫位 personas.seeded[id] 入 config）。
+  // 每次启动顺带检查默认提示词：升级后有新版、且用户没改过（基线 personas.seededPrompt[id]）→ 换成新版。
   ensureSeededPersonas()
   registerPersonasIpc()
   registerProfileIpc()

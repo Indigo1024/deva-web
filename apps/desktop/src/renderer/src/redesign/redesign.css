@@ -31,6 +31,16 @@
      第二列（对话面板）宽由 --cf-side 驱动：可拖动，JS 侧已按上下限与窗口宽夹取。 */
   grid-template-columns: var(--cf-rail-w, 56px) var(--cf-side, 300px) minmax(0, 1fr);
   min-height: 0;
+  /* 收起 / 展开会话列表时列宽平滑过渡；拖动手柄时关掉，免得宽度追着光标慢半拍 */
+  transition: grid-template-columns 0.16s ease;
+}
+.cf-resizing-x .cf-body {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-body {
+    transition: none;
+  }
 }
 
 /* ---------------------------- 拖拽调整尺寸手柄 ---------------------------- */
@@ -182,6 +192,48 @@ body.cf-resizing-y * {
   min-height: 0;
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
+}
+/*
+ * 会话列表收起：列宽归零（对话区随之平滑扩开），列表保持展开时的宽度、立即隐去。不留隐去延迟：列表里的头像、
+ * 新建按钮是定位元素，延迟期间会画在对话区上面、比别的内容晚消失。仍留在网格里占着第二列——改成脱离
+ * 文档流的话，对话区会被自动排进这一列。
+ */
+.cf-rail.is-collapsed {
+  width: var(--cf-side-open);
+  visibility: hidden;
+}
+/* 收起时悬停「对话」图标：列表整块浮在对话区上方（不挤占布局），低于弹框 */
+.cf-rail.is-collapsed.is-peek {
+  position: relative;
+  z-index: 45;
+  visibility: visible;
+  box-shadow: var(--shadow);
+  animation: cf-peek-in 0.14s ease;
+}
+/*
+ * 浮出期间列表顶行与对话区标题栏都不当窗口拖动区。鼠标在拖动区上会被系统当成在标题栏、网页收不到事件，
+ * 浮出列表就以为鼠标离开而收回：① 列表顶行本身是拖动区（只挖掉搜索框和新建按钮），从会话行往上移向
+ * 搜索框要经过它四周的空白；② 拖动区按 DOM 顺序计算、后来者覆盖，标题栏排在列表后面，会盖过浮出列表的顶行。
+ */
+.cf-rail.is-peek .cf-rail__top,
+.cf-body.is-peeking .cf-conv__head,
+.cf-body.is-peeking .cf-dragbar {
+  -webkit-app-region: no-drag;
+}
+@keyframes cf-peek-in {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-rail.is-collapsed.is-peek {
+    animation: none;
+  }
 }
 /* 角色列表：搜索行右侧的「添加角色」图标 */
 .cf-rail__addbtn {
@@ -511,6 +563,11 @@ body.cf-resizing-y * {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 会话里有没发出的草稿：下行开头的红色「[草稿]」（同 IM 里的草稿提示），其后是草稿开头 */
+.cf-thread__draft {
+  margin-right: 4px;
+  color: var(--danger);
 }
 
 /* 角色行（与对话行同构：头像 | 名称/专长/标签） */
@@ -1227,7 +1284,12 @@ body.cf-resizing-y * {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /* 始终留出滚动条的位置：内容刚超出一屏（展开工作过程、回复写满一屏）时滚动条冒出来，居中的消息列会整体左移
+     半个滚动条宽，收起又移回去，看起来像在抖 */
+  scrollbar-gutter: stable;
   padding: var(--space-5) 0;
+  /* 消息里吸顶元素（如展开的思考标题）的 top：抵掉上内边距，贴住可视区上沿，不留一条透出正文的缝 */
+  --sticky-top: calc(-1 * var(--space-5));
 }
 
 /* ---- 对话轮次索引（右侧导航） ---- */
@@ -1436,6 +1498,10 @@ body.cf-resizing-y * {
   grid-template-columns: minmax(0, 1fr);
   justify-items: center;
 }
+/* 压缩摘要：不占头像列，提示居中、展开的摘要占满整行（见 .msg__compaction） */
+.cf-msg.is-compaction {
+  grid-template-columns: minmax(0, 1fr);
+}
 .cf-notify {
   display: inline-flex;
   align-items: center;
@@ -1614,11 +1680,25 @@ body.cf-resizing-y * {
   font-size: 11px;
   color: var(--fg-subtle);
 }
-/* 待办清单进度胶囊：输入盒正上方、左对齐、随内容宽，最多一个（进行中的清单）；点开向上展开其条目（与输入盒同宽）。 */
-.cf-todo {
+/*
+ * 输入盒正上方的胶囊排：待办清单进度 + 后台任务，左对齐、随内容宽，始终一行——换行会让输入框上方忽高忽低。
+ * 放不下时两枚按各自内容宽度等比收缩，文字各自省略（计数、停止键等不收缩）；都没有时整排不占位。
+ */
+.cf-dock {
+  display: flex;
+  gap: var(--space-2);
   margin-bottom: var(--space-2);
 }
-.cf-todo__pill {
+.cf-dock:empty {
+  display: none;
+}
+.cf-dock > * {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+/* 待办清单进度胶囊：最多一个（进行中的清单）；点开向上展开其条目（与输入盒同宽）。 */
+.cf-todo__pill,
+.cf-bg__pill {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -1634,9 +1714,109 @@ body.cf-resizing-y * {
   cursor: pointer;
 }
 .cf-todo__pill:hover,
-.cf-todo.is-open .cf-todo__pill {
+.cf-todo.is-open .cf-todo__pill,
+.cf-bg__pill.is-toggle:hover,
+.cf-bg.is-open .cf-bg__pill {
   border-color: var(--border-strong);
   color: var(--fg);
+}
+/*
+ * 后台任务胶囊（与待办清单胶囊同一排、同一外观）：一个任务时「⟳ 后台 标题 [停止]」，胶囊本身不可点；
+ * 多个时「⟳ N 个后台任务 ˄」，点开向上展开逐个停止（面板复用待办清单面板的样式）。
+ */
+.cf-bg__pill {
+  cursor: default;
+}
+.cf-bg__pill.is-toggle {
+  cursor: pointer;
+}
+.cf-bg__spin {
+  flex: none;
+  color: var(--accent);
+}
+.cf-bg__label {
+  flex: none;
+  color: var(--accent);
+}
+.cf-bg__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.cf-bg__caret {
+  flex: none;
+  color: var(--fg-subtle);
+  transition: transform 0.15s ease;
+}
+.cf-bg.is-open .cf-bg__caret {
+  transform: rotate(180deg);
+}
+.cf-bg__stop {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: -4px;
+  padding: 0 var(--space-2);
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--fg-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+.cf-bg__stop:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.cf-bg__stop:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.cf-bg__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+/* 面板里的一个任务：标题行（转圈 + 标题 + 停止）下面一行它当前的步骤，与标题左对齐 */
+.cf-bg__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.cf-bg__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: 13px;
+}
+.cf-bg__row .cf-bg__name {
+  flex: 1;
+}
+/* 当前步骤恒为一行：工具文字过长时省略，「等 N 项」后缀不收缩——每个任务最多两行，面板不会被撑开 */
+.cf-bg__step {
+  display: flex;
+  min-width: 0;
+  padding-left: 21px; /* 转圈图标 13px + 间距 8px */
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.cf-bg__more {
+  flex: none;
+  margin-left: 6px;
+  color: var(--fg-subtle);
+}
+.cf-bg__step .tl__obj,
+.cf-bg__step .tl__extra,
+.cf-bg__step .tl__err {
+  font-size: 11.5px;
 }
 .cf-todo__now {
   min-width: 0;
@@ -1755,7 +1935,42 @@ body.cf-resizing-y * {
   font-size: 13.5px;
   line-height: 1.5;
   min-height: 44px;
-  overflow-y: auto; /* 对话输入框固定高（内联 height），内容多了框内滚动 */
+  overflow-y: auto;
+}
+/* 对话输入框：Lexical 接管的 contentEditable，排版同上方 textarea（含其默认 2px 内边距）；
+   固定高（内联 height），内容多了框内滚动。 */
+.cf-draft {
+  position: relative; /* 占位提示的定位锚 */
+  min-height: 44px;
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+.cf-draft__input {
+  height: 100%;
+  padding: 2px;
+  overflow-y: auto;
+  outline: none;
+}
+.cf-draft__input p {
+  margin: 0;
+}
+.cf-draft__ph {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  right: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-subtle);
+  pointer-events: none;
+  user-select: none;
+}
+/* 开头会生效的 /指令（已启用技能、整条只有它的 /compact /rewind）：只上色，不加底色。 */
+.cf-slash-token {
+  color: var(--accent);
 }
 .cf-box__bar {
   display: flex;
@@ -2304,7 +2519,7 @@ body.cf-resizing-y * {
 .cf-setrow__main {
   min-width: 0;
 }
-/* 可点开编辑的行（MCP）：主区做透明按钮，铺满行宽，右侧陈列 chevron 暗示可钻取 */
+/* 可点开详情的行（自定义技能 / MCP）：主区做透明按钮，铺满行宽，右侧陈列 chevron 暗示可钻取 */
 .cf-setrow__open {
   flex: 1 1 auto;
   min-width: 0;
@@ -2741,7 +2956,7 @@ body.cf-resizing-y * {
   box-sizing: border-box;
   border: 1px solid var(--border);
   border-radius: var(--radius-full);
-  background: var(--bg-base, #fff);
+  background: var(--bg-elevated);
   color: var(--fg);
   font-size: 12.5px;
   cursor: default;

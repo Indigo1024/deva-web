@@ -129,10 +129,13 @@ const zhCN: MessageTree = {
     enable: '启用',
     name: '名称',
     description: '描述',
-    instructions: '技能指令',
+    instructions: 'Skill 说明',
     trigger: '触发方式',
     triggerHint: '在对话中输入以下命令即可手动激活：',
     allowedTools: '建议工具',
+    compatibility: '运行环境要求',
+    license: '许可',
+    properties: '属性',
     transport: '传输方式',
     command: '启动命令',
     commandPlaceholder: '如 npx、node、python…',
@@ -225,10 +228,12 @@ const zhCN: MessageTree = {
     emptyHint: '描述任务，Deva 会读写项目文件、按需请求授权来完成。',
     error: '出错了',
     notice: {
-      truncated: '回复多次撞上输出长度上限，自动续写仍未完成，已停下。可发送「继续」，或让我把内容拆小、分段写入文件。',
+      truncated: '回复多次撞上输出长度上限或工具参数不完整，自动续写仍未完成，已停下。可发送「继续」，或让我把内容拆小、分段写入文件。',
       empty: '本轮模型没有返回任何内容。可换种说法重试或换个模型；若这轮对话已经很长，也可以新建对话或先压缩上下文。',
       refused: '模型拒绝了本次请求（或被服务商的内容策略拦截），本轮没有返回内容。换种说法或换个模型再试。',
-      compacted: '较早的对话已压缩为摘要，以节省上下文。',
+      compacted: '较早的对话已压缩为摘要',
+      compactedShow: '查看摘要',
+      compactedHide: '收起',
       compactNone: '当前对话较短，无需压缩。',
       compactFailed: '压缩失败，历史保持不变。',
       contextLimitLearned:
@@ -290,7 +295,6 @@ const zhCN: MessageTree = {
       // 空 agent 名 = 未指定内置子智能体，即回落通用子智能体（见主进程 subagents.ts）。
       fallback: 'General',
       fork: '分身',
-      task: '任务',
       stepUnit: '步',
       noSteps: '无内部工具调用',
       // run_in_background：派发它的那轮不等它，结束后自动通知主智能体。
@@ -300,9 +304,103 @@ const zhCN: MessageTree = {
       // 后台任务通知行的兜底文案（主进程通常会给出具体标题）。
       notify: '后台任务已结束'
     },
-    toolGroup: {
-      title: '调用了 {n} 个工具',
-      failed: '{n} 个失败'
+    // 输入框上方的后台任务胶囊（后台运行中的子智能体）。胶囊本身已表明在后台运行，标签写「子智能体」说明是什么在跑；
+    // 面板标题仍带「后台」，说明前台运行的子智能体不在这里。
+    bg: {
+      label: '子智能体',
+      title: '后台子智能体',
+      count: '{n} 个子智能体',
+      stopAll: '全部停止',
+      stopAllHint: '停止全部后台子智能体（它们停止前的输出会随下一条消息交给主智能体）',
+      // 面板里还没有内部步骤（刚派出，或重新载入后步骤已不在）时，任务下面那一行的文字。
+      working: '进行中',
+      // 同时执行好几个工具时，当前步骤那行只写一个，后缀总数。
+      more: '等 {n} 项'
+    },
+    // 时间轴上每步一行：「动词 + 对象」。done=已完成，doing=执行中（扫光），base=失败时接「失败：原因」。
+    flow: {
+      done: {
+        readFile: '已读取',
+        listDir: '已列出',
+        glob: '已查找',
+        grep: '已搜索',
+        webFetch: '已获取',
+        writeFile: '已写入',
+        editFile: '已编辑',
+        runCommand: '已运行',
+        askUser: '已询问',
+        createSkill: '已创建技能',
+        createMcp: '已创建 MCP 服务',
+        memoryRead: '已读取记忆',
+        memoryWrite: '已记住',
+        memoryDelete: '已删除记忆',
+        todoWrite: '已更新待办清单',
+        presentFiles: '已交付',
+        unknown: '已调用'
+      },
+      doing: {
+        readFile: '正在读取',
+        listDir: '正在列出',
+        glob: '正在查找',
+        grep: '正在搜索',
+        webFetch: '正在获取',
+        writeFile: '正在写入',
+        editFile: '正在编辑',
+        runCommand: '正在运行',
+        askUser: '正在询问',
+        createSkill: '正在创建技能',
+        createMcp: '正在创建 MCP 服务',
+        memoryRead: '正在读取记忆',
+        memoryWrite: '正在记住',
+        memoryDelete: '正在删除记忆',
+        todoWrite: '正在更新待办清单',
+        presentFiles: '正在交付',
+        unknown: '正在调用'
+      },
+      base: {
+        readFile: '读取',
+        listDir: '列出',
+        glob: '查找',
+        grep: '搜索',
+        webFetch: '获取',
+        writeFile: '写入',
+        editFile: '编辑',
+        runCommand: '运行',
+        askUser: '询问',
+        createSkill: '创建技能',
+        createMcp: '创建 MCP 服务',
+        memoryRead: '读取记忆',
+        memoryWrite: '记住',
+        memoryDelete: '删除记忆',
+        todoWrite: '更新待办清单',
+        presentFiles: '交付',
+        unknown: '调用'
+      },
+      failed: '失败',
+      // 处置过的计划 / 挂载请求收进工作过程后的节点文字。
+      plan: {
+        approve: '已批准计划',
+        keep: '已要求继续完善计划',
+        ignore: '已忽略计划',
+        cancelled: '计划已取消'
+      },
+      mount: {
+        mounted: '已挂载工作区',
+        skipped: '未挂载工作区'
+      }
+    },
+    process: {
+      // 折叠条标题：进行中「处理中 · 7 步」，结束后「已处理 1 分 12 秒 · 7 步」；没记录耗时的旧对话回落为「已执行 7 步」。
+      // 结束后过程里只有一段思考时为「已思考 12 秒」。
+      live: '处理中',
+      more: '还有 {n} 个在执行',
+      worked: '已处理 {d}',
+      thought: '已思考 {d}',
+      count: '{n} 步',
+      steps: '已执行 {n} 步',
+      h: '{n} 小时',
+      m: '{n} 分',
+      s: '{n} 秒'
     },
     agentcard: {
       title: '角色名片',
@@ -313,7 +411,9 @@ const zhCN: MessageTree = {
     },
     work: {
       thinking: '思考中',
+      requesting: '等待回复',
       responding: '生成回答中',
+      compacting: '正在压缩较早的对话',
       usingTool: '正在调用工具',
       subagent: '子智能体运行中',
       awaitingAnswer: '等待你的选择（在上方问答卡选择或输入）',
@@ -551,6 +651,8 @@ const zhCN: MessageTree = {
       downloadInstaller: '下载安装包',
       manualHintMac: '下载后打开安装包，先退出 Deva，再把 Deva 拖进「应用程序」替换旧版。',
       manualHint: '下载后运行安装包，直接覆盖安装即可。',
+      manualHintLinux: '下载 AppImage 后先退出 Deva，把它设为可执行（chmod +x），再替换旧文件即可。',
+      manualHintDeb: '下载后先退出 Deva，在下载目录里运行 sudo apt install ./{file} 覆盖安装即可。',
       downloadPortable: '下载便携版',
       portableHint: '下载后退出 Deva，解压新版本并替换原文件夹即可，设置与对话不受影响。',
       downloading: '正在下载 {percent}%',
@@ -567,7 +669,6 @@ const zhCN: MessageTree = {
     title: '模型',
     providers: '模型服务商',
     addProvider: '添加提供方',
-    tagLLM: '对话模型',
     tagDecision: '决策模型',
     rowThreshold: '触发阈值 {n}',
     addChatModel: '添加对话模型',
@@ -756,14 +857,16 @@ const zhCN: MessageTree = {
     },
     brandTag: '对话优先',
     newChat: '新建对话',
+    draftTag: '[草稿]',
     search: '搜索',
     searchChats: '搜索对话',
     searchRoster: '搜索角色',
     searchNoResults: '未找到匹配项',
     tabChats: '消息',
+    collapseList: '收起会话列表',
+    expandList: '展开会话列表',
     tabRoster: '角色',
     tabTasks: '定时任务',
-    noPersona: '还没有角色，点下方「添加角色」创建一个',
     addPersona: '添加角色',
     addByChat: '通过对话添加',
     addByChatPrompt: '我想创建一个新角色，请一步步引导我明确它的定位、性格与专长，最后用角色名片提交给我确认。',
@@ -920,6 +1023,7 @@ const zhCN: MessageTree = {
     send: '发送',
     newline: '换行',
     cancel: '取消',
+    attachSkipped: '以下文件类型不支持或过大，未添加：{names}',
     save: '保存',
     prefModel: '偏好模型',
     startChat: '开始对话',
@@ -930,6 +1034,9 @@ const zhCN: MessageTree = {
     editPersona: '编辑角色',
     delete: '删除',
     deleteChat: '删除对话',
+    renameChat: '重命名',
+    renameChatTitle: '重命名对话',
+    renamePlaceholder: '留空则恢复默认标题',
     pinTop: '置顶',
     deletePersona: '删除角色',
     deleteChatConfirm: '删除后该对话的所有消息将被永久移除，无法恢复。',
@@ -1001,7 +1108,10 @@ const zhCN: MessageTree = {
     kindSkill: '技能',
     kindMcp: 'MCP',
     builtin: '内置',
-    mcpDeleteConfirm: '确定删除该 MCP 服务？此操作不可撤销。'
+    mcpDeleteConfirm: '确定删除该 MCP 服务？此操作不可撤销。',
+    skillDeleteConfirm: '技能文件夹（含其中的脚本与资料）将移到回收站，可从回收站还原。',
+    skillDeleteConfirmMac: '技能文件夹（含其中的脚本与资料）将移到废纸篓，可从废纸篓还原。',
+    skillDeleteFailed: '删除失败：技能文件夹可能正被占用，可稍后重试或在文件夹中手动删除。'
   }
 }
 
@@ -1130,6 +1240,9 @@ const en: MessageTree = {
     trigger: 'Trigger',
     triggerHint: 'Type this command in chat to activate manually:',
     allowedTools: 'Suggested tools',
+    compatibility: 'Requirements',
+    license: 'License',
+    properties: 'Properties',
     transport: 'Transport',
     command: 'Command',
     commandPlaceholder: 'e.g. npx, node, python…',
@@ -1222,12 +1335,14 @@ const en: MessageTree = {
     emptyHint: 'Describe a task; Deva reads and writes project files, asking permission as needed.',
     error: 'Something went wrong',
     notice: {
-      truncated: 'Replies kept hitting the output length limit and automatic continuation didn’t finish, so I stopped. Send “continue”, or ask me to split the work into smaller pieces.',
+      truncated: 'Replies kept hitting the output length limit or producing incomplete tool arguments, and automatic continuation didn’t finish, so I stopped. Send “continue”, or ask me to split the work into smaller pieces.',
       empty:
         'The model returned nothing this turn. Try rephrasing or another model; if this chat has grown long, start a new one or compact the context first.',
       refused:
         'The model declined this request (or the provider blocked it by content policy), so nothing came back. Try rephrasing, or switch models.',
-      compacted: 'Earlier conversation was compacted into a summary to save context.',
+      compacted: 'Earlier conversation compacted into a summary',
+      compactedShow: 'Show summary',
+      compactedHide: 'Hide',
       compactNone: 'This conversation is still short — nothing to compact.',
       compactFailed: 'Compaction failed; history is unchanged.',
       contextLimitLearned:
@@ -1287,7 +1402,6 @@ const en: MessageTree = {
       continuedTitle: 'Subagent follow-up',
       fallback: 'General',
       fork: 'Fork',
-      task: 'Task',
       stepUnit: 'steps',
       noSteps: 'No internal tool calls',
       background: 'Background',
@@ -1295,9 +1409,95 @@ const en: MessageTree = {
       stopHint: 'Stop this background subagent (its output so far goes to the main agent with your next message)',
       notify: 'Background task finished'
     },
-    toolGroup: {
-      title: '{n} tool calls',
-      failed: '{n} failed'
+    bg: {
+      label: 'Subagent',
+      title: 'Background subagents',
+      count: '{n} subagents',
+      stopAll: 'Stop all',
+      stopAllHint: 'Stop all background subagents (their output so far goes to the main agent with your next message)',
+      working: 'Working',
+      more: '· {n} in parallel'
+    },
+    flow: {
+      done: {
+        readFile: 'Read',
+        listDir: 'Listed',
+        glob: 'Found',
+        grep: 'Searched',
+        webFetch: 'Fetched',
+        writeFile: 'Wrote',
+        editFile: 'Edited',
+        runCommand: 'Ran',
+        askUser: 'Asked',
+        createSkill: 'Created skill',
+        createMcp: 'Created MCP server',
+        memoryRead: 'Read memory',
+        memoryWrite: 'Remembered',
+        memoryDelete: 'Forgot memory',
+        todoWrite: 'Updated todo list',
+        presentFiles: 'Delivered',
+        unknown: 'Called'
+      },
+      doing: {
+        readFile: 'Reading',
+        listDir: 'Listing',
+        glob: 'Finding',
+        grep: 'Searching',
+        webFetch: 'Fetching',
+        writeFile: 'Writing',
+        editFile: 'Editing',
+        runCommand: 'Running',
+        askUser: 'Asking',
+        createSkill: 'Creating skill',
+        createMcp: 'Creating MCP server',
+        memoryRead: 'Reading memory',
+        memoryWrite: 'Remembering',
+        memoryDelete: 'Forgetting memory',
+        todoWrite: 'Updating todo list',
+        presentFiles: 'Delivering',
+        unknown: 'Calling'
+      },
+      base: {
+        readFile: 'Read',
+        listDir: 'List',
+        glob: 'Find',
+        grep: 'Search',
+        webFetch: 'Fetch',
+        writeFile: 'Write',
+        editFile: 'Edit',
+        runCommand: 'Run',
+        askUser: 'Ask',
+        createSkill: 'Create skill',
+        createMcp: 'Create MCP server',
+        memoryRead: 'Read memory',
+        memoryWrite: 'Remember',
+        memoryDelete: 'Forget memory',
+        todoWrite: 'Update todo list',
+        presentFiles: 'Deliver',
+        unknown: 'Call'
+      },
+      failed: 'failed',
+      plan: {
+        approve: 'Approved plan',
+        keep: 'Asked to refine plan',
+        ignore: 'Ignored plan',
+        cancelled: 'Plan cancelled'
+      },
+      mount: {
+        mounted: 'Mounted workspace',
+        skipped: 'Skipped mounting workspace'
+      }
+    },
+    process: {
+      live: 'Working',
+      more: '{n} more running',
+      worked: 'Worked for {d}',
+      thought: 'Thought for {d}',
+      count: '{n} steps',
+      steps: '{n} steps',
+      h: '{n}h',
+      m: '{n}m',
+      s: '{n}s'
     },
     agentcard: {
       title: 'Agent card',
@@ -1308,7 +1508,9 @@ const en: MessageTree = {
     },
     work: {
       thinking: 'Thinking',
+      requesting: 'Waiting for response',
       responding: 'Responding',
+      compacting: 'Compacting earlier conversation',
       usingTool: 'Using tool',
       subagent: 'Running subagent',
       awaitingAnswer: 'Waiting for your choice (pick or type in the card above)',
@@ -1552,6 +1754,10 @@ const en: MessageTree = {
       manualHintMac:
         'Open the downloaded installer, quit Deva, then drag Deva into Applications to replace the old version.',
       manualHint: 'Run the downloaded installer to install over the current version.',
+      manualHintLinux:
+        'Quit Deva, make the downloaded AppImage executable (chmod +x), then replace the old file.',
+      manualHintDeb:
+        'Quit Deva, then run sudo apt install ./{file} in your download folder to install over the current version.',
       downloadPortable: 'Download portable version',
       portableHint:
         'Quit Deva, then extract the new version and replace the old folder. Your settings and conversations are not affected.',
@@ -1570,7 +1776,6 @@ const en: MessageTree = {
     title: 'Models',
     providers: 'Providers',
     addProvider: 'Add provider',
-    tagLLM: 'Chat',
     tagDecision: 'Decision',
     rowThreshold: 'Threshold {n}',
     addChatModel: 'Add chat model',
@@ -1763,14 +1968,16 @@ const en: MessageTree = {
     },
     brandTag: 'Chat-first',
     newChat: 'New chat',
+    draftTag: '[Draft]',
     search: 'Search',
     searchChats: 'Search chats',
     searchRoster: 'Search personas',
     searchNoResults: 'No matches',
     tabChats: 'Chats',
+    collapseList: 'Collapse conversation list',
+    expandList: 'Expand conversation list',
     tabRoster: 'Roster',
     tabTasks: 'Tasks',
-    noPersona: 'No personas yet — click “Add persona” below to create one',
     addPersona: 'Add persona',
     addByChat: 'Add via chat',
     addByChatPrompt:
@@ -1925,6 +2132,7 @@ const en: MessageTree = {
     send: 'Send',
     newline: 'newline',
     cancel: 'Cancel',
+    attachSkipped: 'Skipped unsupported or oversized files: {names}',
     save: 'Save',
     prefModel: 'Preferred model',
     startChat: 'Start chat',
@@ -1935,6 +2143,9 @@ const en: MessageTree = {
     editPersona: 'Edit persona',
     delete: 'Delete',
     deleteChat: 'Delete conversation',
+    renameChat: 'Rename',
+    renameChatTitle: 'Rename conversation',
+    renamePlaceholder: 'Leave empty to restore the default title',
     pinTop: 'Pin to top',
     deletePersona: 'Delete persona',
     deleteChatConfirm:
@@ -2010,7 +2221,13 @@ const en: MessageTree = {
     kindSkill: 'Skill',
     kindMcp: 'MCP',
     builtin: 'Built-in',
-    mcpDeleteConfirm: 'Delete this MCP server? This cannot be undone.'
+    mcpDeleteConfirm: 'Delete this MCP server? This cannot be undone.',
+    skillDeleteConfirm:
+      'The skill folder, including its scripts and files, will be moved to the Recycle Bin, where you can restore it.',
+    skillDeleteConfirmMac:
+      'The skill folder, including its scripts and files, will be moved to the Trash, where you can restore it.',
+    skillDeleteFailed:
+      'Could not delete the skill. The folder may be in use; try again later or delete it manually.'
   }
 }
 

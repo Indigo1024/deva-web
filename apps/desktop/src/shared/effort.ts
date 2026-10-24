@@ -7,10 +7,15 @@
  * 内置模型目录（DeepSeek Harness 所用；其规则：无思考能力 → 只有「关」；xhigh / max 须显式标注才算支持）。
  *
  * 参数格式（ThinkFormat）：
- *  - standard：Anthropic output_config.effort / OpenAI reasoning_effort / Responses reasoning.effort；
+ *  - standard：Anthropic adaptive thinking + output_config.effort（Claude 原生）/ OpenAI reasoning_effort /
+ *    Responses reasoning.effort；
  *  - deepseek / zai / qwen：国产家族在 OpenAI Chat 协议上开思考要各自的私有开关（thinking.type /
- *    enable_thinking），能调档的再附 reasoning_effort。私有格式只在 OpenAI Chat 协议上生效，
- *    走其他协议时视为不支持。格式先按服务地址判定（同一模型放在百炼上就得用通义的开关），认不出再按模型家族。
+ *    enable_thinking），能调档的再附 reasoning_effort。格式先按服务地址判定（同一模型放在百炼上就得用通义的
+ *    开关），认不出再按模型家族；
+ *  - compat：国产模型走 Anthropic 兼容端点——各家都认 output_config.effort、大多默认开着思考，却未必认 Claude
+ *    专属的 adaptive，故只发 effort；只能开不能调的发 thinking.type=enabled，默认不思考的另附 thinking.type=adaptive。
+ *  Responses 协议不分家族，一律按 standard 发 reasoning.effort：国产厂商少有该端点，走它的多是中转站，
+ *  由中转站换算成上游格式（同 pi-ai）；只能开不能调的发 high 表示开启。
  */
 
 /** 'default' = 不发任何思考 / 推理参数，交给模型与服务商的默认行为。 */
@@ -20,7 +25,7 @@ export type ThinkLevel = Exclude<EffortLevel, 'default'>
 /** 对话模型的协议适配器（与 providers/* 一致）。 */
 export type EffortAdapter = 'anthropic' | 'openai' | 'responses'
 /** 开思考 / 调档所用的参数格式，见文件头。 */
-export type ThinkFormat = 'standard' | 'deepseek' | 'zai' | 'qwen'
+export type ThinkFormat = 'standard' | 'deepseek' | 'zai' | 'qwen' | 'compat'
 
 export const THINK_LEVELS: readonly ThinkLevel[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
@@ -42,12 +47,19 @@ interface Rule {
   match: RegExp
   /** 支持的档；null = 不支持思考等级（选择器整个隐藏、恒按「默认」发）。toggle 规则可省略。 */
   levels?: LevelMap | null
-  /** 该家族开思考的参数格式（缺省 standard）。 */
+  /** 该家族在 OpenAI Chat 协议上开思考的参数格式（缺省 standard）。 */
   format?: ThinkFormat
-  /** 只能开、不能调档：只发私有开关、不发 reasoning_effort，选择器显示「默认 / 开启」。 */
+  /** 只能开、不能调档：只发开思考的开关、不发档位值，选择器显示「默认 / 开启」。 */
   toggle?: boolean
   /** 开着思考时，回放的助手消息须带 reasoning_content 字段（DeepSeek 思考模式的硬要求，缺了即 400）。 */
   reasoningField?: boolean
+  /**
+   * 国产模型走 Anthropic 协议时按 compat 格式发：'effort' = 只发 output_config.effort；'adaptive' = 该模型默认
+   * 不思考，另发 thinking.type=adaptive 打开。私有格式家族不必标，缺省即 'effort'。
+   */
+  compat?: 'effort' | 'adaptive'
+  /** 只在这些协议上核实过；其余协议跳过本条、接着往下匹配。 */
+  adapters?: EffortAdapter[]
 }
 
 /**
@@ -95,9 +107,13 @@ const RULES: Rule[] = [
   { match: /qwen3\.([8-9]|\d{2,})/, levels: { low: 'low', medium: 'medium', xhigh: 'xhigh' }, format: 'qwen' },
   { match: /qwq/, levels: null },
   { match: /qwen/, toggle: true, format: 'qwen' },
-  // ── Moonshot：kimi-k3 走标准 reasoning_effort；k2 系用 thinking.type 开思考、不能调档。
-  { match: /kimi-k3/, levels: L_H_MAX, reasoningField: true },
+  // ── Moonshot：kimi-k3 走标准 reasoning_effort（Anthropic 端点不认 thinking 参数）；k2 系用 thinking.type 开思考、不能调档。
+  { match: /kimi-k3/, levels: L_H_MAX, reasoningField: true, compat: 'effort' },
   { match: /kimi-k2/, toggle: true, format: 'deepseek' },
+  // ── MiniMax：只核实了 Anthropic 端点（官方推荐接法），OpenAI Chat 的开关未核实；M3 默认不思考，须 adaptive 打开。
+  { match: /minimax-m([3-9]|\d{2,})/, adapters: ['anthropic', 'responses'], levels: FULL, compat: 'adaptive' },
+  // ── 豆包（火山方舟）：只核实了 Anthropic 端点，output_config.effort 各档都收（不支持的由服务端映射）。
+  { match: /doubao-seed-([2-9]|\d{2,})/, adapters: ['anthropic', 'responses'], levels: FULL, compat: 'effort' },
   // ── 其余国产：参数各异、尚未核实，暂不支持
   { match: /kimi|moonshot|minimax|doubao|ernie|hunyuan|baichuan/, levels: null }
 ]
@@ -107,10 +123,12 @@ const FALLBACK: Rule = { match: /^/, levels: LMH }
 
 /** 只能开不能调的模型，内部用一档 high 表示「开启」，不带档位值。 */
 const TOGGLE_MAP: LevelMap = { high: '' }
+/** 同上，走 Responses 协议时：标准协议没有开关字段，发 reasoning.effort=high 表示开启。 */
+const TOGGLE_MAP_RESPONSES: LevelMap = { high: 'high' }
 
-function findRule(modelId: string): Rule {
+function findRule(adapter: EffortAdapter, modelId: string): Rule {
   const id = modelId.toLowerCase()
-  return RULES.find((r) => r.match.test(id)) ?? FALLBACK
+  return RULES.find((r) => (!r.adapters || r.adapters.includes(adapter)) && r.match.test(id)) ?? FALLBACK
 }
 
 /** 按服务地址判定私有格式（官方端点）；认不出返回 undefined，交由模型家族决定。 */
@@ -133,23 +151,31 @@ interface Resolved {
   format: ThinkFormat
   toggle: boolean
   reasoningField: boolean
+  /** compat 格式另发的 thinking.type（见 EffortRequest.thinking）。 */
+  thinking?: 'enabled' | 'adaptive'
 }
 
 /** 规则 + 协议 + 服务地址 → 实际能力；null = 不支持思考等级。 */
 function resolve(adapter: EffortAdapter, modelId: string, baseURL?: string): Resolved | null {
-  const rule = findRule(modelId)
+  const rule = findRule(adapter, modelId)
   const map = rule.toggle ? TOGGLE_MAP : rule.levels
   if (!map) return null
   const family = rule.format ?? 'standard'
-  // 私有格式只在 OpenAI Chat 协议上发得出去；走 Anthropic / Responses 协议时视为不支持。
-  if (adapter !== 'openai') {
-    if (family !== 'standard') return null
-    return { map, format: 'standard', toggle: false, reasoningField: false }
+  const toggle = Boolean(rule.toggle)
+  if (adapter === 'anthropic') {
+    // 国产模型的 Anthropic 兼容端点用 compat；Claude 及表外模型用 Claude 原生写法。
+    const compat = rule.compat ?? (family === 'standard' ? undefined : 'effort')
+    if (!compat) return { map, format: 'standard', toggle: false, reasoningField: false }
+    const thinking = toggle ? 'enabled' : compat === 'adaptive' ? 'adaptive' : undefined
+    return { map, format: 'compat', toggle, reasoningField: false, ...(thinking ? { thinking } : {}) }
   }
+  // Responses 是标准协议，不分家族一律发 reasoning.effort（见文件头）。
+  if (adapter === 'responses')
+    return { map: toggle ? TOGGLE_MAP_RESPONSES : map, format: 'standard', toggle, reasoningField: false }
   return {
     map,
     format: endpointFormat(baseURL) ?? family,
-    toggle: Boolean(rule.toggle),
+    toggle,
     reasoningField: Boolean(rule.reasoningField)
   }
 }
@@ -187,6 +213,8 @@ export interface EffortRequest {
   effort?: string
   /** 回放的助手消息补 reasoning_content 字段（见 Rule.reasoningField）。 */
   reasoningField?: boolean
+  /** compat 格式另发的 thinking.type：只能开不能调的发 'enabled'，默认不思考的发 'adaptive'；缺省 = 不发 thinking。 */
+  thinking?: 'enabled' | 'adaptive'
 }
 
 /** 某档（须已收敛）对应的请求参数；'default' / 不支持 → undefined（不发任何思考参数）。 */
@@ -203,6 +231,7 @@ export function effortRequest(
   return {
     format: r.format,
     ...(value ? { effort: value } : {}),
-    ...(r.reasoningField ? { reasoningField: true } : {})
+    ...(r.reasoningField ? { reasoningField: true } : {}),
+    ...(r.thinking ? { thinking: r.thinking } : {})
   }
 }

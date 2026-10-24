@@ -606,11 +606,91 @@ textarea {
   flex-shrink: 0;
   animation: deva-pulse 1.2s ease-in-out infinite;
 }
+/* 接在进行中消息末尾时（已有工作过程折叠条）：跟在步骤与卡片后面，不再用列表间距的负外边距 */
+.msg__content > .chat__status {
+  margin-top: var(--space-3);
+}
+/* 回复还没内容时（如等待挂载）：状态行就占正文的位置，紧跟在角色名下面 */
+.msg__content > .chat__status:first-child {
+  margin-top: 0;
+}
+/* 请求中（回复还没开始）：角色名下面、正文将出现的位置，三个点依次放大缩小（同原「思考中」小点的主题色） */
+.chat__pending {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+}
+.chat__pending i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.5;
+  transform: scale(0.55);
+  animation: deva-pending 1.2s ease-in-out infinite;
+}
+.chat__pending i:nth-child(2) {
+  animation-delay: 0.16s;
+}
+.chat__pending i:nth-child(3) {
+  animation-delay: 0.32s;
+}
+@keyframes deva-pending {
+  0%,
+  70%,
+  100% {
+    opacity: 0.5;
+    transform: scale(0.55);
+  }
+  35% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat__pending i {
+    animation: none;
+    opacity: 0.7;
+    transform: none;
+  }
+}
 .chat__status-time {
   margin-left: auto;
   font-size: 12px;
   color: var(--fg-subtle);
   font-variant-numeric: tabular-nums;
+}
+/* 正在压缩上下文：文字扫光，与平时的「思考中」区分开 */
+.chat__status-shimmer {
+  color: transparent;
+  background: linear-gradient(
+      90deg,
+      var(--fg-muted) 0%,
+      var(--fg-muted) 40%,
+      var(--fg) 50%,
+      var(--fg-muted) 60%,
+      var(--fg-muted) 100%
+    )
+    0 0 / 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: deva-shimmer 2s linear infinite;
+}
+@keyframes deva-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat__status-shimmer {
+    color: var(--fg-muted);
+    background: none;
+    animation: none;
+  }
 }
 .chat__status.is-waiting {
   color: var(--fg-muted);
@@ -1070,7 +1150,7 @@ textarea {
   overflow-x: auto;
 }
 
-/* 子智能体折叠 Task 卡：整段收成一张可展开卡，默认只显结论，内部工具序列纳于其中 */
+/* 可展开的卡片外壳（现由「已完成清单」卡使用）：头部一行，展开后显示卡体 */
 .subagent {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1094,53 +1174,6 @@ textarea {
 }
 .subagent.is-open .subagent__head {
   border-bottom-color: var(--border);
-}
-/* 卡头一行：折叠按钮占满，后台运行中的子智能体右侧另有停止键（不能嵌在折叠按钮里）。 */
-.subagent__headrow {
-  display: flex;
-  align-items: center;
-  background: var(--bg-panel);
-}
-.subagent__headrow .subagent__head {
-  flex: 1;
-  min-width: 0;
-}
-.subagent.is-open .subagent__headrow {
-  border-bottom: 1px solid var(--border);
-}
-.subagent.is-open .subagent__headrow .subagent__head {
-  border-bottom-color: transparent;
-}
-.subagent__bg {
-  flex: none;
-  font-weight: 500;
-  font-size: 11px;
-  color: var(--accent);
-  padding: 1px var(--space-2);
-  border-radius: var(--radius-full);
-  background: var(--bg-inset);
-}
-.subagent__stop {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-right: var(--space-2);
-  padding: 2px var(--space-2);
-  font-size: 12px;
-  color: var(--fg-muted);
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-full);
-  cursor: pointer;
-}
-.subagent__stop:hover:not(:disabled) {
-  color: var(--danger);
-  border-color: var(--danger);
-}
-.subagent__stop:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 .subagent__head:hover {
   background: var(--bg-hover);
@@ -1194,75 +1227,326 @@ textarea {
   flex-direction: column;
   gap: var(--space-2);
 }
-.subagent__task {
-  display: flex;
-  gap: var(--space-2);
-  font-size: 12px;
-  color: var(--fg-muted);
+
+/*
+ * 时间轴（思考 / 工具调用 / 子智能体）：一条细竖线串起每一步，每步一个图标节点 + 一行「动词 + 对象 + 说明」。
+ * 成功不做标记，执行中节点转圈、动词扫光，失败节点与说明标红。文字比正文浅一档，节点之间留出正常行距
+ * （单行一步约 32px）。
+ */
+.tl {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
 }
-.subagent__task-label {
-  flex: none;
-  font-weight: 600;
+.tl + .msg__text {
+  margin-top: var(--space-3);
+}
+.tl__item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  column-gap: 10px;
+  padding-bottom: 10px;
+}
+.tl__item:last-child {
+  padding-bottom: 0;
+}
+/*
+ * 竖线：从本节点图标下方连到下一个节点图标上方，两端各留 3px（图标 14px，居中在 22px 高的节点里，
+ * 上下各空 4px），故线伸进下一步顶部的空白里；节点展开的内容也在线的右侧。
+ */
+.tl__item:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 9.5px;
+  top: 21px;
+  bottom: -1px;
+  width: 1px;
+  background: var(--border-strong);
+}
+.tl__node {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 22px;
   color: var(--fg-subtle);
 }
-.subagent__task-text {
+.tl__item.is-run > .tl__node {
+  color: var(--accent);
+}
+.tl__item.is-err > .tl__node {
+  color: var(--danger);
+}
+.tl__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--fg-subtle);
+}
+.tl__main {
+  min-width: 0;
+}
+.tl__line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--fg-muted);
+}
+/* 可展开的行：悬停底色贴着内容走，左右各让出 6px 以免文字贴边 */
+button.tl__line {
+  width: fit-content;
+  max-width: calc(100% + 12px);
+  margin-inline: -6px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--fg-muted);
+  text-align: left;
+  cursor: pointer;
+}
+button.tl__line:hover {
+  background: var(--bg-hover);
+}
+.tl__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl__text > * + * {
+  margin-left: 6px;
+}
+.tl__verb {
+  font-weight: 500;
+}
+.tl__obj {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  /* 命令与路径要按原样显示：等宽字体的连字会把 => 画成 ⇒ */
+  font-variant-ligatures: none;
+}
+.tl__extra {
+  font-size: 12.5px;
+  color: var(--fg-subtle);
+}
+.tl__err {
+  font-size: 12.5px;
+  color: var(--danger);
+}
+.tl__tag {
+  font-size: 12px;
+  color: var(--accent);
+}
+.tl__shimmer {
+  color: transparent;
+  background: linear-gradient(
+      90deg,
+      var(--fg-muted) 0%,
+      var(--fg-muted) 40%,
+      var(--fg) 50%,
+      var(--fg-muted) 60%,
+      var(--fg-muted) 100%
+    )
+    0 0 / 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: tl-shimmer 1.6s linear infinite;
+}
+@keyframes tl-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+.tl__caret {
+  flex: none;
+  color: var(--fg-subtle);
+  transition: transform 0.15s ease;
+}
+.tl__item.is-open > .tl__main > .tl__line .tl__caret,
+.tl__item.is-open > .tl__main > .tl__think-head > .tl__line .tl__caret {
+  transform: rotate(90deg);
+}
+.tl__body {
+  margin-top: var(--space-1);
+}
+.tl__think .md {
+  font-size: 13px;
+}
+/*
+ * 展开后吸在对话区顶部的标题行：工作过程折叠条（角色名 + 已处理 …）与时间轴上的思考节点（💡 已思考），长内容
+ * 读到中下部也能随手收起。底色同对话区，盖住滚到它下面的正文；外扩一圈（上下 4px 让吸住时文字不贴边，左右盖住
+ * 按钮的悬停底色），内边距抵回，开合时文字不挪位。两者都是 22px 内容 + 上下 4px = 30px 高。
+ * 吸附位置由滚动区给出（--sticky-top，见 .cf-msgs）：sticky 按滚动区内边距内沿吸附，要抵掉它的上内边距。
+ * 同一时间只吸一行（接力）：展开的折叠条里再展开思考时，两者吸在同一位置，思考标题在上层、连同节点图标盖住折叠条
+ * 那行；这段思考读完、标题被顶走，露出下面一直吸着的折叠条。
+ */
+.tl__think-head,
+.msg__process-row {
+  scroll-margin-top: var(--space-2);
+}
+/* 收起思考后滚回视野时，让出吸在顶部的折叠条那一行 */
+.msg__process.is-open .tl__think-head {
+  scroll-margin-top: calc(30px + var(--space-2));
+}
+.msg__process.is-open > .msg__process-row,
+.tl__item.is-open > .tl__main > .tl__think-head {
+  position: sticky;
+  top: var(--sticky-top, 0);
+  background: var(--bg);
+}
+.msg__process.is-open > .msg__process-row {
+  z-index: 1;
+  margin: -4px -6px;
+  padding: 4px 6px;
+}
+.tl__item.is-open > .tl__main > .tl__think-head {
+  z-index: 2;
+}
+/*
+ * 思考标题行向左外扩到节点列（节点 20px + 间距 10px + 6px），节点图标画在这一行里：吸住时带着图标，底色也能
+ * 完整盖住折叠条那行。外扩不分开合，图标位置始终与其他节点对齐；节点列留空占位。
+ */
+.tl__think-head {
+  position: relative;
+  margin: -4px -6px -4px -36px;
+  padding: 4px 6px 4px 36px;
+}
+.tl__think-icon {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 22px;
+  color: var(--fg-subtle);
+}
+.tl__item.is-run > .tl__main > .tl__think-head > .tl__think-icon {
+  color: var(--accent);
+}
+/* 思考的实时小窗：最多 4 行（13px × 1.6），超出时停在最新内容、上沿渐隐 */
+.tl__think-live {
+  max-height: calc(13px * 1.6 * 4);
+  overflow: hidden;
+}
+.tl__think-live .md {
+  line-height: 1.6;
+}
+.tl__think-live.is-overflow {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 1.6em);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 1.6em);
+}
+/* 已作答提问展开后的逐题回述：问题弱一档，答案在下 */
+.tl__qa {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-1);
+}
+.tl__qa-q {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--fg-subtle);
+}
+.tl__qa-a {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--fg-muted);
   white-space: pre-wrap;
   word-break: break-word;
 }
-.subagent__steps {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+/* 已决计划展开后的全文与回复：标题压到正文大小、去掉下划线，别在时间轴里显得比回复还重 */
+.tl__plan .md {
+  font-size: 13px;
 }
-.subagent__step {
+.tl__plan .md :is(h1, h2, h3, h4, h5, h6) {
+  margin: var(--space-2) 0 var(--space-1);
+  padding-bottom: 0;
+  border-bottom: none;
+  font-size: 1em;
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+.tl__feedback {
+  margin-top: var(--space-2);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tl__feedback-label {
+  margin-right: 6px;
+  color: var(--fg-subtle);
+}
+.tl__item--more .tl__line {
+  font-size: 12.5px;
+  color: var(--fg-subtle);
+}
+/* 中间说明节点：正文弱一档，首行与节点对齐 */
+.tl__item--note .md {
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--fg-muted);
+}
+/* 子智能体展开后的内部步骤：每步一行，带小图标 */
+.tl__sub {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-sm);
-  background: var(--bg-inset);
+  gap: 6px;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 24px;
+  color: var(--fg-muted);
+}
+.tl__sub .tl__obj {
   font-size: 12px;
 }
-.subagent__step-icon {
+.tl__sub-icon {
   display: grid;
   place-items: center;
-  color: var(--fg-muted);
   flex: none;
-}
-.subagent__step-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.subagent__step-title code {
-  font-family: var(--font-mono);
-  color: var(--fg-muted);
-}
-/* 连续工具调用折叠卡：外壳复用 .subagent（边框 / 头部悬停 / 箭头旋转 / 步骤行），只补单行标题 */
-.toolgroup__title {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 600;
-}
-.toolgroup__title code {
-  font-family: var(--font-mono);
-  color: var(--fg-muted);
-  font-weight: 400;
-}
-.toolgroup__sep {
-  margin: 0 var(--space-1);
   color: var(--fg-subtle);
 }
-.subagent__empty {
-  font-size: 12px;
+.tl__sub.is-run .tl__sub-icon {
+  color: var(--accent);
+}
+.tl__sub.is-err .tl__sub-icon {
+  color: var(--danger);
+}
+.tl__task {
+  margin-bottom: var(--space-1);
+  font-size: 12.5px;
+  line-height: 1.6;
   color: var(--fg-subtle);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tl__empty {
+  font-size: 12.5px;
+  line-height: 24px;
+  color: var(--fg-subtle);
+}
+@media (prefers-reduced-motion: reduce) {
+  .tl__shimmer {
+    animation: none;
+    color: var(--fg-muted);
+    background: none;
+  }
 }
 
-/* 待办清单条目（「已完成清单」卡与输入框上方的清单面板共用）：已完成打勾划线、进行中高亮、待办空心圈。 */
+/* 待办清单条目（时间轴上的「已完成清单」与输入框上方的清单面板共用）：已完成打勾划线、进行中高亮、待办空心圈。 */
 .todo-items {
   list-style: none;
   margin: 0;
@@ -1311,9 +1595,9 @@ textarea {
   text-decoration: line-through;
   text-decoration-color: color-mix(in srgb, var(--fg-muted) 60%, transparent);
 }
-/* 已完成清单卡：复用子智能体折叠卡的骨架，标题图标改用完成色。 */
-.todocard .subagent__head-icon {
-  color: var(--success);
+/* 时间轴上已完成清单展开后的条目：与已作答提问的回述留一样的下边距 */
+.tl__todo {
+  padding-bottom: var(--space-1);
 }
 
 /* 交付卡（present_files）：成品文件逐行列出——缩略图 + 文件名 / 大小·目录 + 打开 / 在文件夹中显示 / 复制路径。
@@ -2555,78 +2839,170 @@ textarea {
   max-width: 420px;
   color: var(--fg-muted);
 }
-.msg__think {
-  margin-top: var(--space-2);
-  border-left: 2px solid var(--border-strong);
-  background: var(--bg-inset);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-.msg__think-head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  padding: var(--space-2) var(--space-3);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: var(--fg-muted);
-  text-align: left;
-}
-.msg__think-head:hover {
-  color: var(--fg);
-}
-.msg__think-caret {
-  flex: none;
-  transition: transform 0.15s ease;
-}
-.msg__think.is-open .msg__think-caret {
-  transform: rotate(90deg);
-}
-.msg__think-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.msg__think-body {
-  padding: 0 var(--space-3) var(--space-2);
-}
+/*
+ * 请求失败：不加框，红色图标 + 红色报错原文一行，图标与文字同色（--danger）。
+ * 报错原文可能是服务商返回的多行英文，保留换行、可选中复制。
+ */
 .msg__error {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  margin-top: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid color-mix(in srgb, var(--danger, #e5484d) 40%, var(--border));
-  background: color-mix(in srgb, var(--danger, #e5484d) 8%, transparent);
-  color: var(--danger, #e5484d);
-  border-radius: var(--radius);
+  margin-top: var(--space-3);
   font-size: 13px;
+  line-height: 1.6;
+  color: var(--danger);
+}
+.msg__error > svg {
+  flex-shrink: 0;
+  margin-top: 3px;
+}
+.msg__error-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
 }
 .badge--err {
   color: var(--danger, #e5484d);
   background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
 }
-/* 回合终止说明（截断/空回合）：弱化的警示提示，比红色错误更轻。 */
+/*
+ * 回合终止说明（中止 / 截断 / 空回合 / 被拒绝 / 已回滚）：一行灰字，只有图标是黄色——黄色文字在浅色主题下
+ * 对比度只有约 2.9:1，读不清。不加框：每次按停止都会出现，不该在对话里留下一个醒目的框。
+ */
 .msg__notice {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  margin-top: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid color-mix(in srgb, var(--warning, #f5a623) 35%, var(--border));
-  background: color-mix(in srgb, var(--warning, #f5a623) 8%, transparent);
+  margin-top: var(--space-3);
   color: var(--fg-muted);
-  border-radius: var(--radius);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.6;
 }
 .msg__notice svg {
   flex-shrink: 0;
-  margin-top: 0.15em;
-  color: var(--warning, #f5a623);
+  margin-top: 3px;
+  color: var(--warning);
+}
+/*
+ * 已结束回合的「工作过程」折叠条：收起思考 / 工具调用，只露最终回复与固定卡片。
+ * 一行灰字（箭头 + 耗时与步数）；展开后在下方画出时间轴。
+ */
+.msg__process {
+  margin-top: var(--space-2);
+}
+/* 带角色名（对话区）：名字与折叠条同一行，就是这条消息的首行，不再留块间距 */
+.msg__process.has-lead {
+  margin-top: 0;
+}
+.msg__process-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+  /* 内容区恒为 22px（按 content-box 算）：展开吸顶时外加的上下内边距不改变内容区，角色名与标题开合时不挪位 */
+  box-sizing: content-box;
+  min-height: 22px;
+}
+/* 带角色名时箭头在文字末尾、朝下，展开后朝上（不带名字时是前置的右箭头，展开转 90°） */
+.msg__process.has-lead .msg__process-head {
+  gap: 4px;
+}
+.msg__process.has-lead.is-open .msg__process-caret {
+  transform: rotate(180deg);
+}
+.msg__process-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  font-size: 12.5px;
+  color: var(--fg-subtle);
+  text-align: left;
+  cursor: pointer;
+}
+.msg__process-head:hover {
+  color: var(--fg-muted);
+}
+.msg__process-caret {
+  flex: none;
+  transition: transform 0.15s ease;
+}
+.msg__process.is-open .msg__process-caret {
+  transform: rotate(90deg);
+}
+/* 进行中的计时：数字等宽，逐秒跳动时标题不左右晃 */
+.msg__process-time {
+  font-variant-numeric: tabular-nums;
+}
+.msg__process-body {
+  padding-block: var(--space-2) var(--space-1);
+}
+/* 进行中、收起时折叠条下露出的当前步骤（并行执行的一并列出） */
+.msg__process-preview > .tl {
+  margin-top: var(--space-2);
+}
+.msg__process-body > :first-child {
+  margin-top: 0;
+}
+.msg__process + .msg__text {
+  margin-top: var(--space-2);
+}
+/* 过程中夹着的正文是中间说明，不是最终回复：字号与颜色都弱一档 */
+.msg__process-body .md {
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+/* 「已压缩」提示：居中的一行胶囊，点开在下方展开摘要正文（默认折叠） */
+.msg__compaction {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+.msg__compaction-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 10px 3px 12px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  font-size: 12px;
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.msg__compaction-head:hover {
+  color: var(--fg);
+}
+.msg__compaction-head svg {
+  flex: none;
+}
+.msg__compaction-head > svg:first-child,
+.msg__compaction-toggle {
+  color: var(--accent);
+}
+.msg__compaction-caret {
+  transition: transform 0.15s ease;
+}
+.msg__compaction.is-open .msg__compaction-caret {
+  transform: rotate(90deg);
+}
+.msg__compaction-body {
+  align-self: stretch;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--border-strong);
+  background: var(--bg-inset);
+  border-radius: var(--radius-sm);
 }
 /* 待批准计划卡（exit_plan）：以 accent 观感呼应问答卡（.ask），区别于 warning 权限卡。
  * 已决态（is-decided）淡化边框与底色、隐藏操作按钮，仅留计划正文与状态徽标。 */
@@ -4094,6 +4470,25 @@ button.projmenu__item:disabled {
   min-width: 0;
   user-select: text;
 }
+/* 撑满父容器高度、自身不溢出（技能详情）：由 .ext-field--grow 吃掉剩余高度并在框内滚动 */
+.provider-detail--fill {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.provider-detail--fill > .ext-field:last-child {
+  margin-bottom: 0;
+}
+/* 技能详情：收窄名称分隔线与描述、描述与下一段之间的间距（默认 20px / 16px），描述小一号字 */
+.provider-detail--fill .provider-detail__head {
+  margin-bottom: var(--space-2);
+}
+.provider-detail--fill .ext-detail__desc {
+  margin-bottom: var(--space-2);
+}
+.provider-detail--fill .ext-detail__desc .ext-detail__text {
+  font-size: 12px;
+}
 /* 详情态顶部工具条：左「返回」，右「删除 + 启用」同一行 */
 .provider-detail__topbar {
   display: flex;
@@ -4599,6 +4994,32 @@ button.projmenu__item:disabled {
   font-size: 13px;
   font-style: italic;
 }
+/* 单行文本：超出部分省略（技能描述，全文见悬停提示） */
+.ext-detail__text--line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 技能属性（运行环境要求 / 许可 / metadata）：键值两列，每项单行省略 */
+.ext-meta {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px var(--space-4);
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.ext-meta dt {
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+.ext-meta dd {
+  margin: 0;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ext-detail__md {
   max-width: 720px;
   max-height: 420px;
@@ -4826,14 +5247,32 @@ button.projmenu__item:disabled {
   flex-direction: column;
   min-height: 0;
 }
-.ext-field--grow .ext-area,
-.ext-field--grow .ext-detail__md {
+.ext-field--grow .ext-area {
   flex: 1 1 auto;
   min-height: 160px;
 }
-/* 技能指令（只读 Markdown）撑满时解除固定高度上限，改由容器高度约束 + 内部滚动 */
+/* 技能 SKILL.md 预览（只读 Markdown）：按内容取高、最多缩到容器剩余高度，过长时框内滚动 */
 .ext-field--grow .ext-detail__md {
+  flex: 0 1 auto;
+  /* 窗口最小高度（600）且属性项齐全时也不把外层撑出滚动条 */
+  min-height: 64px;
   max-height: none;
+}
+/* 技能说明比对话正文小一号字（间距沿用 .md） */
+.ext-field--grow .ext-detail__md .md {
+  font-size: 12.5px;
+}
+.ext-field--grow .ext-detail__md .md h1 {
+  font-size: 1.3em;
+}
+.ext-field--grow .ext-detail__md .md h2 {
+  font-size: 1.15em;
+}
+.ext-field--grow .ext-detail__md .md h3 {
+  font-size: 1.05em;
+}
+.ext-field--grow .ext-detail__md .md-code__body {
+  font-size: 12px;
 }
 .ext-detail--empty {
   display: grid;
@@ -4899,7 +5338,6 @@ button.projmenu__item:disabled {
 .ext-field__note--warn {
   color: var(--warning);
 }
-
 .ext-input {
   width: 100%;
   height: 32px;

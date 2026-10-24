@@ -8,6 +8,20 @@
 export interface TextPart {
   type: 'text'
   text: string
+  /**
+   * 引擎附带的清单块（技能清单 / 记忆条目，见 services/listing.ts）：记下本块告知了哪些条目，供从历史推算
+   * 「已告知的状态」。只在主进程内部使用，适配器只发 text，不会发给模型。
+   */
+  listing?: ListingRecord
+}
+/** 随消息下发的清单种类。 */
+export type ListingKind = 'skills' | 'memory'
+/** 清单块的结构化记录：本块告知（新增或更新）的条目及其内容摘要、本块告知移除的条目。 */
+export interface ListingRecord {
+  kind: ListingKind
+  /** key：技能名 / 记忆 id。 */
+  listed: { key: string; digest: string }[]
+  removed?: string[]
 }
 export interface ToolUsePart {
   type: 'tool_use'
@@ -26,6 +40,8 @@ export interface ToolResultPart {
    * token 估算需要认识这个字段。content 里应留一句文字说明（图片是什么、从哪来）。
    */
   images?: ImagePart[]
+  /** 本次调用的结果已把清单变化告诉了模型（memory_write / memory_delete）：同 TextPart.listing 计入折叠，不发给模型。 */
+  listing?: ListingRecord
 }
 /** 图片附件（base64）。Anthropic → image 块；OpenAI → image_url(data URI)。 */
 export interface ImagePart {
@@ -68,7 +84,7 @@ export interface ToolSpec {
 /**
  * 归一化的终止原因。
  * 'refusal' = 模型拒绝作答、或被服务端内容策略拦截（OpenAI finish_reason 'content_filter' /
- * Anthropic stop_reason 'refusal'）。**必须与 end_turn 区分**：这类回合同样「自然结束且无正文」，
+ * 智谱 'sensitive' / Anthropic stop_reason 'refusal'）。**必须与 end_turn 区分**：这类回合同样「自然结束且无正文」，
  * 混作 end_turn 会让空回合被一律归咎于「上下文接近上限」，给出完全错误的排查方向。
  */
 export type StopReason =
@@ -84,6 +100,7 @@ export type StopReason =
 export { isEffortLevel, type EffortLevel } from '../../shared/effort'
 import type { EffortRequest } from '../../shared/effort'
 import { parseContextLimit } from '../../shared/context'
+import { isEn } from '../locale'
 
 export interface GenerateRequest {
   model: string
@@ -104,7 +121,8 @@ export interface GenerateRequest {
    * 思考参数（已按模型能力表收敛、映射好，见 shared/effort.ts 的 effortRequest）。
    * 缺省 = 不发任何思考 / 推理参数，请求体与改造前逐字节一致。适配器按 format 放进各家字段：
    * standard → Anthropic adaptive thinking + output_config.effort / OpenAI Chat reasoning_effort /
-   * Responses reasoning.effort；deepseek / zai / qwen（仅 OpenAI Chat）→ 各家私有开关 + 可选 reasoning_effort。
+   * Responses reasoning.effort；deepseek / zai / qwen（仅 OpenAI Chat）→ 各家私有开关 + 可选 reasoning_effort；
+   * compat（仅 Anthropic，国产兼容端点）→ output_config.effort + 必要时 thinking.type。
    */
   effort?: EffortRequest
 }
@@ -139,10 +157,16 @@ export type StreamEvent =
   | { type: 'thinking_delta'; text: string }
   | { type: 'tool_call'; id: string; name: string; args: unknown }
   /**
-   * 参数写到一半就撞上输出上限（stopReason=max_tokens）的工具调用：参数原文残缺、不可执行。
-   * 循环把它记成一次失败的工具调用，回灌「请分段写」（见 chat.ts runAgentLoop）。
+   * 参数没能完整解析的工具调用：参数原文残缺、不可执行，cause 说明原因（见 BrokenCallCause）。
+   * 循环把它记成一次失败的工具调用，按原因回灌纠正提示（见 chat.ts runAgentLoop）。
    */
-  | { type: 'tool_call_truncated'; id: string; name: string; partialArgs: string }
+  | {
+      type: 'tool_call_truncated'
+      id: string
+      name: string
+      partialArgs: string
+      cause: BrokenCallCause
+    }
   /**
    * 用量。input = 本次请求的**总提示 token**（已含缓存命中/写入部分）。
    * 注意 Anthropic 协议的 input_tokens 只是「未命中缓存的余量」，适配器已在此把三段相加归一，
@@ -168,7 +192,7 @@ export function toolImagesNote(images: ImagePart[]): string {
   return `[以下 ${images.length} 张图片是上方工具结果的附件${names ? `：${names}` : ''}]`
 }
 
-/** 解析工具参数 JSON：空串视为无参数 `{}`；解析失败返回 undefined（多半是被输出上限截在了中途）。 */
+/** 解析工具参数 JSON：空串视为无参数 `{}`；解析失败返回 undefined（多半是被截在了中途）。 */
 export function parseToolArgs(raw: string): unknown {
   if (!raw) return {}
   try {
@@ -179,25 +203,31 @@ export function parseToolArgs(raw: string): unknown {
 }
 
 /**
- * 参数没能完整解析的工具调用收尾（三个适配器共用）。因输出上限截断（stopReason=max_tokens）时
- * 如实上报为 tool_call_truncated——此前这类调用被当成参数为 `{}` 的完整调用交出去执行（报参数缺失），
- * 截断本身反被掩盖。其余情况（模型给了坏 JSON，极少见）维持旧行为按 `{}` 交出，让工具报错、模型自行纠正。
+ * 工具参数没能完整解析的原因。max_tokens = 写到一半撞上输出上限；refusal = 被服务端内容策略截断；
+ * invalid = 流正常结束参数却不是合法 JSON——多见于超长参数（个别中转截断了却不报 length，或模型在
+ * 长内容里写坏了转义）。
+ */
+export type BrokenCallCause = 'max_tokens' | 'refusal' | 'invalid'
+
+/**
+ * 参数没能完整解析的工具调用收尾（三个适配器共用）：一律如实上报为 tool_call_truncated，按 stopReason
+ * 定性。此前非截断的坏参数被当成参数为 `{}` 的完整调用交出去执行，工具只报「缺少 path 参数」——模型以为
+ * 漏填了参数，原样重发同一个超长调用，反复失败也不停（连续截断的闸门管不到它）。
  */
 export function* settleBrokenCalls(
   broken: { id: string; name: string; raw: string }[],
   stopReason: StopReason
 ): Generator<StreamEvent> {
-  for (const c of broken) {
-    if (stopReason === 'max_tokens')
-      yield { type: 'tool_call_truncated', id: c.id, name: c.name, partialArgs: c.raw }
-    else yield { type: 'tool_call', id: c.id, name: c.name, args: {} }
-  }
+  const cause: BrokenCallCause =
+    stopReason === 'max_tokens' ? 'max_tokens' : stopReason === 'refusal' ? 'refusal' : 'invalid'
+  for (const c of broken)
+    yield { type: 'tool_call_truncated', id: c.id, name: c.name, partialArgs: c.raw, cause }
 }
 
 /** 响应体摘要：折叠空白、限长。中转 / 网关常把真正原因（上游额度用尽、内容拦截等）写在这里。 */
 function bodyHint(body: string): string {
   const s = body.replace(/\s+/g, ' ').trim().slice(0, 200)
-  return s ? `：${s}` : ''
+  return s ? `${isEn() ? ': ' : '：'}${s}` : ''
 }
 
 /** 解析 retry-after 头（秒数或 HTTP 日期）→ 毫秒；无效返回 undefined。 */
@@ -228,6 +258,7 @@ function isEffortRejection(status: number, body: string): boolean {
 /**
  * HTTP 状态码 → 归一化错误。retryAfter 为响应头 retry-after 原值（可选）；
  * effortSent = 本次请求带了思考等级参数（见 GenerateRequest.effort）。
+ * message 会直接显示给用户，按界面语言出中 / 英文（见 locale.ts）。
  */
 export function httpError(
   status: number,
@@ -235,21 +266,32 @@ export function httpError(
   retryAfter?: string | null,
   effortSent?: boolean
 ): NormalizedError {
+  const en = isEn()
   // Anthropic 的「输入 + max_tokens 超出窗口」也落在这一类，其报错里写着真实窗口，一并带上。
   if (isOutputLimitRejection(status, body))
     return {
       kind: 'output_limit',
       retryable: false,
-      message: `请求的输出上限超出该模型允许范围（${status}）${bodyHint(body)}`,
+      message: en
+        ? `The requested output limit exceeds what this model allows (${status})${bodyHint(body)}`
+        : `请求的输出上限超出该模型允许范围（${status}）${bodyHint(body)}`,
       limit: parseContextLimit(body)
     }
   if (status === 401 || status === 403)
-    return { kind: 'auth', retryable: false, message: `鉴权失败（${status}）：请检查 API 密钥。` }
+    return {
+      kind: 'auth',
+      retryable: false,
+      message: en
+        ? `Authentication failed (${status}). Check your API key.`
+        : `鉴权失败（${status}）：请检查 API 密钥。`
+    }
   if (status === 429)
     return {
       kind: 'rate_limit',
       retryable: true,
-      message: `触发限流（429），请稍后重试${bodyHint(body)}`,
+      message: en
+        ? `Rate limited (429). Try again later${bodyHint(body)}`
+        : `触发限流（429），请稍后重试${bodyHint(body)}`,
       retryAfterMs: parseRetryAfter(retryAfter)
     }
   // 须在 context_length 之前：后者的正则很宽（token / maximum…），参数被拒的报错常被它误吞。
@@ -257,25 +299,31 @@ export function httpError(
     return {
       kind: 'effort_unsupported',
       retryable: false,
-      message: `该模型不支持所选思考等级（${status}）${bodyHint(body)}`
+      message: en
+        ? `This model doesn't support the selected thinking level (${status})${bodyHint(body)}`
+        : `该模型不支持所选思考等级（${status}）${bodyHint(body)}`
     }
   if (status === 400 && /context|token|length|maximum/i.test(body))
     return {
       kind: 'context_length',
       retryable: false,
-      message: '对话长度已超出该模型的上下文上限，无法继续。请新建对话，或换用上下文更大的模型后重试。',
+      message: en
+        ? 'The conversation is longer than this model’s context window. Start a new chat, or switch to a model with a larger context window and try again.'
+        : '对话长度已超出该模型的上下文上限，无法继续。请新建对话，或换用上下文更大的模型后重试。',
       limit: parseContextLimit(body)
     }
   if (status >= 500)
     return {
       kind: 'server',
       retryable: true,
-      message: `服务端错误（${status}）${bodyHint(body)}`,
+      message: en ? `Server error (${status})${bodyHint(body)}` : `服务端错误（${status}）${bodyHint(body)}`,
       retryAfterMs: parseRetryAfter(retryAfter)
     }
   return {
     kind: 'invalid_request',
     retryable: false,
-    message: `请求失败（${status}）：${body.slice(0, 300)}`
+    message: en
+      ? `Request failed (${status}): ${body.slice(0, 300)}`
+      : `请求失败（${status}）：${body.slice(0, 300)}`
   }
 }

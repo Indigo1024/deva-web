@@ -3,7 +3,7 @@ import { existsSync, promises as fs, type Dirent } from 'fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, resolve } from 'path'
 import { resolveExecShell } from './exec-policy'
-import { upsertSkill } from './skills'
+import { skillsDir, upsertSkill } from './skills'
 import {
   deleteMemory,
   formatMemoryLine,
@@ -16,6 +16,7 @@ import {
   PROJECT_MEMORY_BUDGET_CHARS,
   type MemoryScope
 } from './memory'
+import { memoryDeletedRecord, memoryWrittenRecord } from './listing'
 import { upsertServer, type McpValue } from './mcp-config'
 import {
   MAX_IMAGE_SOURCE_BYTES,
@@ -24,7 +25,7 @@ import {
   sniffImageMime,
   type ImageMime
 } from './image-read'
-import type { ImagePart, ToolSpec } from '../providers/types'
+import type { ImagePart, ListingRecord, ToolSpec } from '../providers/types'
 
 /**
  * Agent 工具集。工具名遵循 ^[a-zA-Z0-9_-]{1,64}$（各家 API 均不允许点号），
@@ -139,7 +140,7 @@ export const toolSpecs: ToolSpec[] = [
   {
     name: 'present_files',
     description:
-      '把本次任务产出的成品文件交付给用户：对话里会出现一张交付卡，用户可直接看到缩略图、用默认应用打开或在文件夹中定位。适用：生成的网页、文档、表格、演示稿、图片、音视频、数据导出等需要用户查看或使用的成品。不适用：中间产物、临时脚本，以及只是修改项目源码的编程任务。在文件全部写好、任务收尾时调用一次，列出全部成品（最多 20 个）；网站等多文件产物只交付入口文件（如 index.html）。调用后照常用文字简要说明交付了什么。',
+      '把本次任务产出的成品文件交付给用户：用户会看到一张交付卡，可直接查看缩略图、用默认应用打开或在文件夹中定位。交付卡在本轮回复结束后才显示，位于回复末尾（你最后一段文字之后），与调用时机无关。适用：生成的网页、文档、表格、演示稿、图片、音视频、数据导出等需要用户查看或使用的成品。不适用：中间产物、临时脚本，以及只是修改项目源码的编程任务。在文件全部写好后调用一次（调用时会核对文件是否存在），列出全部成品（最多 20 个）；网站等多文件产物只交付入口文件（如 index.html）。调用后照常用文字简要说明交付了什么，无需逐个列出文件路径。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -180,9 +181,10 @@ export const toolSpecs: ToolSpec[] = [
   {
     name: 'ask_user',
     description:
-      '向用户提出一个或多个问题并等待其作答——仅在需求有歧义、存在多个各有取舍的可行方案需用户抉择、或缺少无法合理默认的关键信息时使用。' +
-      '能给出合理默认就直接做，不要为琐碎选择打断用户。' +
+      '向用户提出一个或多个问题并等待其作答——仅在卡住时使用：需求有歧义、存在多个各有取舍的可行方案需用户抉择、或缺少无法合理默认的关键信息，且用户的回答会改变你接下来的做法。' +
+      '能自己查证的事实（读文件、跑只读命令即可确认的）不要问；有合理默认的选择也不要问——选最合理的一项直接做，并在回复里说明你的选择。' +
       '可一次问多个相关问题，用户会在同一张卡片里一次性回答全部（避免来回多轮打断）。' +
+      '卡片只显示问题和选项，看不到你没写出来的内容：问题若针对草案、方案、改动清单等，先在回复正文里把内容完整写出来，再调用本工具。' +
       '每个问题可给候选项（单选或多选，由 multiSelect 决定）；界面每题都已内置「自己输入」入口（用户点选后才出现输入框），因此不要在 options 里再加「自己输入 / 自定义 / 其他 / 手动输入 / Other」之类的兜底项——那会与内置入口重复。options 只列具体、有意义的选择。' +
       '尽量给具体候选项而非留空让用户干打字：候选项应覆盖常见取舍。若你有倾向，把推荐项放在 options 第一个并在其 label 末尾标注「（推荐）」，界面会高亮它，用户一键即可采纳。' +
       '对「缺了也能用合理默认继续」的澄清题，把该题的 required 设为 false——用户可留空跳过，工具会回灌「未作答」，你据此用合理默认继续、勿再追问同一件事。默认 required 为 true（必答）。' +
@@ -233,7 +235,7 @@ export const toolSpecs: ToolSpec[] = [
     name: 'create_skill',
     description:
       '创建并启用一个新的**单文件技能（Skill）**，写入用户的全局技能目录（绝对路径见系统提示词）。' +
-      '仅在用户明确想创建技能、且你已收集好要素并向用户复述确认后调用。' +
+      '仅在用户明确想创建技能时调用；需求不清时先澄清，需求清楚则无需先向用户复述草案、等待确认。' +
       '本工具只写一份 SKILL.md 正文；**多文件技能**（入口文档 + 参考文档/脚本）请改为直接在技能目录下建文件夹，' +
       '用 write_file 写入 SKILL.md（frontmatter 须含 name 与 description）与各子文件，或用 run_command 下载解压到该处。' +
       '创建后技能自动启用，用户可用 /技能名 触发。',
@@ -246,7 +248,7 @@ export const toolSpecs: ToolSpec[] = [
         },
         description: {
           type: 'string',
-          description: '一句话说明「何时该用这个技能」，会进入系统提示词，务必精准。'
+          description: '一句话说明「何时该用这个技能」，会进入模型看到的技能清单，务必精准。'
         },
         trigger: { type: 'string', description: '触发方式的自由文本说明（可选）。' },
         allowedTools: {
@@ -266,7 +268,7 @@ export const toolSpecs: ToolSpec[] = [
     name: 'memory_read',
     description:
       '读取记忆，返回全部条目及其 id：全局记忆（用户本人的习惯/偏好），以及已挂载工作区时的项目私有记忆。' +
-      '系统提示词已列出记忆，通常无需调用；仅当提示词里的记忆被截断、或需要确认最新内容再更新/删除时使用。',
+      '记忆条目已由系统随对话消息附带，通常无需调用；仅当附带的条目被截断、或需要确认最新内容再更新/删除时使用。',
     inputSchema: { type: 'object', properties: {} }
   },
   {
@@ -317,6 +319,7 @@ export const toolSpecs: ToolSpec[] = [
       '当用户想「用对话创建一个角色（Agent/性格身份）」时，据已厘清的需求生成一张**角色名片**供用户确认。' +
       '这只是**提议**：本工具不写入任何东西、不创建角色，只把你生成的参数以名片形式呈现给用户；' +
       '用户点名片、在编辑器里点「接受」后才真正建角色。' +
+      '名片本身就是给用户确认的草案：调用前不要先复述草案或用 ask_user 征求确认。' +
       '因此调用后**切勿声称角色已创建**，应告诉用户「名片已生成，请查收并确认」。' +
       '不要设置 model（你无法可靠得知 providerId:modelId），留给用户在编辑器里选。' +
       '不要设置头像：头像由系统按角色名自动生成，用户接受名片后可在编辑器里挑选部件与配色。',
@@ -574,7 +577,7 @@ export function toolCategory(name: string): ToolCategory {
   if (READ_TOOLS.has(name)) return 'read'
   if (mcpToolNames.has(name)) return 'mcp'
   // 未知/幻觉工具名：一律按 mcp 走闸（ask），绝不再默认成 read 自动放行——关后门。
-  // 内置 create_skill 刻意不列入任何集合，天然落此默认分支 → 判 ask 过闸（与创建技能须经用户授权一致）。
+  // 内置 create_skill 不列入任何集合，落此默认分支：交互对话照常执行（不弹授权框），密封执行由 SEALED_FORBIDDEN 拒绝。
   return 'mcp'
 }
 
@@ -595,6 +598,8 @@ export interface ToolResult {
    * 不进模型上下文。
    */
   delivered?: string[]
+  /** 结果已告知模型的清单变化（memory_write / memory_delete）：循环原样挂到 tool_result 上，见 listing.ts。 */
+  listing?: ListingRecord
 }
 
 const MAX_READ_BYTES = 2 * 1024 * 1024
@@ -1144,6 +1149,33 @@ function readImageResult(buf: Buffer, mime: ImageMime, abs: string): ToolResult 
   }
 }
 
+/** 系统 / 网络错误码 → 一句话原因（工具失败时界面上红字显示的就是它）。 */
+const ERROR_REASONS: Record<string, string> = {
+  ENOENT: '路径不存在',
+  EACCES: '没有权限',
+  EPERM: '没有权限',
+  EISDIR: '这是目录，不是文件',
+  ENOTDIR: '路径中有一段不是目录',
+  EBUSY: '文件被占用',
+  EEXIST: '已存在',
+  ENOTFOUND: '域名解析失败',
+  ECONNREFUSED: '连接被拒绝',
+  ECONNRESET: '连接被中断',
+  ETIMEDOUT: '连接超时'
+}
+
+/**
+ * 工具抛错时给界面的简短原因（摘要）：常见错误码译成一句话；其余取报错首行、截到 40 字。
+ * 界面直接把它当原因显示（不再加「失败：」前缀），所以不能只写「失败」。fetch 的网络错误码在 cause 上。
+ */
+function errorSummary(e: unknown): string {
+  const err = e as (Error & { code?: string; cause?: { code?: string } }) | undefined
+  const reason = ERROR_REASONS[err?.code ?? ''] ?? ERROR_REASONS[err?.cause?.code ?? '']
+  if (reason) return reason
+  const line = String(err?.message ?? e).split('\n')[0].trim()
+  return line.length > 40 ? `${line.slice(0, 40)}…` : line || '失败'
+}
+
 export async function executeTool(
   name: string,
   args: unknown,
@@ -1255,7 +1287,7 @@ export async function executeTool(
       // 合并过重复路径就说一声，免得模型对着「传了 2 个、展示 1 个」以为自己没传对。
       const merged = list.length > files.length ? '（重复的路径已合并为一个。）' : ''
       return {
-        content: `已向用户展示 ${files.length} 个文件。${merged}`,
+        content: `已交付 ${files.length} 个文件，交付卡将在本轮回复结束后显示在回复末尾。${merged}`,
         summary: `${files.length} 个文件`,
         delivered: files
       }
@@ -1440,7 +1472,7 @@ export async function executeTool(
             summary: '超时',
             isError: true
           }
-        return { content: `获取失败：${err?.message ?? String(e)}`, summary: '失败', isError: true }
+        return { content: `获取失败：${err?.message ?? String(e)}`, summary: errorSummary(e), isError: true }
       } finally {
         clearTimeout(timer)
       }
@@ -1602,7 +1634,7 @@ export async function executeTool(
         enabled: true
       })
       return {
-        content: `已创建并启用技能「${rec.name}」(id: ${rec.id})，用户可用 /${rec.name} 触发。`,
+        content: `已创建并启用技能「${rec.name}」(id: ${rec.id})，用户可用 /${rec.name} 触发。技能文件夹：${join(skillsDir(), rec.id)}（之后要补充脚本、参考文档等资源，直接写进这里）。`,
         summary: '已创建技能'
       }
     }
@@ -1651,11 +1683,11 @@ export async function executeTool(
       // 直调主进程 memory 服务（去重 + 总量预算在服务内校验）。
       const r = writeMemory(content, id, scope)
       if (!r.ok) return { content: r.error, summary: '未写入', isError: true }
-      const where = kind === 'project' ? '项目私有记忆' : '长期记忆'
-      // 系统提示词本轮已定格：须在结果里讲清新记忆下一轮才出现在提示词中，免得模型误以为写入失败而重试。
+      // 本结果即告知：挂上记录，记忆清单折叠时视这条为已告知，不再随后重复附带。
       return {
-        content: `${r.created ? '已记住' : id ? '已更新记忆' : '该记忆已存在'}：${formatMemoryLine(r.entry)}（下一轮起出现在系统提示词的${where}中）`,
-        summary: r.created ? '已记住' : id ? '已更新' : '已存在'
+        content: `${r.created ? '已记住' : id ? '已更新记忆' : '该记忆已存在'}：${formatMemoryLine(r.entry)}`,
+        summary: r.created ? '已记住' : id ? '已更新' : '已存在',
+        listing: memoryWrittenRecord(r.entry)
       }
     }
 
@@ -1670,7 +1702,11 @@ export async function executeTool(
       const removed = deleteMemory(id, scope)
       if (!removed)
         return { content: `不存在 id 为 ${id} 的记忆（可先用 memory_read 查看）`, summary: '未找到', isError: true }
-      return { content: `已删除记忆：${formatMemoryLine(removed)}`, summary: '已删除' }
+      return {
+        content: `已删除记忆：${formatMemoryLine(removed)}`,
+        summary: '已删除',
+        listing: memoryDeletedRecord(removed.id)
+      }
     }
 
     if (name === 'propose_agent') {
@@ -1777,6 +1813,6 @@ export async function executeTool(
     return { content: `未知工具：${name}`, summary: '未知工具', isError: true }
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e)
-    return { content: `工具执行失败：${msg}`, summary: '失败', isError: true }
+    return { content: `工具执行失败：${msg}`, summary: errorSummary(e), isError: true }
   }
 }

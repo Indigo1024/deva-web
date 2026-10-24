@@ -319,6 +319,8 @@ export function buildTranscript(
     }
     for (const p of m.content) {
       if (p.type === 'text') {
+        // 清单块（技能 / 记忆）不进转录：它不是对话内容，被摘要掉后引擎会按需重新附上（见 listing.ts）。
+        if (p.listing) continue
         if (p.text.trim()) lines.push(`${label}: ${p.text}`)
       } else if (p.type === 'tool_use') {
         const args = clip(JSON.stringify(p.input ?? {}), MAX_TOOL_ARGS_CHARS)
@@ -537,6 +539,8 @@ export async function compactSession(args: {
    * 布局为 [本轮请求, 摘要, ...近期步骤]。
    */
   midTurn?: boolean
+  /** 选定了可压的段、即将请求摘要时调用（无可压时不调）：调用方据此显示「正在压缩」。 */
+  onStart?: () => void
 }): Promise<{ status: CompactStatus; message?: string }> {
   const { session, model, signal } = args
   const cfg = compactionConfig()
@@ -562,6 +566,7 @@ export async function compactSession(args: {
   const tail = msgs.slice(boundary)
   const transcript = buildTranscript(toSummarize, locale, transcriptBudget(window))
 
+  args.onStart?.()
   let summary = ''
   try {
     summary = await summarize(model, transcript, locale, signal, keepHead >= 0)
@@ -614,10 +619,16 @@ export function isCompactionSummary(m: Message): boolean {
   return m.role === 'user' && typeof m.content === 'string' && m.content.startsWith(COMPACT_MARKER)
 }
 
-/** 去掉摘要标记前缀，返回可展示的摘要正文（含 header）。 */
-export function stripMarker(content: string): string {
-  if (!content.startsWith(COMPACT_MARKER)) return content
-  return content.slice(COMPACT_MARKER.length).replace(/^\n+/, '')
+/**
+ * 界面展示用的摘要正文：去掉标记前缀与开头写给模型的那段说明（「以下是此前对话的摘要……请在此基础上继续」），
+ * 只留摘要本身（及其后附的待办快照）。
+ */
+export function displaySummary(content: string): string {
+  const body = content.startsWith(COMPACT_MARKER)
+    ? content.slice(COMPACT_MARKER.length).replace(/^\n+/, '')
+    : content
+  const cut = body.indexOf('\n\n')
+  return cut >= 0 ? body.slice(cut + 2) : body
 }
 
 /** 该消息是否为引擎注入的自愈引导（见 AUTO_MARKER）。 */

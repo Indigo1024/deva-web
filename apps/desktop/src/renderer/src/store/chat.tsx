@@ -188,9 +188,8 @@ export type ChatBlock =
     }
   | { kind: 'error'; message: string }
   /**
-   * 回合终止 / 上下文压缩提示（非错误，弱化样式）。
+   * 回合终止提示（非错误，弱化样式）。
    * truncated=达输出长度上限被截断；empty=通篇无可见回复；
-   * compacted=较早历史已压缩为摘要；
    * restored=用检查点只回滚了代码（对话保留，下一条消息会告诉模型）；
    * aborted=用户中止了本轮（其上为中止前已产出的内容，重开仍在）。
    * 正文按 code 在渲染层翻译（随语言切换生效，不在 store 里定格文案）。
@@ -199,8 +198,10 @@ export type ChatBlock =
    */
   | {
       kind: 'notice'
-      code: 'truncated' | 'empty' | 'refused' | 'compacted' | 'restored' | 'aborted'
+      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
     }
+  /** 较早历史已压缩为摘要（只来自主进程重建）：一行提示，摘要正文默认折叠、点开才显示。 */
+  | { kind: 'compaction'; summary: string }
 
 export interface ChatMessage {
   id: string
@@ -213,6 +214,8 @@ export interface ChatMessage {
    * 但展示为一行系统通知而非用户气泡，正文为通知标题。
    */
   notify?: boolean
+  /** 助手消息：本轮耗时（毫秒，主进程计时、扣除等用户处置的时间），工作过程折叠条据此显示「已处理 X」。 */
+  durationMs?: number
 }
 
 /** 会话元信息（左侧列表用）。 */
@@ -246,6 +249,8 @@ export interface SendAttachment {
 export interface StreamStatus {
   elapsedSec: number
   reconnecting: RecoveryStatus | null
+  /** 主进程正在压缩上下文（compacting 事件，真实信号）。 */
+  compacting: boolean
 }
 
 /**
@@ -266,8 +271,9 @@ type DisplayBlock =
   | { kind: 'tool'; id: string; name: string; args: unknown; status: 'ok' | 'error' | 'running'; summary?: string }
   | {
       kind: 'notice'
-      code: 'compacted' | 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
+      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
     }
+  | { kind: 'compaction'; summary: string }
   | { kind: 'error'; message: string }
   | { kind: 'agentcard'; id: string; draft: AgentDraft; status: 'pending' | 'accepted' | 'rejected' }
   | {
@@ -288,7 +294,7 @@ type DisplayBlock =
   | { kind: 'todolist'; id: string; title: string; items: TodoItem[] }
 type DisplayMessage =
   | { role: 'user'; text: string; attachments: { name: string; kind: AttachKind }[]; notify?: true }
-  | { role: 'assistant'; blocks: DisplayBlock[] }
+  | { role: 'assistant'; blocks: DisplayBlock[]; durationMs?: number }
 
 /** 与 preload/主进程 ChatStreamEvent 结构一致（按既定模式在渲染层复述线缆类型）。 */
 type StreamEvent =
@@ -338,6 +344,7 @@ type StreamEvent =
       status: 'compacted' | 'none' | 'failed'
       message?: string
     }
+  | { type: 'compacting'; active: boolean }
   | {
       type: 'interaction_resolved'
       key: string
@@ -358,7 +365,7 @@ type StreamEvent =
       type: 'turn_start'
       user: { text: string; attachments: { name: string; kind: AttachKind }[]; notify?: true }
     }
-  | { type: 'done'; stopReason: string }
+  | { type: 'done'; stopReason: string; durationMs?: number }
 
 /**
  * 交互卡已在别处答复（手机端 / 本层自己的答复回执）：把同 key 的卡收成已决态。
@@ -418,6 +425,8 @@ interface ChatContextValue {
   newSession: (personaId?: string, focusRoot?: string | null, model?: string) => void
   selectSession: (id: string) => void
   deleteSession: (id: string) => void
+  /** 重命名对话（立即落库）；title 为空即恢复自动标题（由首条用户消息派生）。不改列表顺序。 */
+  renameSession: (id: string, title: string) => void
   /**
    * 批量删除对话（删除角色时一并清理其名下历史）。一次性中止各自在跑回合、逐条落盘删除、清绑定
    * 覆盖层，最后只刷新一次列表；若当前会话在其中，则切到最近一条或起新会话。空数组为无操作。
@@ -508,7 +517,7 @@ export interface RecoveryStatus {
   reason?: 'reconnect' | 'truncated' | 'empty' | 'context' | 'output_limit' | 'effort'
 }
 
-const IDLE_STATUS: StreamStatus = { elapsedSec: 0, reconnecting: null }
+const IDLE_STATUS: StreamStatus = { elapsedSec: 0, reconnecting: null, compacting: false }
 
 let seq = 0
 function genId(prefix = 'm'): string {
@@ -531,6 +540,7 @@ function displayToMessages(dms: DisplayMessage[]): ChatMessage[] {
     const blocks: ChatBlock[] = dm.blocks.map((b) => {
       if (b.kind === 'text') return { kind: 'text', text: b.text }
       if (b.kind === 'notice') return { kind: 'notice', code: b.code }
+      if (b.kind === 'compaction') return { kind: 'compaction', summary: b.summary }
       // 历史回填：请求失败红框（原样复原错误文案）。
       if (b.kind === 'error') return { kind: 'error', message: b.message }
       // 历史回填：角色名片按持久化终态复原（pending/accepted/rejected）。
@@ -562,7 +572,12 @@ function displayToMessages(dms: DisplayMessage[]): ChatMessage[] {
       if (isSubagentCall(b.name)) return subagentBlock(b.id, b.name, b.args, status, b.summary)
       return { kind: 'tool', id: b.id, name: b.name, args: b.args, status, summary: b.summary }
     })
-    return { id: genId(), role: 'assistant', blocks }
+    return {
+      id: genId(),
+      role: 'assistant',
+      blocks,
+      ...(dm.durationMs !== undefined ? { durationMs: dm.durationMs } : {})
+    }
   })
 }
 
@@ -777,11 +792,8 @@ function reduceBlocks(blocks: ChatBlock[], ev: StreamEvent): ChatBlock[] {
     case 'error':
       next.push({ kind: 'error', message: ev.message })
       return next
-    case 'compacted':
-      // 只有「已压缩」进气泡（主进程落盘了摘要前言，重开同形）；none / failed 由事件订阅处改弹 toast。
-      if (ev.status !== 'compacted') return blocks
-      next.push({ kind: 'notice', code: 'compacted' })
-      return next
+    // compacted 不进当前气泡：压缩中有状态行动效，成功后 done 时整份重载，较早的气泡收成一行「已压缩」
+    // 提示（摘要折叠）；none / failed 由事件订阅处改弹 toast。
     default:
       return blocks
   }
@@ -861,6 +873,15 @@ function updateLastAssistant(
   return copy
 }
 
+/** 给末条助手消息记下本轮耗时（done 事件带来）；末条不是助手消息或没有耗时则原样返回。 */
+function setLastDuration(list: ChatMessage[], durationMs: number | undefined): ChatMessage[] {
+  const last = list[list.length - 1]
+  if (durationMs === undefined || !last || last.role !== 'assistant') return list
+  const copy = list.slice()
+  copy[copy.length - 1] = { ...last, durationMs }
+  return copy
+}
+
 /** 末条是空助手位（如 /compact 预留的）则去掉；否则原样返回。 */
 function dropEmptyAssistantTail(list: ChatMessage[]): ChatMessage[] {
   const last = list[list.length - 1]
@@ -915,6 +936,8 @@ interface SessionRuntime {
   startedAt: number
   /** 主进程 reconnecting 事件驱动的真实重连态（非猜测）；null=未在重连。 */
   reconnecting: RecoveryStatus | null
+  /** 主进程 compacting 事件驱动：正在压缩上下文。 */
+  compacting: boolean
   /**
    * 本轮由别处发起（手机端 / 定时任务）、本层只是接上了它：中途接入时本步已流出的部分会缺失，
    * 故 done 时以主进程为准重载。
@@ -929,6 +952,7 @@ const EMPTY_RUNTIME: SessionRuntime = Object.freeze({
   turnId: null,
   startedAt: 0,
   reconnecting: null,
+  compacting: false,
   external: false
 })
 
@@ -1065,6 +1089,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         turnId,
         startedAt: Date.now(),
         reconnecting: null,
+        compacting: false,
         external: true
       }))
     },
@@ -1219,6 +1244,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
           streaming: false,
           turnId: null,
           reconnecting: null,
+          compacting: false,
           messages: displayToMessages(dms as DisplayMessage[])
         }))
       })()
@@ -1255,6 +1281,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
             turnId: payload.turnId,
             startedAt: Date.now(),
             reconnecting: null,
+            compacting: false,
             external: true
           }))
         } else if (sessionIdRef.current === sid) void attachSession(sid)
@@ -1313,12 +1340,16 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
             streaming: false,
             turnId: null,
             reconnecting: null,
+            compacting: false,
             // /compact 无需压缩 / 失败：撤掉预留的空助手位（结果已 toast，不补空回合提示）。否则先收敛仍未决的
             // 交互卡（用户中断时最常见），再据终止原因补「中断说明」：截断/空回合给出可见提示，正常回合原样短路。
             messages: compactDrop
               ? dropEmptyAssistantTail(r.messages)
-              : updateLastAssistant(settleOpenCards(r.messages), (b) =>
-                  appendTerminalNotice(b, ev.stopReason)
+              : setLastDuration(
+                  updateLastAssistant(settleOpenCards(r.messages), (b) =>
+                    appendTerminalNotice(b, ev.stopReason)
+                  ),
+                  ev.durationMs
                 )
           }))
           // 与重开同形：早期气泡当场收成一个摘要气泡。主进程在发 done 后同步补记终态提示并落盘，
@@ -1340,6 +1371,11 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       // 接上。仅本层正流式的会话才继续处理下列实时事件。
       if (!localStreaming) return
 
+      // 主进程真实信号：正在压缩上下文（底部状态行换成「正在压缩」），结束时成对收起。
+      if (ev.type === 'compacting') {
+        patchRuntime(sid, (r) => (r.compacting === ev.active ? r : { ...r, compacting: ev.active }))
+        return
+      }
       // 主进程真实信号：断流后正在自动重连（展示"连接中断，正在重连"横幅）。
       if (ev.type === 'reconnecting') {
         patchRuntime(sid, (r) => ({ ...r, reconnecting: { attempt: ev.attempt, max: ev.max } }))
@@ -1428,7 +1464,8 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     viewed && viewed.streaming
       ? {
           elapsedSec: Math.max(0, Math.floor((Date.now() - viewed.startedAt) / 1000)),
-          reconnecting: viewed.reconnecting
+          reconnecting: viewed.reconnecting,
+          compacting: viewed.compacting
         }
       : IDLE_STATUS
 
@@ -1564,6 +1601,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
           turnId: null,
           startedAt: Date.now(),
           reconnecting: null,
+          compacting: false,
           external: false
         }))
         try {
@@ -1612,6 +1650,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         turnId: null,
         startedAt: Date.now(),
         reconnecting: null,
+        compacting: false,
         external: false
       }))
       // 绑定覆盖层：首发时把 persona / 聚焦工作区带上（主进程 ensureSession：personaId 一次性绑定、
@@ -1739,6 +1778,19 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         } else {
           startFresh()
         }
+      })()
+    }
+
+    // 重命名：非空的新名字先就地显示（免得旧标题闪一下），再以主进程落盘后回传的最终标题为准
+    // （空 → 恢复的自动标题）。只改这一项，不重新拉列表、不重排。
+    const renameSession = (id: string, title: string): void => {
+      const setTitle = (next: string): void =>
+        setSessions((list) => list.map((s) => (s.id === id ? { ...s, title: next } : s)))
+      const typed = title.replace(/\s+/g, ' ').trim()
+      if (typed) setTitle(typed)
+      void (async () => {
+        const r = await window.deva.chat.renameSession({ sessionId: id, title })
+        if (r) setTitle(r.title)
       })()
     }
 
@@ -1938,6 +1990,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       newSession,
       selectSession,
       deleteSession,
+      renameSession,
       deleteSessions,
       deleteTurns,
       rewindApply,

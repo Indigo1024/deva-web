@@ -1,4 +1,13 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore
+} from 'react'
 import {
   AlarmClock,
   AlertTriangle,
@@ -52,12 +61,13 @@ import {
   X
 } from 'lucide-react'
 import { BotsPane } from './BotsPane'
+import { useComposerEditor, type ComposerKey } from './composer-editor'
 import { UpdateSection } from './UpdateSection'
 import { MobileMenuButton } from '../web/MobileMenuButton'
 // 关于页的应用图标：直接用安装包图标的源文件，图形只维护一份
 import devaIcon from '../../../../build/icon.svg'
 import './redesign.css'
-import type { McpKV, McpServer, McpStatus, Persona } from '../mock/extensions'
+import type { McpKV, McpServer, McpStatus, Persona, Skill } from '../mock/extensions'
 import type {
   EffortLevel,
   GitBranch as GitBranchEntry,
@@ -76,17 +86,19 @@ import { ScheduleEditor } from '../features/chat/ScheduleEditor'
 import { TaskModelSelect, TaskPersonaSelect } from '../features/chat/TaskPickers'
 import { taskErrorKey } from '../features/chat/TaskConfirmCard'
 import { TodoCapsule } from '../features/chat/Todos'
+import { BackgroundCapsule } from '../features/chat/BackgroundTasks'
 import { ModelSetupCard } from '../features/chat/ModelSetupCard'
+import { Markdown } from '../features/chat/Markdown'
 import {
   useChat,
   type AgentDraft,
   type AttachKind,
   type ChatBlock,
   type ChatMessage,
-  type RecoveryStatus,
   type SendAttachment,
   type SessionLiveState,
-  type SessionMeta
+  type SessionMeta,
+  type StreamStatus
 } from '../store/chat'
 import { useExtensions } from '../store/extensions'
 import { findActive, hasUsableModel, useModels } from '../store/models'
@@ -106,6 +118,7 @@ import {
   ICONRAIL_W,
   ICONRAIL_W_MAC,
   ResizeHandle,
+  SIDEBAR_COLLAPSE_AT,
   SIDEBAR_DEFAULT,
   clampComposer,
   clampSidebar,
@@ -125,10 +138,17 @@ import {
 import { useTheme } from '../theme/ThemeContext'
 import {
   BlockView,
+  CompactionNotice,
+  DeliveryCards,
+  LiveThinkingWindow,
+  ProcessFold,
   StatusIndicator,
-  ToolGroupCard,
+  Timeline,
+  currentSteps,
   deriveActivity,
-  groupBlocks
+  groupBlocks,
+  hasProcess,
+  splitProcess
 } from '../features/chat/blocks'
 import { ModelSettings } from '../features/settings/ModelSettings'
 import { AvatarEditor } from './AvatarEditor'
@@ -308,6 +328,7 @@ export function ChatFirstShell(): React.JSX.Element {
     newSession,
     selectSession,
     deleteSession,
+    renameSession,
     deleteSessions,
     deleteTurns,
     currentBinding,
@@ -315,8 +336,7 @@ export function ChatFirstShell(): React.JSX.Element {
     mountFocus,
     respondAsk,
     respondPlan,
-    respondMount,
-    stopSubagent
+    respondMount
   } = useChat()
   const { personas, remove, reorderPersonas } = useExtensions()
   const { tasks } = useTasks()
@@ -340,6 +360,77 @@ export function ChatFirstShell(): React.JSX.Element {
   const sidebarShown = clampSidebar(sidebarW, viewport.w, railW)
   const sidebarRef = useRef(sidebarShown)
   sidebarRef.current = sidebarShown
+  // 收起会话列表：只有「对话」页能收起（角色页右侧只是资料卡，收起没意义；定时任务 / 机器人页本就占满）。
+  // 收起状态记住（切页再回来、重启都保持）。收起时悬停「对话」图标，列表整块浮在对话区上方（peek），
+  // 点会话即切过去（列表留着，可以接着点别的，鼠标离开才收回）——不用先展开就能换对话。
+  const [listCollapsed, setListCollapsed] = useState(() => loadLayout().sidebarCollapsed ?? false)
+  const collapsed = railTab === 'chats' && listCollapsed
+  const [peek, setPeek] = useState(false)
+  const peekTimer = useRef<number | null>(null)
+  const clearPeekTimer = (): void => {
+    if (peekTimer.current !== null) window.clearTimeout(peekTimer.current)
+    peekTimer.current = null
+  }
+  const setCollapsed = (next: boolean): void => {
+    clearPeekTimer()
+    setPeek(false)
+    setListCollapsed(next)
+    saveLayout({ sidebarCollapsed: next || undefined })
+  }
+  // 浮出：停 0.2 秒才浮出（鼠标路过不弹）；离开图标与列表 0.15 秒才收回（从图标移到列表要穿过图标栏右侧
+  // 约 9px 的空白；再长收回就显得拖沓。同「新建对话」悬停菜单的 0.14 秒）。
+  // 已浮出时再进入只取消待收回、不排定时器——否则点了会话（收回）后排着的定时器会把它重新打开。
+  const peekEnter = (): void => {
+    if (!collapsed) return
+    clearPeekTimer()
+    if (!peek) peekTimer.current = window.setTimeout(() => setPeek(true), 200)
+  }
+  // 进入浮出的列表：只取消待收回。浮出只由悬停「对话」图标触发——收起过程中（或刚拖动收起）鼠标还停在
+  // 列表上，不该因此又浮出来。
+  const peekHover = useRef(false)
+  const peekStay = (): void => {
+    peekHover.current = true
+    if (peek) clearPeekTimer()
+  }
+  // 正在浮出列表的输入框（搜索框、菜单里的筛选框）里打字：打字时鼠标常挪开、输入法候选框也会盖到指针上，
+  // 这时不因鼠标离开而收回，等焦点离开输入框再说（见 peekFocusOut）。
+  const typingInPeek = (): boolean => {
+    const el = document.activeElement
+    return el instanceof HTMLInputElement && el.closest('.cf-rail.is-peek') !== null
+  }
+  const peekLeave = (): void => {
+    peekHover.current = false
+    if (!collapsed) return
+    clearPeekTimer()
+    peekTimer.current = window.setTimeout(() => {
+      if (!typingInPeek()) setPeek(false)
+    }, 150)
+  }
+  // 焦点离开浮出列表里的输入框（点了别处、切走窗口）：鼠标也不在列表上就收回。
+  const peekFocusOut = (): void => {
+    if (peek && !peekHover.current) setPeek(false)
+  }
+  useEffect(() => clearPeekTimer, [])
+  // 离开对话页：收回浮出列表。切换对话不收回——可以连着点开几个看，鼠标离开列表才收回。
+  useEffect(() => {
+    clearPeekTimer()
+    setPeek(false)
+  }, [railTab])
+  // Esc 收回浮出列表；Ctrl+B / ⌘B 在对话页收起 / 展开会话列表。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && peek) {
+        clearPeekTimer()
+        setPeek(false)
+      } else if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'KeyB' && railTab === 'chats') {
+        e.preventDefault()
+        setCollapsed(!listCollapsed)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peek, railTab, listCollapsed])
   /**
    * 「角色」tab 当前选中的角色（右侧显示其资料卡）。仅当 railTab==='roster' 时生效——右侧内容整体由
    * railTab 决定，故「消息」tab 与「角色」tab 各自记住自己的右侧（当前对话 / 当前角色），彼此独立、
@@ -507,6 +598,19 @@ export function ChatFirstShell(): React.JSX.Element {
       if (ok) deleteSession(id)
     })()
   }
+  // 重命名对话：居中输入框，预填当前标题并全选。没改不让提交；清空也可提交（= 恢复自动标题）。
+  const renameThread = (id: string, title: string): void => {
+    void (async () => {
+      const next = await dialog.prompt({
+        title: t('cf.renameChatTitle'),
+        defaultValue: title,
+        placeholder: t('cf.renamePlaceholder'),
+        confirmText: t('cf.renameChat'),
+        validate: (v) => v.replace(/\s+/g, ' ').trim() !== title
+      })
+      if (next !== null) renameSession(id, next)
+    })()
+  }
   // 按「轮」删除当前对话的选中轮次（同步删上下文）：先弹居中破坏性确认，确认后走 store.deleteTurns。
   // 返回是否已删——Conversation 据此退出选择态并清空选择（未确认则保持选择态供继续调整）。
   const deleteTurnsWithConfirm = async (indices: number[]): Promise<boolean> => {
@@ -564,29 +668,50 @@ export function ChatFirstShell(): React.JSX.Element {
       {/* 无独立标题栏（微信式）：最小化/最大化/关闭用系统原生窗口控件叠加（titleBarOverlay），
           此处不再自绘按钮，避免与原生按钮重影。拖拽交给图标栏与对话头。 */}
       <div
-        className="cf-body"
+        className={`cf-body${collapsed && peek ? ' is-peeking' : ''}`}
         style={
-          { '--cf-rail-w': `${railW}px`, '--cf-side': `${sidebarShown}px` } as React.CSSProperties
+          {
+            '--cf-rail-w': `${railW}px`,
+            '--cf-side': `${collapsed ? 0 : sidebarShown}px`,
+            '--cf-side-open': `${sidebarShown}px`
+          } as React.CSSProperties
         }
       >
-        {/* 面板右缘拖拽手柄（覆盖在分隔线上，绝对定位不占网格单元）；定时任务 tab 的列表列同宽同享。 */}
-        <ResizeHandle
-          axis="x"
-          value={sidebarShown}
-          title={t('cf.resizeSidebar')}
-          style={{ left: `calc(${railW}px + ${sidebarShown}px)` }}
-          onChange={(v) => setSidebarW(clampSidebar(v, window.innerWidth, railW))}
-          onCommit={() => saveLayout({ sidebarWidth: sidebarRef.current })}
-          onReset={() => {
-            setSidebarW(SIDEBAR_DEFAULT)
-            saveLayout({ sidebarWidth: undefined })
-          }}
-        />
+        {/* 面板右缘拖拽手柄（覆盖在分隔线上，绝对定位不占网格单元）；定时任务 tab 的列表列同宽同享。
+            对话页：往左拖过下限继续拖即收起（手柄随之卸下、这次拖动结束）。收起后不显示手柄：往外拖要拖够
+            距离才生效、中间没有跟手的反馈，展开交给「对话」图标 / Ctrl+B。 */}
+        {!collapsed && (
+          <ResizeHandle
+            axis="x"
+            value={sidebarShown}
+            title={t('cf.resizeSidebar')}
+            style={{ left: `calc(${railW}px + ${sidebarShown}px)` }}
+            onChange={(v) => {
+              if (railTab === 'chats' && v < SIDEBAR_COLLAPSE_AT) {
+                // 收起后手柄卸下、不再走 onCommit：拖到下限前改过的宽度在这里落盘。
+                saveLayout({ sidebarWidth: sidebarRef.current })
+                setCollapsed(true)
+                return
+              }
+              setSidebarW(clampSidebar(v, window.innerWidth, railW))
+            }}
+            onCommit={() => saveLayout({ sidebarWidth: sidebarRef.current })}
+            onReset={() => {
+              setSidebarW(SIDEBAR_DEFAULT)
+              saveLayout({ sidebarWidth: undefined })
+            }}
+          />
+        )}
         <IconRail
           tab={railTab}
-          onTab={onRailTab}
+          // 点亮着的「对话」图标 = 收起 / 展开会话列表；点别的图标照常切页。
+          onTab={(tab) => (tab === 'chats' && railTab === 'chats' ? setCollapsed(!listCollapsed) : setRailTab(tab))}
+          listCollapsed={collapsed}
+          onChatsHover={peekEnter}
+          onChatsLeave={peekLeave}
           onOpenSettings={() => {
             setSettingsOpen(true)
+            // Web 移动端：设置是全屏弹窗，打开时收起抽屉，避免叠在下面
             setMobDrawer(false)
           }}
           chatAlert={chatAlert}
@@ -617,9 +742,15 @@ export function ChatFirstShell(): React.JSX.Element {
               onAddPersona={() => setEditor({ mode: 'create' })}
               onAddPersonaByChat={addPersonaByChat}
               onNewChatFromThread={newChatFromThread}
+              onRenameThread={renameThread}
               onDeleteThread={deleteThread}
               onDeletePersona={deletePersona}
               onReorderPersonas={reorderPersonas}
+              collapsed={collapsed}
+              peek={collapsed && peek}
+              onHover={peekStay}
+              onLeave={peekLeave}
+              onInputBlur={peekFocusOut}
             />
             {railTab === 'roster' ? (
               // 「角色」tab：右侧显示选中角色的资料卡；未选中（或角色已删）则给出提示。
@@ -654,7 +785,6 @@ export function ChatFirstShell(): React.JSX.Element {
                 onMountReq={respondMount}
                 onOpenProposal={openProposal}
                 onOpenAutotask={openAutotask}
-                onStopSubagent={stopSubagent}
                 onDeleteTurns={deleteTurnsWithConfirm}
                 attention={sessionStates[currentSessionId]?.attention ?? false}
                 prefill={composerPrefill}
@@ -680,17 +810,29 @@ export function ChatFirstShell(): React.JSX.Element {
 function IconRail({
   tab,
   onTab,
+  listCollapsed,
+  onChatsHover,
+  onChatsLeave,
   onOpenSettings,
   chatAlert
 }: {
   tab: RailTab
+  /** 点亮着的「对话」图标也回调（由调用方切换会话列表的收起 / 展开）。 */
   onTab: (t: RailTab) => void
+  /** 对话页的会话列表已收起：「对话」图标的提示改为「展开会话列表」，红点也显示在它上面。 */
+  listCollapsed: boolean
+  /** 悬停 / 离开「对话」图标（收起时据此浮出列表）。 */
+  onChatsHover: () => void
+  onChatsLeave: () => void
   onOpenSettings: () => void
   /** 其他对话有新消息或待你处理 → 按钮上显示红点。 */
   chatAlert: boolean
 }): React.JSX.Element {
   const { t } = useI18n()
   const [profileOpen, setProfileOpen] = useState(false)
+  // 亮着的「对话」图标点了是收起 / 展开，提示写明，免得点了以为列表丢了。
+  const chatsLabel =
+    tab !== 'chats' ? t('cf.tabChats') : listCollapsed ? t('cf.expandList') : t('cf.collapseList')
   return (
     <nav className="cf-iconrail">
       <button
@@ -705,14 +847,17 @@ function IconRail({
       {profileOpen && <ProfilePanel onClose={() => setProfileOpen(false)} />}
       <button
         className={`cf-navbtn${tab === 'chats' ? ' is-active' : ''}`}
-        title={t('cf.tabChats')}
-        aria-label={t('cf.tabChats')}
+        title={chatsLabel}
+        aria-label={chatsLabel}
         aria-current={tab === 'chats'}
+        aria-expanded={tab === 'chats' ? !listCollapsed : undefined}
         onClick={() => onTab('chats')}
+        onMouseEnter={onChatsHover}
+        onMouseLeave={onChatsLeave}
       >
         <MessageCircle size={20} />
-        {/* 不在对话页时，才在导航按钮上提示其他对话的动静（在对话页时列表头像已能看到）。 */}
-        {tab !== 'chats' && chatAlert && (
+        {/* 看不到会话列表时（不在对话页，或列表已收起），在导航按钮上提示其他对话的动静。 */}
+        {(tab !== 'chats' || listCollapsed) && chatAlert && (
           <span className="cf-navbtn__dot" aria-hidden="true" />
         )}
       </button>
@@ -775,9 +920,15 @@ function Rail({
   onAddPersona,
   onAddPersonaByChat,
   onNewChatFromThread,
+  onRenameThread,
   onDeleteThread,
   onDeletePersona,
-  onReorderPersonas
+  onReorderPersonas,
+  collapsed,
+  peek,
+  onHover,
+  onLeave,
+  onInputBlur
 }: {
   tab: 'chats' | 'roster'
   sessions: SessionMeta[]
@@ -792,9 +943,20 @@ function Rail({
   onAddPersona: () => void
   onAddPersonaByChat: () => void
   onNewChatFromThread: (id: string) => void
+  /** 重命名对话（弹框输入新标题）；title 为当前标题。 */
+  onRenameThread: (id: string, title: string) => void
   onDeleteThread: (id: string, title: string) => void
   onDeletePersona: (id: string, name: string) => void
   onReorderPersonas: (ids: string[]) => void
+  /** 会话列表已收起（列宽归零、列表藏在对话区下面）。 */
+  collapsed: boolean
+  /** 收起时浮出：整块浮在对话区上方。 */
+  peek: boolean
+  /** 鼠标进出列表（浮出时据此决定收回）。右键菜单、新建菜单都是列表的子元素，停在上面不算离开。 */
+  onHover: () => void
+  onLeave: () => void
+  /** 焦点离开列表里的输入框（且没落在列表内别处）：浮出时据此决定收回。 */
+  onInputBlur: () => void
 }): React.JSX.Element {
   const { t } = useI18n()
   // 右键菜单态（对话/角色行共用一个，同一时刻至多一个）。
@@ -810,6 +972,17 @@ function Rail({
   useEffect(() => {
     setQuery('')
   }, [tab])
+  const asideRef = useRef<HTMLElement>(null)
+  // 收起后浮出列表收回时：连带关掉在它里面打开的右键菜单（否则菜单留在隐藏的列表里，下次浮出时它的全屏
+  // 透明背板跟着回来，第一下点击被背板吃掉）；清空搜索词（浮出列表是临时的，下次浮出不该还是筛过的样子）；
+  // 焦点若还在列表里（如搜索框）也移走，免得接着打字打进看不见的框。
+  useEffect(() => {
+    if (!collapsed || peek) return
+    setMenu(null)
+    setQuery('')
+    const el = document.activeElement
+    if (el instanceof HTMLElement && asideRef.current?.contains(el)) el.blur()
+  }, [collapsed, peek])
   // 归一化后的检索词（去空白 + 小写）；空则视为不过滤。
   const q = query.trim().toLowerCase()
   // 消息列表按最近更新降序，再按检索词过滤（标题 + 所属角色名，均大小写不敏感）。
@@ -852,7 +1025,17 @@ function Rail({
     onReorderPersonas([id, ...ids.filter((x) => x !== id)])
   }
   return (
-    <aside className="cf-rail">
+    <aside
+      ref={asideRef}
+      className={`cf-rail${collapsed ? ' is-collapsed' : ''}${peek ? ' is-peek' : ''}`}
+      aria-hidden={collapsed && !peek ? true : undefined}
+      onMouseEnter={onHover}
+      onMouseLeave={onLeave}
+      onBlur={(e) => {
+        const to = e.relatedTarget
+        if (e.target instanceof HTMLInputElement && !(to instanceof Node && e.currentTarget.contains(to))) onInputBlur()
+      }}
+    >
       {/* 顶部：搜索占满整行；消息 tab 并排「新建对话」入口（悬停出角色列表），角色 tab 并排「添加角色」入口（悬停/点击出二选一弹层）。 */}
       <div className="cf-rail__top">
         <div className="cf-search">
@@ -887,6 +1070,7 @@ function Rail({
         )}
       </div>
 
+      {/* 角色 tab：角色为空只会是还没加载完（默认角色 Deva 删不掉），先留空，不落到「未找到匹配项」。 */}
       <div className="cf-list">
         {tab === 'chats' ? (
           ordered.length === 0 ? (
@@ -913,9 +1097,7 @@ function Rail({
               />
             ))
           )
-        ) : personas.length === 0 ? (
-          <div className="cf-empty">{t('cf.noPersona')}</div>
-        ) : shownPersonas.length === 0 ? (
+        ) : personas.length === 0 ? null : shownPersonas.length === 0 ? (
           <div className="cf-empty">{t('cf.searchNoResults')}</div>
         ) : (
           shownPersonas.map((p) => (
@@ -956,6 +1138,11 @@ function Rail({
                     label: t('cf.newChat'),
                     icon: <Plus size={14} />,
                     onClick: () => onNewChatFromThread(menu.id)
+                  },
+                  {
+                    label: t('cf.renameChat'),
+                    icon: <Pencil size={14} />,
+                    onClick: () => onRenameThread(menu.id, menu.title)
                   },
                   {
                     label: t('cf.deleteChat'),
@@ -2007,6 +2194,7 @@ function ThreadRow({
 }): React.JSX.Element {
   const { t } = useI18n()
   const rel = useRelativeTime()
+  const draft = useDraftPreview(session.id)
   // 任务独占会话（sessionId = `task-…`）：行上打一枚静态「⏰ 定时」徽标以区别普通对话。
   // 「有新运行未读」（state.unread）与待你处理（state.attention）都在头像右上角打红点。
   const isTask = session.id.startsWith('task-')
@@ -2036,7 +2224,15 @@ function ThreadRow({
           )}
           <span className="cf-thread__time">{rel(session.updatedAt)}</span>
         </div>
-        <div className="cf-thread__owner">{owner?.name ?? ''}</div>
+        {/* 这个会话里有没发出的内容（且不是正在看的会话）：下行换成红色「[草稿]」+ 内容开头，提醒切回去接着写。 */}
+        {draft && !active ? (
+          <div className="cf-thread__owner">
+            <span className="cf-thread__draft">{t('cf.draftTag')}</span>
+            {draft}
+          </div>
+        ) : (
+          <div className="cf-thread__owner">{owner?.name ?? ''}</div>
+        )}
       </div>
     </button>
   )
@@ -2115,7 +2311,7 @@ function PersonaRow({
 /**
  * 左侧对话被清空后中列的落点：列出花名册全部角色，点头像/卡片直接与该角色开启新对话
  * （onStart → startWith：新建并落盘一条绑定该角色的空对话，随即切入消息视图）。
- * 花名册为空时给出「先去添加角色」的提示（与角色 tab 空态一致）。
+ * 默认角色 Deva 删不掉，花名册只在加载完成前为空，此时网格先留空。
  */
 function QuickStart({
   personas,
@@ -2132,24 +2328,20 @@ function QuickStart({
         <div className="cf-quick__inner">
           <div className="cf-quick__title">{t('cf.quickStartTitle')}</div>
           <div className="cf-quick__hint">{t('cf.quickStartHint')}</div>
-          {personas.length === 0 ? (
-            <div className="cf-empty">{t('cf.noPersona')}</div>
-          ) : (
-            <div className="cf-quick__grid">
-              {personas.map((p) => (
-                <button
-                  key={p.id}
-                  className="cf-qcard"
-                  onClick={() => onStart(p.id)}
-                  title={p.desc || p.name}
-                >
-                  <Avatar persona={p} size={48} />
-                  <span className="cf-qcard__name">{p.name}</span>
-                  {p.desc && <span className="cf-qcard__desc">{p.desc}</span>}
-                </button>
-              ))}
-            </div>
-          )}
+          <div className="cf-quick__grid">
+            {personas.map((p) => (
+              <button
+                key={p.id}
+                className="cf-qcard"
+                onClick={() => onStart(p.id)}
+                title={p.desc || p.name}
+              >
+                <Avatar persona={p} size={48} />
+                <span className="cf-qcard__name">{p.name}</span>
+                {p.desc && <span className="cf-qcard__desc">{p.desc}</span>}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </main>
@@ -2992,7 +3184,6 @@ function Conversation({
   onMountReq,
   onOpenProposal,
   onOpenAutotask,
-  onStopSubagent,
   onDeleteTurns,
   attention,
   prefill,
@@ -3003,7 +3194,7 @@ function Conversation({
   currentSessionId: string
   messages: ChatMessage[]
   streaming: boolean
-  streamStatus: { elapsedSec: number; reconnecting: RecoveryStatus | null }
+  streamStatus: StreamStatus
   focusRoot: string | null
   onOpenProfile: (id: string) => void
   onSend: (text: string, attachments?: SendAttachment[]) => Promise<boolean>
@@ -3016,8 +3207,6 @@ function Conversation({
   onOpenProposal: (block: Extract<ChatBlock, { kind: 'agentcard' }>) => void
   /** created 态定时任务名片「打开任务会话」。 */
   onOpenAutotask: (taskId: string) => void
-  /** 停止一个后台运行的子智能体（Task 卡上的停止键）。 */
-  onStopSubagent: (toolId: string) => void
   /** 按「轮」删除选中轮次（含破坏性确认）；返回是否已删（true=退出选择态并清空选择）。 */
   onDeleteTurns: (turnIndices: number[]) => Promise<boolean>
   /** 当前会话有待用户处理的卡片（问答 / 计划 / 挂载请求）：此时不开回滚面板。 */
@@ -3271,6 +3460,28 @@ function Conversation({
     return onSend(text, attachments)
   }
 
+  // 底部工作状态行。本轮已有「工作过程」折叠条时，常规的「正在做什么 + 计时」已在折叠条里，只剩等待作答 /
+  // 重连 / 压缩这些特殊状态；它们放进这条消息的末尾，紧跟步骤与卡片——放在消息列表下面的话，进行中消息底部
+  // 撑住的空白（见 ConvMessage）会把它和上面的步骤隔开。还没有折叠条时照常放在列表下方。
+  // 回复还什么都没出（请求中）时也放进这条消息，就在角色名下面、正文将出现的位置，显示为三个跳动的点；
+  // 正文或思考一到即被替换。
+  const lastMsg = messages[messages.length - 1]
+  const folded = streaming && lastMsg?.role === 'assistant' && hasProcess(lastMsg.blocks)
+  const blank =
+    streaming &&
+    lastMsg?.role === 'assistant' &&
+    lastMsg.blocks.every((b) => b.kind === 'step' || (b.kind === 'text' && !b.text.trim()))
+  const statusInMsg = folded || blank
+  const statusLine = streaming ? (
+    <StatusIndicator
+      activity={deriveActivity(messages)}
+      status={streamStatus}
+      folded={folded}
+      pending={blank}
+      onStop={onStop}
+    />
+  ) : null
+
   // 单条消息渲染（选择态与常态复用；选择态下 active 恒 false，因选择只在非流式时可用）。
   // turn：常态渲染传入，标注到根 data-turn 供右键定位；选择态用卡片自身处理点击，无需传。
   const renderMsg = (m: ChatMessage, i: number, turn?: number): React.JSX.Element => (
@@ -3279,13 +3490,15 @@ function Conversation({
       msg={m}
       owner={owner}
       active={!selecting && streaming && i === messages.length - 1}
+      latest={i === messages.length - 1}
+      elapsedSec={i === messages.length - 1 ? streamStatus.elapsedSec : 0}
+      footer={statusInMsg && !selecting && i === messages.length - 1 ? statusLine : undefined}
       dataTurn={turn}
       onAsk={onAsk}
       onPlan={onPlan}
       onMountReq={onMountReq}
       onOpenProposal={onOpenProposal}
       onOpenAutotask={onOpenAutotask}
-      onStopSubagent={onStopSubagent}
     />
   )
 
@@ -3351,13 +3564,7 @@ function Conversation({
             ) : (
               <>
                 {messages.map((m, i) => renderMsg(m, i, turnOf[i]))}
-                {streaming && (
-                  <StatusIndicator
-                    activity={deriveActivity(messages)}
-                    status={streamStatus}
-                    onStop={onStop}
-                  />
-                )}
+                {!statusInMsg && statusLine}
                 {/* 已有对话但模型被删光：引导卡接在末尾（不进对话记录）。 */}
                 {needModelSetup && !streaming && <ModelSetupCard />}
               </>
@@ -3430,6 +3637,7 @@ function Conversation({
         </div>
       ) : (
         <Composer
+          sessionId={currentSessionId}
           owner={owner}
           streaming={streaming}
           focusRoot={focusRoot}
@@ -3609,22 +3817,37 @@ function UserText({ text }: { text: string }): React.JSX.Element {
   )
 }
 
+/**
+ * 进行中消息出现这些元素时不撑住高度（见 ConvMessage）：工作过程里用户展开着的节点 / 折叠条，
+ * 以及还在等用户处置的问答、计划、挂载卡。
+ */
+const NO_HOLD =
+  '.msg__process [aria-expanded="true"], .ask:not(.is-answered), .msg__plan:not(.is-decided), .msg__mount:not(.is-decided)'
+
 /** 单条消息：IM 头像外壳 + 复用 features/chat/blocks 的 BlockView（安全渲染器不重写）。 */
 function ConvMessage({
   msg,
   owner,
   active,
+  latest,
+  elapsedSec,
+  footer,
   dataTurn,
   onAsk,
   onPlan,
   onMountReq,
   onOpenProposal,
-  onOpenAutotask,
-  onStopSubagent
+  onOpenAutotask
 }: {
   msg: ChatMessage
   owner?: Persona
   active: boolean
+  /** 是否为对话里最后一条消息（进行中撑住的高度在它不再是最后一条时释放）。 */
+  latest: boolean
+  /** 本轮已用秒数（进行中的折叠条标题末尾显示；只对 active 的消息有意义）。 */
+  elapsedSec: number
+  /** 接在消息内容末尾的底部状态行（只交给进行中的那条：已有折叠条时是等待作答 / 重连 / 压缩，还没内容时是思考中）。 */
+  footer?: React.ReactNode
   /** 该消息所属的对话轮下标（0 基）；标注在根节点上，供右键菜单定位「删除此轮」。前言/未知为 undefined。 */
   dataTurn?: number
   onAsk: (key: string, answers: string[]) => void
@@ -3632,9 +3855,63 @@ function ConvMessage({
   onMountReq: (key: string, path: string | null) => void
   onOpenProposal: (block: Extract<ChatBlock, { kind: 'agentcard' }>) => void
   onOpenAutotask: (taskId: string) => void
-  onStopSubagent: (toolId: string) => void
 }): React.JSX.Element {
   const { t } = useI18n()
+  // 「工作过程」是否展开：进行中与结束后都默认收起；用户点开后在本次挂载内保持（跨过回合结束也不变）。
+  const [processOpen, setProcessOpen] = useState(false)
+  // 进行中消息高度只增不减：当前步骤区域随内容伸缩（5 个并行工具 → 1 行思考 → 1 个工具）、中间说明收进
+  // 折叠条，都会让消息变矮，页面跟着上下拉扯。故把本轮出现过的最大高度记作最小高度，空出的地方留在消息
+  // 底部。回合结束后用 0.25s 平滑收回到实际高度（直接释放的话，最终回复很短时会一下缩掉一大截）。
+  // 用户在消息里点了按钮（开合折叠条、思考 / 子智能体节点、各种卡片）立即释放：那是有意的伸缩，
+  // 否则点开思考再收起，撑高的那截会一直留着，「回到最新」就落到一片空白上。
+  // 以下两种情况不记高度（见 NO_HOLD），恢复后从当时的高度重新记：
+  // · 工作过程里有用户展开着的东西（折叠条本身、计划 / 思考 / 提问等节点）：展开的节点可能随后被自动换掉
+  //   （当前步骤前进到下一步），它撑出的高度不该留下。
+  // · 有等你处置的问答 / 计划 / 挂载卡：回合停着等你，本无抖动可防；处置后卡片收进折叠条是你造成的收缩，
+  //   而且常是在输入框里按回车提交，不经过按钮点击，上面的释放管不到。
+  const contentRef = useRef<HTMLDivElement>(null)
+  const peakRef = useRef(0)
+  const releasePeak = (): void => {
+    peakRef.current = 0
+    const el = contentRef.current
+    if (!el) return
+    el.style.transition = ''
+    el.style.minHeight = ''
+  }
+  useLayoutEffect(() => {
+    const el = contentRef.current
+    if (!el) return
+    if (active) {
+      const ro = new ResizeObserver(() => {
+        if (el.querySelector(NO_HOLD)) {
+          if (peakRef.current) releasePeak()
+          return
+        }
+        const h = el.getBoundingClientRect().height
+        if (h > peakRef.current) {
+          peakRef.current = h
+          el.style.minHeight = `${h}px`
+        }
+      })
+      ro.observe(el)
+      return () => ro.disconnect()
+    }
+    // 回合结束：撑住的空白平滑收回。先量出不撑时的实际高度，再从撑住的高度过渡过去。
+    const held = el.style.minHeight
+    if (!held) return
+    releasePeak()
+    const natural = el.getBoundingClientRect().height
+    if (natural >= parseFloat(held) || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+    el.style.minHeight = held
+    void el.getBoundingClientRect() // 让过渡从撑住的高度起步
+    el.style.transition = 'min-height 0.25s ease'
+    el.style.minHeight = `${natural}px`
+    const timer = setTimeout(releasePeak, 300)
+    return () => clearTimeout(timer)
+  }, [active])
+  useLayoutEffect(() => {
+    if (!latest) releasePeak()
+  }, [latest])
   // 后台任务通知（后台子智能体结束后自动起的那一轮的起点）：一行居中的系统通知，不画成用户气泡。
   // 仍保留 is-user + data-turn：它是一轮的起点，右键删轮 / 跳转定位都靠它。
   if (msg.role === 'user' && msg.notify) {
@@ -3645,6 +3922,15 @@ function ConvMessage({
           <Bot size={13} />
           <span>{text || t('chat.subagent.notify')}</span>
         </div>
+      </div>
+    )
+  }
+  // 压缩摘要（较早的对话已收成它）：一行居中提示 + 折叠的摘要，不画头像与角色名——那不是角色说的话。
+  const only = msg.blocks.length === 1 ? msg.blocks[0] : undefined
+  if (msg.role === 'assistant' && only?.kind === 'compaction') {
+    return (
+      <div className="cf-msg is-compaction" data-turn={dataTurn}>
+        <CompactionNotice summary={only.summary} />
       </div>
     )
   }
@@ -3669,32 +3955,86 @@ function ConvMessage({
       </div>
     )
   }
+  // 仍在流式输出的那一块（只有进行中的回合才有）：思考据此判断是否已完成，按引用比对。
+  const liveBlock = active ? msg.blocks[msg.blocks.length - 1] : undefined
+  // 连续的思考 / 工具调用 / 子智能体画成一条时间轴（见 groupBlocks）；其余块逐个原样渲染。
+  // notesInline：工作过程里夹着的正文是中间说明，作为时间轴上的说明节点，不打断时间轴。
+  const renderBlocks = (blocks: ChatBlock[], notesInline = false): React.ReactNode =>
+    groupBlocks(blocks, notesInline).map((item) =>
+      item.type === 'timeline' ? (
+        <Timeline key={item.key} steps={item.steps} liveBlock={liveBlock} />
+      ) : (
+        <BlockView
+          key={item.index}
+          block={item.block}
+          thinkingDone={item.block !== liveBlock}
+          onAsk={onAsk}
+          onPlan={onPlan}
+          onMountReq={onMountReq}
+          onOpenProposal={onOpenProposal}
+          onOpenAutotask={onOpenAutotask}
+        />
+      )
+    )
+  // 思考 / 工具调用等过程收进「工作过程」折叠条，名片等固定块与回复正文留在外面（见 splitProcess）；
+  // 交付卡在回合结束后排在最后（见 DeliveryCards）。
+  // 进行中同样默认收起，收起时折叠条下露出当前步骤（并行执行的一并列出，最多 5 行，见 currentSteps）；
+  // 最近一步之后已在输出正文或出了卡片时不露。
+  // 当前步骤正是流式输出中的思考：折叠条标题直接写「思考中」，下面只露实时小窗，不再重复一行「思考中」
+  // 节点（点折叠条展开整条时间轴即可看全文）。
+  const split = splitProcess(msg.blocks, active)
+  const current = split && active ? currentSteps(msg.blocks) : []
+  const step = current.length === 1 ? current[0] : undefined
+  const liveThinking = step?.kind === 'thinking' && step === liveBlock ? step : undefined
+  const preview =
+    current.length > 0 ? (
+      liveThinking ? (
+        liveThinking.text.trim() && <LiveThinkingWindow text={liveThinking.text} />
+      ) : (
+        <Timeline
+          steps={current.map((b) => ({ block: b, index: msg.blocks.indexOf(b) }))}
+          liveBlock={liveBlock}
+          compact
+          limit={5}
+        />
+      )
+    ) : undefined
+  // 有工作过程时，角色名与折叠条同一行（「Deva › 已处理 … · N 步」）；没有时单独一行。
+  const name = <span className="cf-msg__name">{owner?.name ?? t('cf.assistant')}</span>
   return (
     <div className="cf-msg" data-turn={dataTurn}>
       <Avatar persona={owner} size={32} />
       <div className="cf-msg__body">
-        <div className="cf-msg__head">
-          <span className="cf-msg__name">{owner?.name ?? t('cf.assistant')}</span>
-        </div>
-        <div className="msg__content">
-          {/* 连续 ≥2 个工具调用折叠成一张工具组卡（见 groupBlocks）；其余块逐个原样渲染。 */}
-          {groupBlocks(msg.blocks).map((item) =>
-            item.type === 'toolGroup' ? (
-              <ToolGroupCard key={item.key} tools={item.tools} />
-            ) : (
-              <BlockView
-                key={item.index}
-                block={item.block}
-                thinkingDone={!(active && item.index === msg.blocks.length - 1)}
-                onAsk={onAsk}
-                onPlan={onPlan}
-                onMountReq={onMountReq}
-                onOpenProposal={onOpenProposal}
-                onOpenAutotask={onOpenAutotask}
-                onStopSubagent={onStopSubagent}
-              />
-            )
+        {!split && <div className="cf-msg__head">{name}</div>}
+        <div
+          className="msg__content"
+          ref={contentRef}
+          onClickCapture={(e) => {
+            if ((e.target as HTMLElement).closest('button')) releasePeak()
+          }}
+        >
+          {split ? (
+            <>
+              <ProcessFold
+                blocks={split.process}
+                durationMs={msg.durationMs}
+                live={active}
+                thinking={Boolean(liveThinking)}
+                elapsedSec={active ? elapsedSec : undefined}
+                preview={preview}
+                open={processOpen}
+                onToggle={() => setProcessOpen((v) => !v)}
+                lead={name}
+              >
+                {renderBlocks(split.process, true)}
+              </ProcessFold>
+              {renderBlocks(split.visible)}
+            </>
+          ) : (
+            renderBlocks(msg.blocks)
           )}
+          {!active && <DeliveryCards blocks={msg.blocks} />}
+          {footer}
         </div>
       </div>
     </div>
@@ -3721,7 +4061,40 @@ function slashQueryOf(input: string): string | null {
   return m ? m[1] : null
 }
 
+/**
+ * 各会话未发送的输入（正文 + 待发附件），按会话 id 存在内存里：切走时存下、切回来接着写，也不会把 A 会话
+ * 没写完的内容带到 B。只存非空的；不落盘，重启应用后清空。
+ * 会话列表据此在其他会话行上显示「[草稿] …」（见 useDraftPreview）：只在进出会话时变动，打字不刷新列表。
+ */
+type ComposerDraft = { text: string; pending: Picked[] }
+const composerDrafts = new Map<string, ComposerDraft>()
+const draftListeners = new Set<() => void>()
+
+/** 写入（null = 清除）某会话的草稿，并通知会话列表。 */
+function setComposerDraft(id: string, draft: ComposerDraft | null): void {
+  if (draft) composerDrafts.set(id, draft)
+  else if (!composerDrafts.delete(id)) return
+  for (const notify of draftListeners) notify()
+}
+
+function subscribeDrafts(onChange: () => void): () => void {
+  draftListeners.add(onChange)
+  return () => {
+    draftListeners.delete(onChange)
+  }
+}
+
+/** 某会话草稿的一行摘要：正文（空白归一），只有附件时为附件名；没有草稿为 null。 */
+function useDraftPreview(id: string): string | null {
+  return useSyncExternalStore(subscribeDrafts, () => {
+    const d = composerDrafts.get(id)
+    if (!d) return null
+    return d.text.replace(/\s+/g, ' ').trim() || d.pending.map((p) => p.name).join(' ') || null
+  })
+}
+
 function Composer({
+  sessionId,
   owner,
   streaming,
   focusRoot,
@@ -3734,6 +4107,8 @@ function Composer({
   prefill,
   onPrefillConsumed
 }: {
+  /** 当前会话：输入框里的草稿按它分开保存（见 composerDrafts）。 */
+  sessionId: string
   owner?: Persona
   streaming: boolean
   focusRoot: string | null
@@ -3749,9 +4124,13 @@ function Composer({
 }): React.JSX.Element {
   const { t, locale } = useI18n()
   const { skills } = useExtensions()
+  const toast = useToast()
   const [input, setInput] = useState('')
   const [pending, setPending] = useState<Picked[]>([])
-  const taRef = useRef<HTMLTextAreaElement>(null)
+  const pendingRef = useRef(pending)
+  pendingRef.current = pending
+  const sessionRef = useRef(sessionId)
+  sessionRef.current = sessionId
   // 输入框高度：固定高、不随内容长高，内容多了框内滚动；只能靠顶边手柄拖动调整。
   // 与侧栏同理，存用户意图值、渲染时按窗口高再夹取。
   const viewport = useViewport()
@@ -3773,15 +4152,8 @@ function Composer({
   // nonce 变化触发一次；消费后立即回调置空（父层 prefill→null），guard 防重入与重挂载复活。
   useEffect(() => {
     if (!prefill) return
-    setInput(prefill.text)
+    composer.setText(prefill.text, true)
     onPrefillConsumed()
-    requestAnimationFrame(() => {
-      const el = taRef.current
-      if (!el) return
-      el.focus()
-      const end = el.value.length
-      el.setSelectionRange(end, end)
-    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.nonce])
 
@@ -3834,16 +4206,7 @@ function Composer({
   }, [slashCur, slashOpen])
 
   /** 采纳候选：写回 `/name `（尾随空格便于接着补充说明，发送前会被 trim），光标留在末尾。 */
-  const applySlash = (c: SlashCommand): void => {
-    const next = `/${c.name} `
-    setInput(next)
-    requestAnimationFrame(() => {
-      const el = taRef.current
-      if (!el) return
-      el.focus()
-      el.setSelectionRange(next.length, next.length)
-    })
-  }
+  const applySlash = (c: SlashCommand): void => composer.setText(`/${c.name} `, true)
 
   const name = owner?.name ?? t('cf.assistant')
   const placeholder = locale === 'en' ? `Message ${name}…` : `跟 ${name} 说点什么…`
@@ -3860,121 +4223,199 @@ function Composer({
     })()
   }
 
-  const pickFiles = async (): Promise<void> => {
-    if (streaming) return
-    const picked = (await window.deva.fs.pickAttachments()) as Picked[]
-    if (!picked.length) return
+  // 新增附件并入 pending：不支持 / 过大的不加入（加了也发不出去），toast 说明哪些被跳过；按路径去重。
+  const addPicked = (picked: Picked[]): void => {
+    const bad = picked.filter((p) => !p.supported)
+    if (bad.length) {
+      const names = bad.map((p) => p.name).join(locale === 'en' ? ', ' : '、')
+      toast.show({ variant: 'warning', message: t('cf.attachSkipped').replace('{names}', names) })
+    }
     setPending((prev) => {
       const seen = new Set(prev.map((p) => p.path))
-      return [...prev, ...picked.filter((p) => !seen.has(p.path))]
+      const out = [...prev]
+      for (const p of picked) {
+        if (!p.supported || seen.has(p.path)) continue
+        seen.add(p.path)
+        out.push(p)
+      }
+      return out
     })
   }
 
-  // 粘贴图片 / 文档：与「附加文件」同一条链路（主进程授权 → pending 附件条）。
-  // 剪贴板带纯文本时一律按文本粘贴——Word / Excel 复制内容会顺带一张渲染图，不能把它变成附件。
-  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>): void => {
-    const files = Array.from(e.clipboardData.files)
-    if (!files.length || e.clipboardData.getData('text/plain')) return
-    e.preventDefault()
+  const pickFiles = async (): Promise<void> => {
     if (streaming) return
-    void (async () => {
-      const picked = await Promise.all(
-        files.map(async (f) =>
-          window.deva.fs.pasteAttachment({
-            name: f.name,
-            mime: f.type,
-            size: f.size,
-            // 超过最大附件上限（PDF 20MB）的不读字节，只报体积，主进程据此判「过大」。
-            data: f.size > 20 * 1024 * 1024 ? null : new Uint8Array(await f.arrayBuffer())
-          })
-        )
-      )
-      // 同一文件多次粘贴只留一份：主进程按内容去重、重复粘贴返回同一路径，此处按路径过滤即可。
-      setPending((prev) => {
-        const seen = new Set(prev.map((p) => p.path))
-        const out = [...prev]
-        for (const p of picked as Picked[]) {
-          if (seen.has(p.path)) continue
-          seen.add(p.path)
-          out.push(p)
-        }
-        return out
-      })
-    })()
+    addPicked((await window.deva.fs.pickAttachments()) as Picked[])
   }
+
+  // 粘贴 / 拖入的文件：与「附加文件」同一条链路（主进程落盘授权 → pending 附件条）。
+  // 只交字节不交路径，渲染层仍无法让主进程读任意路径；拖入的文件夹读不出字节，直接跳过。
+  const addFiles = async (files: File[]): Promise<void> => {
+    const results = await Promise.allSettled(
+      files.map(async (f) =>
+        window.deva.fs.pasteAttachment({
+          name: f.name,
+          mime: f.type,
+          size: f.size,
+          // 超过最大附件上限（PDF 20MB）的不读字节，只报体积，主进程据此判「过大」。
+          data: f.size > 20 * 1024 * 1024 ? null : new Uint8Array(await f.arrayBuffer())
+        })
+      )
+    )
+    // 同一文件多次粘贴 / 拖入只留一份：主进程按内容去重、重复的返回同一路径，addPicked 按路径过滤即可。
+    addPicked(results.flatMap((r) => (r.status === 'fulfilled' ? [r.value as Picked] : [])))
+  }
+
+  // 剪贴板带纯文本时一律按文本粘贴——Word / Excel 复制内容会顺带一张渲染图，不能把它变成附件。
+  const onPaste = (e: ClipboardEvent): boolean => {
+    const files = Array.from(e.clipboardData?.files ?? [])
+    if (!files.length || e.clipboardData?.getData('text/plain')) return false
+    e.preventDefault()
+    if (!streaming) void addFiles(files)
+    return true
+  }
+
+  // 拖入文件：整个窗口都可放下，一律转成附件。Chromium 对未拦截的文件拖放默认「打开该文件」
+  // （导航离开应用），故凡带文件的 dragover / drop 都 preventDefault；回复中只拦截不附加，同粘贴。
+  const addFilesRef = useRef(addFiles)
+  addFilesRef.current = addFiles
+  const streamingRef = useRef(streaming)
+  streamingRef.current = streaming
+  useEffect(() => {
+    const hasFiles = (e: DragEvent): boolean => Boolean(e.dataTransfer?.types.includes('Files'))
+    const onDragOver = (e: DragEvent): void => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = streamingRef.current ? 'none' : 'copy'
+    }
+    const onDrop = (e: DragEvent): void => {
+      if (!hasFiles(e)) return
+      e.preventDefault()
+      const files = Array.from(e.dataTransfer?.files ?? [])
+      if (files.length && !streamingRef.current) void addFilesRef.current(files)
+    }
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('drop', onDrop)
+    return () => {
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('drop', onDrop)
+    }
+  }, [])
 
   const removePending = (path: string): void =>
     setPending((prev) => prev.filter((p) => p.path !== path))
 
   const submit = (): void => {
-    const text = input
+    const text = composer.getText()
     const atts = pending.filter((p) => p.supported)
     if ((!text.trim() && atts.length === 0) || streaming) return
     // /rewind 纯渲染层指令：打开回滚面板、不发消息；此刻不可用则原样留在输入框。
     if (text.trim().toLowerCase() === '/rewind' && atts.length === 0) {
-      if (onRewind()) setInput('')
+      if (onRewind()) composer.setText('')
       return
     }
     const prevPending = pending
-    setInput('')
+    const sid = sessionId
+    composer.setText('')
+    composer.clearHistory()
     setPending([])
     void onSend(
       text,
       atts.map((p) => ({ path: p.path, name: p.name, kind: p.kind as AttachKind }))
     ).then((sent) => {
-      // 未发出（未选模型 / 请求失败，原因已 toast）：把草稿放回——但别覆盖用户在此期间新敲的内容。
+      // 未发出（未选模型 / 请求失败，原因已 toast）：把草稿放回——但别覆盖用户在此期间新敲的内容；
+      // 此间已切到别的会话的，放回原会话的草稿里。
       if (sent) return
-      setInput((cur) => cur || text)
+      if (sessionRef.current !== sid) {
+        if (!composerDrafts.has(sid)) setComposerDraft(sid, { text, pending: prevPending })
+        return
+      }
+      if (!composer.getText()) composer.setText(text)
       setPending((cur) => (cur.length ? cur : prevPending))
     })
   }
 
-  const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (e.nativeEvent.isComposing) return // 输入法组字中：按键一律交给 IME
+  const onKey = (key: ComposerKey, e: KeyboardEvent): boolean => {
     const plain = !e.shiftKey && !e.ctrlKey && !e.altKey
     // 「/ 指令」联想打开时这几个键先归联想；其余（含 Shift+Enter 换行）照旧落到输入框。
     if (slashOpen) {
-      if (plain && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      if (plain && (key === 'down' || key === 'up')) {
         e.preventDefault()
-        const d = e.key === 'ArrowDown' ? 1 : -1
+        const d = key === 'down' ? 1 : -1
         setSlashSel((i) => {
           const n = slashMatches.length
           return (Math.min(i, n - 1) + d + n) % n
         })
-        return
+        return true
       }
-      if (e.key === 'Tab' || (plain && e.key === 'Enter')) {
+      if (key === 'tab' || (plain && key === 'enter')) {
         e.preventDefault()
         const pick = slashMatches[slashCur]
         if (pick) applySlash(pick)
-        return
+        return true
       }
-      if (e.key === 'Escape') {
+      if (key === 'escape') {
         e.preventDefault()
         setSlashOff(true)
-        return
+        return true
       }
     }
     // 双击 Esc（仅空输入框、无待发附件时）打开回滚面板；联想浮层开着时 Esc 已在上面被它吃掉。
-    if (e.key === 'Escape' && plain && !input.trim() && pending.length === 0 && !streaming) {
+    if (key === 'escape' && plain && !input.trim() && pending.length === 0 && !streaming) {
       const now = Date.now()
       if (now - lastEscRef.current <= 500) {
         lastEscRef.current = 0
         e.preventDefault()
         onRewind()
-      } else lastEscRef.current = now
-      return
+        return true
+      }
+      lastEscRef.current = now
+      return false
     }
-    if (e.key !== 'Enter') return
-    if (!plain) return // 交给默认换行
+    if (key !== 'enter' || !plain) return false // 其余交给编辑器（Shift+Enter 换行）
     e.preventDefault()
     submit()
+    return true
   }
 
-  const autoGrow = (e: React.ChangeEvent<HTMLTextAreaElement>): void => {
-    setInput(e.target.value)
-    setSlashOff(false) // 又动了输入：Esc 收起的联想重新可唤出
+  // 开头 `/name` 会不会生效（决定是否上色）：/compact、/rewind 须整条只有它且无附件（同 submit 与 store 的拦截）；
+  // 其余按已启用技能的显示名或文件夹名、不分大小写匹配（同主进程 loadSkillInstructionsByName）。
+  const noAtts = supported.length === 0
+  const isToken = (name: string, whole: string): boolean => {
+    const n = name.toLowerCase()
+    if ((n === 'compact' || n === 'rewind') && noAtts && whole.toLowerCase() === `/${n}`) return true
+    return skills.some((s) => s.enabled && (s.name.toLowerCase() === n || s.id.toLowerCase() === n))
   }
+
+  const composer = useComposerEditor({
+    onChange: (text) => {
+      setInput(text)
+      setSlashOff(false) // 又动了输入：Esc 收起的联想重新可唤出
+    },
+    onKey,
+    onPaste,
+    isToken
+  })
+
+  // 判定依据（技能启停、有无附件）变了而文本没变：重新识别一次开头指令。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => composer.refreshToken(), [skills, noAtts])
+
+  // 草稿按会话分开：进入会话（含挂载）换上它的草稿，没有则清空；离开（切换会话或卸载，如进入选择删除）时
+  // 把当前内容存到它名下。撤销历史一并清掉，免得撤销把别的会话的内容找回来。用 layout effect，切过去时
+  // 不会先闪一下上一个会话的文字。
+  useLayoutEffect(() => {
+    const draft = composerDrafts.get(sessionId)
+    setComposerDraft(sessionId, null)
+    composer.setText(draft?.text ?? '')
+    composer.clearHistory()
+    setPending(draft?.pending ?? [])
+    return () => {
+      const text = composer.getText()
+      const kept = pendingRef.current
+      if (text.trim() || kept.length) setComposerDraft(sessionId, { text, pending: kept })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
 
   return (
     <div className="cf-composer">
@@ -4028,8 +4469,11 @@ function Composer({
             <div className="cf-slash__hint">{t('cf.slash.hint')}</div>
           </div>
         )}
-        {/* 待办清单进度胶囊：有进行中的清单才出现，点开向上展开清单面板。 */}
-        <TodoCapsule />
+        {/* 输入框上方的胶囊排：待办清单进度（有进行中的清单才出现）+ 后台任务（有后台运行的子智能体才出现）。 */}
+        <div className="cf-dock">
+          <TodoCapsule />
+          <BackgroundCapsule />
+        </div>
         <div className="cf-box">
           {/* 拖拽手柄压在输入框上边框：向上拖加高输入框。 */}
           <ResizeHandle
@@ -4065,17 +4509,20 @@ function Composer({
               ))}
             </div>
           )}
-          <textarea
-            ref={taRef}
-            value={input}
-            placeholder={placeholder}
-            onChange={autoGrow}
-            onKeyDown={onKeyDown}
-            onPaste={onPaste}
-            style={{ height: boxH }}
-            onFocus={() => setFocused(true)}
-            onBlur={() => setFocused(false)}
-          />
+          {/* 输入区：Lexical 接管的 contentEditable（子节点归编辑器管，React 不渲染内容）；占位提示叠在其上。 */}
+          <div className="cf-draft" style={{ height: boxH }}>
+            <div
+              ref={composer.rootRef}
+              className="cf-draft__input"
+              contentEditable
+              role="textbox"
+              aria-multiline
+              aria-label={placeholder}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
+            />
+            {composer.empty && <div className="cf-draft__ph">{placeholder}</div>}
+          </div>
           <div className="cf-box__bar">
             <button
               className="cf-iconbtn"
@@ -4785,19 +5232,23 @@ function ExtensionsPane(): React.JSX.Element {
   // 角色（persona）不在此列出：它有专属的「角色」tab 与资料卡来管理，扩展页只管技能 / MCP。
   // 子智能体亦不在此列：它是内置能力（通用 / Explore / Research / Plan），不可配置，见 main/services/subagents.ts。
   const { skills, mcp, toggle, refresh } = useExtensions()
-  // 进入扩展页即从磁盘重拉最新：技能可能经对话 create_skill、上传或直接改盘在别处新增，Provider 仅在
-  // 应用启动时载入一次，故此处显式刷新，避免必须重启才能看到新技能。refresh 标识稳定，不会形成刷新循环。
+  // 进入扩展页即从磁盘重拉最新：技能平时由主进程目录监听实时推送，这里兜底监听失效（如技能目录在网络盘）
+  // 并顺带刷新 MCP。refresh 标识稳定，不会形成刷新循环。
   useEffect(() => {
     refresh()
   }, [refresh])
 
-  // 钻取导航：选中某个 MCP 服务 → 进入详情编辑（对齐模型设置页的主从抽屉）。技能只读，故只有 MCP 行
-  // 可点开。MCP 的新增经对话工具 / 直接改盘 ~/.deva/mcp.json，扩展页不放新增入口。
-  const [openMcpId, setOpenMcpId] = useState<string | null>(null)
-  const openMcp = openMcpId ? mcp.find((m) => m.id === openMcpId) : undefined
+  // 钻取导航：点开某行 → 进入详情（对齐模型设置页的主从抽屉）。MCP 详情可编辑；技能详情只读，
+  // 只提供删除与启停；内置技能不展示详情。新增经对话工具 / 上传 / 直接改盘，扩展页不放新增入口。
+  const [open, setOpen] = useState<{ kind: 'skill' | 'mcp'; id: string } | null>(null)
+  const openMcp = open?.kind === 'mcp' ? mcp.find((m) => m.id === open.id) : undefined
+  const openSkill = open?.kind === 'skill' ? skills.find((s) => s.id === open.id) : undefined
 
   if (openMcp) {
-    return <McpEditor item={openMcp} onBack={() => setOpenMcpId(null)} />
+    return <McpEditor item={openMcp} onBack={() => setOpen(null)} />
+  }
+  if (openSkill) {
+    return <SkillDetail item={openSkill} onBack={() => setOpen(null)} />
   }
 
   type Item = {
@@ -4843,44 +5294,128 @@ function ExtensionsPane(): React.JSX.Element {
         <div className="cf-empty">{t('cf.extEmpty')}</div>
       ) : (
         <div className="cf-rows">
-          {items.map((x) =>
-            x.kind === 'mcp' ? (
-              // MCP 行可点开编辑：主区做按钮（点开详情），开关作兄弟节点独立触发（互不干扰）。
-              <div key={`${x.kind}:${x.id}`} className="cf-setrow">
-                <button
-                  className="cf-setrow__open"
-                  title={t('extensions.name')}
-                  onClick={() => setOpenMcpId(x.id)}
-                >
-                  <span className="cf-setrow__name">
-                    {x.name}
-                    <span className="cf-badge">{x.badge}</span>
-                    {x.note && (
-                      <span className={`cf-setrow__note${x.noteWarn ? ' cf-setrow__note--warn' : ''}`}>
-                        {x.note}
-                      </span>
-                    )}
+          {items.map((x) => {
+            const name = (
+              <span className="cf-setrow__name">
+                {x.name}
+                <span className="cf-badge">{x.badge}</span>
+                {x.note && (
+                  <span className={`cf-setrow__note${x.noteWarn ? ' cf-setrow__note--warn' : ''}`}>
+                    {x.note}
                   </span>
-                  <ChevronRight className="cf-setrow__chevron" size={15} />
-                </button>
-                <Toggle on={x.enabled} onChange={() => toggle(x.kind, x.id)} />
-              </div>
-            ) : (
+                )}
+              </span>
+            )
+            return (
               <div key={`${x.kind}:${x.id}`} className="cf-setrow">
-                <div className="cf-setrow__main">
-                  <div className="cf-setrow__name">
-                    {x.name}
-                    <span className="cf-badge">{x.badge}</span>
-                    {x.note && <span className="cf-setrow__note">{x.note}</span>}
-                  </div>
-                </div>
+                {x.locked ? (
+                  // 内置技能不展示详情：只读一行，开关禁用。
+                  <div className="cf-setrow__main">{name}</div>
+                ) : (
+                  // 主区做按钮（点开详情），开关作兄弟节点独立触发（互不干扰）。
+                  <button className="cf-setrow__open" onClick={() => setOpen({ kind: x.kind, id: x.id })}>
+                    {name}
+                    <ChevronRight className="cf-setrow__chevron" size={15} />
+                  </button>
+                )}
                 <Toggle on={x.enabled} disabled={x.locked} onChange={() => toggle(x.kind, x.id)} />
               </div>
             )
-          )}
+          })}
         </div>
       )}
     </>
+  )
+}
+
+/**
+ * 技能详情（对话优先外壳）：只读的钻取式主从抽屉，顶栏形态同 MCP 详情（返回 · 删除 · 启用）。
+ * 只展示标准 SKILL.md 字段（name / description / compatibility / license / metadata）与 SKILL.md 正文，
+ * allowed-tools 及 Deva 自有的 trigger 不显示，空字段整块隐藏。整页撑满设置面板、不出外层滚动条：
+ * 描述不加标题、只占一行，正文吃掉剩余高度、过长时框内滚动。删除 = 技能文件夹移到系统回收站。
+ * 仅自定义技能可进入；内置技能在列表里不可点开。
+ */
+function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): React.JSX.Element {
+  const { t, locale } = useI18n()
+  const dialog = useDialog()
+  const toast = useToast()
+  const { toggle, removeSkill } = useExtensions()
+  // 运行环境要求 / 许可 / metadata 合成一张单行键值表，保证整页不出现外层滚动条。
+  const props: Array<[string, string]> = []
+  if (item.compatibility) props.push([t('extensions.compatibility'), item.compatibility])
+  if (item.license) props.push([t('extensions.license'), item.license])
+  props.push(...Object.entries(item.metadata))
+
+  const onDelete = (): void => {
+    const name = clipName(item.name)
+    void (async () => {
+      const ok = await dialog.confirm({
+        title: locale === 'en' ? `Delete skill “${name}”?` : `删除技能 ${name} ？`,
+        message: t(IS_MAC ? 'cf.skillDeleteConfirmMac' : 'cf.skillDeleteConfirm'),
+        confirmText: t('cf.delete'),
+        variant: 'danger'
+      })
+      if (!ok) return
+      if (await removeSkill(item.id)) onBack()
+      else toast.show({ variant: 'error', message: t('cf.skillDeleteFailed') })
+    })()
+  }
+
+  return (
+    <section className="provider-detail provider-detail--fill" key={item.id}>
+      <div className="provider-detail__topbar">
+        <button className="provider-detail__back" onClick={onBack}>
+          <ChevronLeft size={16} />
+          {t('common.back')}
+        </button>
+        <div className="provider-detail__spacer" />
+        <button className="icon-btn provider-detail__del" title={t('extensions.remove')} onClick={onDelete}>
+          <Trash2 size={15} />
+        </button>
+        <span className="provider-detail__enable">{t('extensions.enable')}</span>
+        <Toggle on={item.enabled} onChange={() => toggle('skill', item.id)} />
+      </div>
+      <header className="provider-detail__head">
+        <span className="ext-detail__icon">
+          <Puzzle size={18} />
+        </span>
+        <h2 className="ext-detail__name ext-detail__name--mono">{item.name}</h2>
+        <span className="ext-detail__scope">{t('common.global')}</span>
+      </header>
+
+      {item.desc && (
+        <div className="ext-field ext-detail__desc">
+          <p className="ext-detail__text ext-detail__text--line" title={item.desc}>
+            {item.desc}
+          </p>
+        </div>
+      )}
+
+      {props.length > 0 && (
+        <div className="ext-field">
+          <label className="ext-field__label">{t('extensions.properties')}</label>
+          <dl className="ext-meta">
+            {props.map(([k, v], i) => (
+              <Fragment key={i}>
+                <dt>{k}</dt>
+                <dd title={v}>{v}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </div>
+      )}
+
+      <div className="ext-field ext-field--grow">
+        <label className="ext-field__label">{t('extensions.instructions')}</label>
+        {item.instructions ? (
+          <div className="ext-detail__md">
+            <Markdown text={item.instructions} />
+          </div>
+        ) : (
+          <span className="ext-detail__muted">{t('extensions.instructionsEmpty')}</span>
+        )}
+      </div>
+    </section>
   )
 }
 
