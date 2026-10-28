@@ -5950,7 +5950,7 @@ function AboutPane(): React.JSX.Element {
       <div className="cf-about">
         <img className="cf-about__icon" src={devaIcon} alt="" aria-hidden />
         <div className="cf-about__name">{t('app.name')}</div>
-        <div className="cf-about__ver">
+        <div className="cf-about__ver cf-about__ver--src">
           源码版 v{sourceVersion}
         </div>
         {webVersion && (

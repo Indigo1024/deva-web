@@ -2634,10 +2634,30 @@ body.cf-resizing-y * {
   font-size: 20px;
   font-weight: 750;
 }
+/*
+ * 两行版本号（源码版 / Web 改版）：
+ * 结构与字号完全一致，只有配色不同 —— 源码版蓝色、Web 改版紫色。
+ * 两个都取服务端注入的运行时值，升级源码后刷新页面即可看到新版本。
+ */
 .cf-about__ver {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--fg-subtle);
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  line-height: 1.5;
+}
+/* 源码版：蓝色 */
+.cf-about__ver--src {
+  background: color-mix(in srgb, var(--info) 12%, transparent);
+  color: var(--info);
+}
+/* Web 改版：紫色（主题强调色） */
+.cf-about__ver--web {
+  background: var(--accent-tint);
+  color: var(--accent);
 }
 /* 版本行里的小标签：区分「上游」与「Web 改版」 */
 .cf-about__ver-tag {
@@ -2657,17 +2677,6 @@ body.cf-resizing-y * {
   font-size: 13px;
   line-height: 1.7;
   color: var(--fg-muted);
-}
-/* Web 改版版本行：与上游版本并排时稍作区分 */
-.cf-about__ver--web {
-  margin-top: 6px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--accent-tint);
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
 }
 /* 关于页的两个 GitHub 入口（上游源码 / 本改版仓库） */
 .cf-about__links {

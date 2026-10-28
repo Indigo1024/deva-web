@@ -112,9 +112,12 @@ function loadAppTemplate(): string {
 
 /**
  * 版本信息：**运行时读取**，不写死也不依赖构建期常量。
- *  - source：上游源码版本，读 apps/desktop/package.json（升级源码后重启即变）
+ *  - source：上游源码版本，读 apps/desktop/package.json（升级源码后刷新页面即变，无需重建）
  *  - web：Web 改版版本，读 apps/desktop/web-version.json
  * 关于页从 __DEVA_BOOT__ 里取，所以刷新页面就能看到最新值。
+ *
+ * 优先级：**源码目录优先于产物目录**。产物的 package.json 是构建时拷贝的副本，
+ * 源码升级但还没重建时副本仍是旧值 —— 那正是「版本号不跟着变」的根因。
  */
 function readVersionInfo(): { source: string; web: string } {
   const read = (p: string, key: string): string => {
@@ -125,9 +128,13 @@ function readVersionInfo(): { source: string; web: string } {
       return '0.0.0'
     }
   }
-  // 构建产物：out/web/index.cjs → __dirname = out/web，版本文件同目录
-  // 开发模式：src/web-server/index.ts → 往上两级到 apps/desktop
-  const candidates = [__dirname, join(__dirname, '..', '..')]
+  // 构建产物 out/web/index.cjs → __dirname = apps/desktop/out/web，
+  // 往上两级就是源码目录 apps/desktop；开发模式 __dirname 已是 src/web-server，
+  // 往上两级仍是 apps/desktop。两种形态都先落在这里。
+  const candidates = [
+    join(__dirname, '..', '..'), // apps/desktop（源码，实时）
+    __dirname // out/web（兜底：只部署产物、没有源码时）
+  ]
   for (const dir of candidates) {
     const pkg = join(dir, 'package.json')
     if (existsSync(pkg)) {
