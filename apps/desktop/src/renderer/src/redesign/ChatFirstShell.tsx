@@ -29,6 +29,7 @@ import {
   FileText,
   FileArchive,
   FileCode2,
+  Folder,
   FolderOpen,
   FolderPlus,
   ArrowRightLeft,
@@ -1003,7 +1004,7 @@ function Rail({
   }, [collapsed, peek])
   // 归一化后的检索词（去空白 + 小写）；空则视为不过滤。
   const q = query.trim().toLowerCase()
-  // 消息列表按最近更新降序，再按检索词过滤（标题 + 所属角色名，均大小写不敏感）。
+  // 消息列表按最近更新降序，再按检索词过滤（标题 + 所属角色名 + 挂载的文件夹名，均大小写不敏感）。
   const ordered = useMemo(() => {
     const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)
     if (!q) return sorted
@@ -1011,7 +1012,8 @@ function Rail({
       const owner = personas.find((p) => p.id === s.personaId)
       return (
         s.title.toLowerCase().includes(q) ||
-        (owner ? owner.name.toLowerCase().includes(q) : false)
+        (owner ? owner.name.toLowerCase().includes(q) : false) ||
+        (s.focusRoot ? basename(s.focusRoot).toLowerCase().includes(q) : false)
       )
     })
   }, [sessions, personas, q])
@@ -2232,7 +2234,7 @@ function ThreadRow({
         unread={!active && state?.unread}
       />
       <div className="cf-thread__main">
-        {/* 上：对话标题与时间（主视觉，醒目显示对话内容）；下：角色名。挂载目录不在此展示。 */}
+        {/* 上：对话标题与时间（主视觉，醒目显示对话内容）；下：角色名，挂了文件夹则换成文件夹名（悬停看完整路径，角色看头像）。 */}
         <div className="cf-thread__top">
           <span className="cf-thread__title">{session.title || t('chat.untitled')}</span>
           {isTask && (
@@ -2247,6 +2249,11 @@ function ThreadRow({
           <div className="cf-thread__owner">
             <span className="cf-thread__draft">{t('cf.draftTag')}</span>
             {draft}
+          </div>
+        ) : session.focusRoot ? (
+          <div className="cf-thread__owner cf-thread__owner--ws" title={session.focusRoot}>
+            <Folder size={11} />
+            <span className="cf-thread__wsname">{basename(session.focusRoot)}</span>
           </div>
         ) : (
           <div className="cf-thread__owner">{owner?.name ?? ''}</div>
@@ -4950,7 +4957,10 @@ function ProfileView({
                 <button key={s.id} className="cf-convrow" onClick={() => onOpenThread(s.id)}>
                   <span className="cf-convrow__title">{s.title || t('chat.untitled')}</span>
                   {s.focusRoot && (
-                    <span className="cf-convrow__proj">📁 {basename(s.focusRoot)}</span>
+                    <span className="cf-convrow__proj" title={s.focusRoot}>
+                      <Folder size={11} />
+                      <span className="cf-convrow__projname">{basename(s.focusRoot)}</span>
+                    </span>
                   )}
                   <span className="cf-convrow__time">{rel(s.updatedAt)}</span>
                 </button>
