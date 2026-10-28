@@ -104,7 +104,7 @@ import {
   type SessionMeta,
   type StreamStatus
 } from '../store/chat'
-import { useExtensions } from '../store/extensions'
+import { rolesAllow, useExtensions } from '../store/extensions'
 import { findActive, hasUsableModel, useModels } from '../store/models'
 import {
   clampEffort,
@@ -117,6 +117,7 @@ import { useI18n } from '../i18n/i18n'
 import { useDialog } from '../components/DialogProvider'
 import { useToast, type ToastOptions } from '../components/ToastProvider'
 import { Modal } from '../components/Modal'
+import { Select, type SelectEntry } from '../components/Select'
 import {
   COMPOSER_DEFAULT,
   ICONRAIL_W,
@@ -253,6 +254,14 @@ function reorderIds(
 
 /** 距底 ≤ 此像素即视为「贴住底部」，留缓冲避免临界抖动。 */
 const BOTTOM_THRESHOLD = 64
+
+/**
+ * 长对话分段渲染：打开对话时只渲染最后 WINDOW_TURNS 轮，滚到离已渲染内容的顶边（或跳转后的底边）
+ * 不足 LOAD_MORE_PX 时再补一段同样多的轮。整条历史一次挂载的话，Markdown 解析、代码高亮与整页布局都随
+ * 长度线性增长：几百轮的对话每次切换都要卡十几秒，上千轮能把渲染进程撑崩。
+ */
+const WINDOW_TURNS = 10
+const LOAD_MORE_PX = 600
 
 /**
  * 右侧「对话轮次索引」面板参数。纯渲染层视觉常量：不持久化、不给设置项。
@@ -450,6 +459,12 @@ export function ChatFirstShell(): React.JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false)
   /** 手机端列表抽屉（web 适配；桌面/广屏无影响——仅 <720px 生效）。 */
   const [mobDrawer, setMobDrawer] = useState(false)
+  // 打开设置时落在哪一页（资料卡的「能力」直达设置 › 扩展，可直接进某项详情）。
+  const [settingsInit, setSettingsInit] = useState<SettingsInit>({})
+  const openSettings = (init: SettingsInit = {}): void => {
+    setSettingsInit(init)
+    setSettingsOpen(true)
+  }
   /** 非空时打开角色编辑器（Part G）。 */
   const [editor, setEditor] = useState<EditorState | null>(null)
   /**
@@ -723,7 +738,7 @@ export function ChatFirstShell(): React.JSX.Element {
           onChatsHover={peekEnter}
           onChatsLeave={peekLeave}
           onOpenSettings={() => {
-            setSettingsOpen(true)
+            openSettings()
             // Web 移动端：设置是全屏弹窗，打开时收起抽屉，避免叠在下面
             setMobDrawer(false)
           }}
@@ -775,6 +790,7 @@ export function ChatFirstShell(): React.JSX.Element {
                   onOpenThread={openThread}
                   onStart={() => startWith(viewPersona.id)}
                   onEdit={() => setEditor({ mode: 'edit', persona: viewPersona })}
+                  onManageCaps={(ext) => openSettings({ section: 'extensions', ext })}
                 />
               ) : (
                 <RosterEmpty />
@@ -810,7 +826,7 @@ export function ChatFirstShell(): React.JSX.Element {
       </div>
 
       {editor && <PersonaEditor initial={editor} onClose={() => setEditor(null)} />}
-      {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <Settings initial={settingsInit} onClose={() => setSettingsOpen(false)} />}
     </div>
   )
 }
@@ -3276,6 +3292,61 @@ function Conversation({
     }
     return arr
   }, [messages])
+  // 各轮首条消息（用户消息）的下标：分段渲染按整轮取边界。
+  const turnStart = useMemo(() => {
+    const arr: number[] = []
+    messages.forEach((m, i) => {
+      if (m.role === 'user') arr.push(i)
+    })
+    return arr
+  }, [messages])
+  const lastTurn = turnStart.length - 1
+  /** 第 turn 轮的首条消息下标；第 0 轮及更早从 0 起，带上首轮之前的前言（压缩摘要等）。 */
+  const startOfTurn = (turn: number): number => (turn <= 0 ? 0 : turnStart[turn])
+  /** 第 turn 轮的末条消息下标。 */
+  const endOfTurn = (turn: number): number =>
+    turn + 1 < turnStart.length ? turnStart[turn + 1] - 1 : messages.length - 1
+
+  // 分段渲染的范围（见 WINDOW_TURNS）：首末两轮的轮下标，to 为 null 即一直到最新（含此后新到的轮）。
+  // 换了对话（sid 不符）回到默认的最后几轮；同一对话的消息整份重建（删轮 / 回滚 / 压缩后重载）时沿用原范围，
+  // 停在原来那片内容附近，超出现有轮数的部分收拢到末尾。不合规时在渲染中就地改正（React 允许组件在渲染中
+  // 更新自身状态），不先按旧范围画一遍——换对话时那一遍就是整条历史。
+  const [win, setWin] = useState<{ sid: string; from: number; to: number | null } | null>(null)
+  let range = messages.length > 0 && win && win.sid === currentSessionId ? win : null
+  if (messages.length > 0) {
+    const fromTurn = range ? Math.min(range.from, lastTurn) : lastTurn - WINDOW_TURNS + 1
+    const toTurn = range && range.to !== null && range.to < lastTurn ? Math.max(range.to, fromTurn) : null
+    if (!range || range.from !== fromTurn || range.to !== toTurn) {
+      range = { sid: currentSessionId, from: fromTurn, to: toTurn }
+      setWin(range)
+    }
+  }
+  const from = range ? startOfTurn(range.from) : 0
+  const to = range && range.to !== null ? endOfTurn(range.to) : messages.length - 1
+  /** 已渲染到最新一条：不在时（跳转到较早的轮后）不跟随新内容、不显示底部状态行，「回到最新」常显。 */
+  const isTail = to === messages.length - 1
+  // 补上更早一段后要保持的「距底距离」（内容加在上方，按距底距离落位，看着的内容不动）。
+  const restoreRef = useRef<number | null>(null)
+  // 跳转目标轮还没渲染：先换范围，渲染后再落位。
+  const pendingJumpRef = useRef<number | null>(null)
+  // 从中间一段回到最新：换回最后几轮后直接落到底。
+  const pendingBottomRef = useRef(false)
+  const loadEarlier = (): void => {
+    if (!range || from <= 0) return
+    const el = scrollRef.current
+    if (el) restoreRef.current = el.scrollHeight - el.scrollTop
+    setWin({ ...range, from: range.from - WINDOW_TURNS })
+  }
+  const loadLater = (): void => {
+    if (!range || range.to === null) return
+    const next = range.to + WINDOW_TURNS
+    setWin({ ...range, to: next >= lastTurn ? null : next })
+  }
+  /** 回到最后几轮（下一次渲染落到底）。 */
+  const resetToTail = (): void => {
+    pendingBottomRef.current = true
+    setWin(null)
+  }
   // 右侧轮次索引的数据源：只取用户消息，turn 与上面的 turnOf 同源（每遇 user +1，0 基）。
   // 正文为空（纯附件）时回落到附件名，再空则用占位文案，保证每轮都有可点的锚点。
   const tocItems = useMemo<TocItem[]>(() => {
@@ -3366,8 +3437,8 @@ function Conversation({
   )
 
 
-  // 跳到某一轮的用户消息：复用右键删除已标注的 data-turn 作锚点。
-  const jumpToTurn = useCallback((turn: number): void => {
+  // 滚到某一轮的用户消息（须已渲染）：复用右键删除已标注的 data-turn 作锚点。
+  const scrollToTurn = (turn: number): void => {
     const el = scrollRef.current
     if (!el) return
     const target = el.querySelector<HTMLElement>(`.cf-msg.is-user[data-turn="${turn}"]`)
@@ -3381,13 +3452,45 @@ function Conversation({
     )
     // 贴底态按目标位置同步算，不能等 onScroll 回填：目标与当前位置相同时一次 scroll 都不会触发，
     // 贴底态会卡在错值（§4.8 流式跟随据此决策）。
-    const atBot = el.scrollHeight - top - el.clientHeight <= BOTTOM_THRESHOLD
+    const atBot = isTail && el.scrollHeight - top - el.clientHeight <= BOTTOM_THRESHOLD
     stickRef.current = atBot
     setAtBottom(atBot)
     // 直接落位，不用 behavior:"smooth"：长对话里一路滚过去既慢又晃眼。
     el.scrollTop = top
     setActiveTurn(turn)
-  }, [])
+  }
+  // 跳到某一轮：已渲染就直接滚过去；还没渲染则改为从该轮起渲染一段（不把中间的轮全渲染出来），渲染后再落位，
+  // 它上方的内容随即按滚到顶部补上。
+  const jumpToTurn = (turn: number): void => {
+    const i = turnStart[turn]
+    if (i === undefined) return
+    if (i >= from && i <= to) {
+      scrollToTurn(turn)
+      return
+    }
+    const end = turn + WINDOW_TURNS - 1
+    pendingJumpRef.current = turn
+    setWin({ sid: currentSessionId, from: turn, to: end >= lastTurn ? null : end })
+  }
+  // 换了渲染范围之后、绘制之前落位：补上更早一段时保持距底距离，跳转则滚到目标轮，回到最新则落到底。
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    if (restoreRef.current !== null) {
+      el.scrollTop = el.scrollHeight - restoreRef.current
+      restoreRef.current = null
+    }
+    if (pendingJumpRef.current !== null) {
+      const turn = pendingJumpRef.current
+      pendingJumpRef.current = null
+      scrollToTurn(turn)
+    }
+    if (pendingBottomRef.current) {
+      pendingBottomRef.current = false
+      el.scrollTop = el.scrollHeight
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [win])
 
   const exitSelect = (): void => {
     setSelecting(false)
@@ -3455,33 +3558,68 @@ function Conversation({
     setCtxMenu(null)
     setRewind(null)
     setActiveTurn(-1)
+    restoreRef.current = null
+    pendingJumpRef.current = null
+    pendingBottomRef.current = false
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [currentSessionId])
 
-  // 监听用户滚动：据距底距离更新「是否贴底」。程序化滚到底同样触发，结果仍为贴底、幂等。
+  // 换了渲染范围或消息整份重建后（刚打开 / 刚补过一段 / 刚跳转 / 删轮后）离边缘仍不远（内容填不满一屏等）：
+  // 接着补，直到够滚动或到头。排在上面两个滚到底的副作用之后，量的是落位后的位置。
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    if (from > 0 && el.scrollTop < LOAD_MORE_PX) loadEarlier()
+    else if (!isTail && el.scrollHeight - el.scrollTop - el.clientHeight < LOAD_MORE_PX) loadLater()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [win, messages])
+
+  // 监听用户滚动：据距底距离更新「是否贴底」，离已渲染内容的边缘不远时补一段。程序化滚到底同样触发，结果仍为贴底、幂等。
   const onScroll = (): void => {
     const el = scrollRef.current
     if (!el) return
-    const atBot = el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_THRESHOLD
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+    const atBot = isTail && dist <= BOTTOM_THRESHOLD
     stickRef.current = atBot
     setAtBottom((prev) => (prev === atBot ? prev : atBot))
     scheduleActive()
+    if (from > 0 && el.scrollTop < LOAD_MORE_PX) loadEarlier()
+    else if (!isTail && dist < LOAD_MORE_PX) loadLater()
   }
 
-  // 回到最新：平滑滚到底并恢复自动跟随。
+  // 内容变矮或可视区变高后已到底（如上滚后收起展开的工作过程 / 思考，页面缩短、下方再无内容）：滚动位置常常
+  // 没变，不触发 onScroll，贴底态停在「未贴底」，「回到最新」一直挂着。故在尺寸变化时补判一次。只补回到底部
+  // 这一向：内容变高时不动贴底态，否则流式新内容撑高的那一刻（滚到底的副作用还没跑）会被误判为离底、断掉跟随。
+  useEffect(() => {
+    const el = scrollRef.current
+    const inner = el?.firstElementChild
+    if (!el || !inner || !isTail) return
+    const ro = new ResizeObserver(() => {
+      if (stickRef.current || el.scrollHeight - el.scrollTop - el.clientHeight > BOTTOM_THRESHOLD) return
+      stickRef.current = true
+      setAtBottom(true)
+    })
+    ro.observe(el)
+    ro.observe(inner)
+    return () => ro.disconnect()
+  }, [isTail])
+
+  // 回到最新：平滑滚到底并恢复自动跟随。正看着跳转过去的一段时，换回最后几轮直接落到底，不滚过中间。
   const jumpToLatest = (): void => {
     const el = scrollRef.current
     if (!el) return
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
     stickRef.current = true
     setAtBottom(true)
+    if (isTail) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    else resetToTail()
   }
 
   // 发送后必看到自己的消息与回复：无论此刻是否上滚，都恢复贴底跟随。
   const handleSend = (text: string, attachments?: SendAttachment[]): Promise<boolean> => {
     stickRef.current = true
     setAtBottom(true)
+    if (!isTail) resetToTail()
     return onSend(text, attachments)
   }
 
@@ -3559,39 +3697,42 @@ function Conversation({
                 {needModelSetup && <ModelSetupCard />}
               </>
             ) : selecting ? (
-              // 选择态：按「轮」分组，每轮一张可勾选卡片；前言（turn<0）原样呈现、不可选。
-              groupTurns(messages).map((g) => {
-                const items = messages.slice(g.from, g.to)
-                if (g.turn < 0)
+              // 选择态：按「轮」分组，每轮一张可勾选卡片；前言（turn<0）原样呈现、不可选。只画已渲染范围内的轮
+              // （范围按整轮取，各轮要么整轮在内、要么整轮在外）。
+              groupTurns(messages)
+                .filter((g) => g.from >= from && g.to - 1 <= to)
+                .map((g) => {
+                  const items = messages.slice(g.from, g.to)
+                  if (g.turn < 0)
+                    return (
+                      <Fragment key={`pre-${g.from}`}>
+                        {items.map((m, k) => renderMsg(m, g.from + k))}
+                      </Fragment>
+                    )
+                  const isSel = selected.has(g.turn)
                   return (
-                    <Fragment key={`pre-${g.from}`}>
-                      {items.map((m, k) => renderMsg(m, g.from + k))}
-                    </Fragment>
-                  )
-                const isSel = selected.has(g.turn)
-                return (
-                  <div
-                    key={`turn-${g.turn}`}
-                    className={`cf-turn is-selectable${isSel ? ' is-selected' : ''}`}
-                    role="button"
-                    aria-pressed={isSel}
-                    onClick={() => toggleTurn(g.turn)}
-                  >
-                    <span className="cf-turn__check" aria-hidden>
-                      {isSel && <Check size={13} />}
-                    </span>
-                    <div className="cf-turn__body">
-                      {items.map((m, k) => renderMsg(m, g.from + k))}
+                    <div
+                      key={`turn-${g.turn}`}
+                      className={`cf-turn is-selectable${isSel ? ' is-selected' : ''}`}
+                      role="button"
+                      aria-pressed={isSel}
+                      onClick={() => toggleTurn(g.turn)}
+                    >
+                      <span className="cf-turn__check" aria-hidden>
+                        {isSel && <Check size={13} />}
+                      </span>
+                      <div className="cf-turn__body">
+                        {items.map((m, k) => renderMsg(m, g.from + k))}
+                      </div>
                     </div>
-                  </div>
-                )
-              })
+                  )
+                })
             ) : (
               <>
-                {messages.map((m, i) => renderMsg(m, i, turnOf[i]))}
-                {!statusInMsg && statusLine}
+                {messages.slice(from, to + 1).map((m, k) => renderMsg(m, from + k, turnOf[from + k]))}
+                {isTail && !statusInMsg && statusLine}
                 {/* 已有对话但模型被删光：引导卡接在末尾（不进对话记录）。 */}
-                {needModelSetup && !streaming && <ModelSetupCard />}
+                {isTail && needModelSetup && !streaming && <ModelSetupCard />}
               </>
             )}
           </div>
@@ -4148,7 +4289,13 @@ function Composer({
   onPrefillConsumed: () => void
 }): React.JSX.Element {
   const { t, locale } = useI18n()
-  const { skills } = useExtensions()
+  const { skills: allSkills } = useExtensions()
+  // 本对话角色能用的技能（已启用、且可用角色含该角色；内置恒可用）——同主进程的过滤，/ 联想与上色只认它们。
+  const ownerId = owner?.id ?? DEFAULT_PERSONA_ID
+  const skills = useMemo(
+    () => allSkills.filter((s) => s.enabled && (s.source === 'builtin' || rolesAllow(s.roles, ownerId))),
+    [allSkills, ownerId]
+  )
   const toast = useToast()
   const [input, setInput] = useState('')
   const [pending, setPending] = useState<Picked[]>([])
@@ -4182,7 +4329,7 @@ function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefill?.nonce])
 
-  // 指令表：渲染层自有的 /compact、/rewind 置顶，其后是已启用技能（停用技能主进程也不认，故一并滤掉）。
+  // 指令表：渲染层自有的 /compact、/rewind 置顶，其后是本角色可用的技能（停用或不对本角色开放的主进程也不认）。
   // 同名技能会被自有指令遮蔽（渲染层先拦截），按小写名去重、保留先者，不给出点了没反应的候选。
   const slashCommands = useMemo<SlashCommand[]>(() => {
     const out: SlashCommand[] = [
@@ -4488,7 +4635,7 @@ function Composer({
   }
 
   // 开头 `/name` 会不会生效（决定是否上色）：/compact、/rewind 须整条只有它且无附件（同 submit 与 store 的拦截）；
-  // 其余按已启用技能的显示名或文件夹名、不分大小写匹配（同主进程 loadSkillInstructionsByName）。
+  // 其余按本角色可用技能的显示名或文件夹名、不分大小写匹配（同主进程 loadSkillInstructionsByName）。
   const noAtts = supported.length === 0
   const isToken = (name: string, whole: string): boolean => {
     const n = name.toLowerCase()
@@ -4869,22 +5016,35 @@ function EffortPicker(): React.JSX.Element | null {
 }
 
 /* ============================ 中列：角色资料卡 ============================ */
+/** 资料卡下方的两个标签：与该角色的对话 / 它的专属能力。 */
+type ProfileTab = 'chats' | 'caps'
+
+/**
+ * 角色资料卡：头像与名字并排、开场白引言、操作按钮，下面用「对话 / 能力」两个标签切换，一次只看一块。
+ * 能力 = 在扩展页指定给这个角色的技能与 MCP（对所有角色开放的不在这里重复），点某项进入设置 › 扩展的详情；
+ * 没有专属能力的角色不显示「能力」标签。标签选择跨角色保留，便于逐个查看各角色的能力。
+ * 名片（头像到标签）固定不动，只有下方列表滚动。
+ */
 function ProfileView({
   persona,
   sessions,
   onOpenThread,
   onStart,
-  onEdit
+  onEdit,
+  onManageCaps
 }: {
   persona: Persona
   sessions: SessionMeta[]
   onOpenThread: (id: string) => void
   onStart: () => void
   onEdit: () => void
+  /** 打开设置 › 扩展里这一项的详情。 */
+  onManageCaps: (target: { kind: 'skill' | 'mcp'; id: string }) => void
 }): React.JSX.Element {
   const { t, locale } = useI18n()
-  const { providers } = useModels()
+  const { skills, mcp } = useExtensions()
   const rel = useRelativeTime()
+  const [tab, setTab] = useState<ProfileTab>('chats')
   const convs = useMemo(
     () =>
       sessions
@@ -4892,48 +5052,57 @@ function ProfileView({
         .sort((a, b) => b.updatedAt - a.updatedAt),
     [sessions, persona.id]
   )
-  // 偏好模型显示完整名称（服务商 · 模型），而非存储的 "pid:mid" 引用；空=跟随默认，
-  // 引用已删除时兜底显示原始串（与编辑器下拉的标签格式保持一致）。
-  const prefModelLabel = useMemo(() => {
-    const ref = persona.model
-    if (!ref) return t('cf.defaultModel')
-    const idx = ref.indexOf(':')
-    if (idx > 0) {
-      const p = providers.find((x) => x.id === ref.slice(0, idx))
-      const m = p?.models.find((x) => x.id === ref.slice(idx + 1))
-      if (p && m) return `${p.name} · ${m.name}`
-    }
-    return ref
-  }, [persona.model, providers, t])
-  const convsLabel =
-    locale === 'en' ? `Conversations with ${persona.name}` : `与 ${persona.name} 的对话`
+  // 专属能力：可用角色里点名了这个角色的技能与 MCP（停用的也列出、置灰，免得以为没配上）。
+  const caps = useMemo(
+    () => [
+      ...skills
+        .filter((s) => s.roles?.includes(persona.id))
+        .map((s) => ({ kind: 'skill' as const, id: s.id, name: s.name, desc: s.desc, enabled: s.enabled })),
+      ...mcp
+        .filter((m) => m.roles?.includes(persona.id))
+        .map((m) => ({
+          kind: 'mcp' as const,
+          id: m.id,
+          name: m.name,
+          desc: m.desc || (m.enabled ? t(`extensions.status.${m.status}`) : ''),
+          enabled: m.enabled
+        }))
+    ],
+    [skills, mcp, persona.id, t]
+  )
+  // 没有专属能力就只有「对话」一个标签；之前停在「能力」的也回到对话。
+  const current: ProfileTab = caps.length ? tab : 'chats'
+  const tabs: [ProfileTab, string, number][] = [['chats', t('cf.profileTabChats'), convs.length]]
+  if (caps.length) tabs.push(['caps', t('cf.profileTabCaps'), caps.length])
   const noConvs =
     locale === 'en' ? `No conversations with ${persona.name} yet` : `还没有和 ${persona.name} 的对话`
 
   return (
     <main className="cf-conv">
       <DragBar />
-      <div className="cf-profile">
-        <div className="cf-profile__inner">
-          <div className="cf-profile__ava">
-            <PersonaFace
-              seed={persona.id}
-              spec={parseAvatarSpec(persona.avatar)}
-              image={persona.avatarImage}
-              title={persona.name}
-            />
-          </div>
-          <div className="cf-profile__name cf-profile__clip" title={persona.name}>
-            {persona.name}
-          </div>
-          <div className="cf-profile__spec">{persona.desc}</div>
-
-          <div className="cf-profile__meta">
-            <div className="cf-profile__row">
-              <span className="cf-profile__k">{t('cf.prefModel')}</span>
-              <span className="cf-profile__v">{prefModelLabel}</span>
+      <div className="cf-profile cf-profile--persona">
+        <div className="cf-profile__inner cf-profile__inner--persona">
+          <div className="cf-phead">
+            <div className="cf-profile__ava">
+              <PersonaFace
+                seed={persona.id}
+                spec={parseAvatarSpec(persona.avatar)}
+                image={persona.avatarImage}
+                title={persona.name}
+              />
+            </div>
+            <div className="cf-phead__id">
+              <div className="cf-phead__name cf-profile__clip" title={persona.name}>
+                {persona.name}
+              </div>
+              {persona.desc && (
+                <div className="cf-phead__spec" title={persona.desc}>
+                  {persona.desc}
+                </div>
+              )}
             </div>
           </div>
+          {persona.tagline && <div className="cf-phead__quote">{persona.tagline}</div>}
 
           <div className="cf-profile__actions">
             <button className="cf-profile__new" onClick={onStart}>
@@ -4944,25 +5113,57 @@ function ProfileView({
             </button>
           </div>
 
-          <div className="cf-profile__convs">
-            <div className="cf-profile__convs-label cf-profile__clip" title={convsLabel}>
-              {convsLabel}
-            </div>
-            {convs.length === 0 ? (
-              <div className="cf-empty cf-profile__clip" title={noConvs}>
-                {noConvs}
-              </div>
+          <div className="cf-ptabs" role="tablist">
+            {tabs.map(([key, label, n]) => (
+              <button
+                key={key}
+                role="tab"
+                aria-selected={current === key}
+                className={`cf-ptab${current === key ? ' is-on' : ''}`}
+                onClick={() => setTab(key)}
+              >
+                {label}
+                <span className="cf-ptab__n">{n}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* 按角色 + 标签换 key：切标签或换角色时列表回到顶部，不沿用上一个列表的滚动位置。 */}
+          <div key={`${persona.id}:${current}`} className="cf-ptabs__body" role="tabpanel">
+            {current === 'chats' ? (
+              convs.length === 0 ? (
+                <div className="cf-ptabs__note cf-profile__clip" title={noConvs}>
+                  {noConvs}
+                </div>
+              ) : (
+                convs.map((s) => (
+                  <button key={s.id} className="cf-convrow" onClick={() => onOpenThread(s.id)}>
+                    <span className="cf-convrow__title">{s.title || t('chat.untitled')}</span>
+                    {s.focusRoot && (
+                      <span className="cf-convrow__proj" title={s.focusRoot}>
+                        <Folder size={11} />
+                        <span className="cf-convrow__projname">{basename(s.focusRoot)}</span>
+                      </span>
+                    )}
+                    <span className="cf-convrow__time">{rel(s.updatedAt)}</span>
+                  </button>
+                ))
+              )
             ) : (
-              convs.map((s) => (
-                <button key={s.id} className="cf-convrow" onClick={() => onOpenThread(s.id)}>
-                  <span className="cf-convrow__title">{s.title || t('chat.untitled')}</span>
-                  {s.focusRoot && (
-                    <span className="cf-convrow__proj" title={s.focusRoot}>
-                      <Folder size={11} />
-                      <span className="cf-convrow__projname">{basename(s.focusRoot)}</span>
-                    </span>
-                  )}
-                  <span className="cf-convrow__time">{rel(s.updatedAt)}</span>
+              caps.map((c) => (
+                <button
+                  key={`${c.kind}:${c.id}`}
+                  className={`cf-cap${c.enabled ? '' : ' is-off'}`}
+                  onClick={() => onManageCaps({ kind: c.kind, id: c.id })}
+                >
+                  <span className="cf-cap__ico">{c.kind === 'skill' ? <Puzzle size={15} /> : <Plug size={15} />}</span>
+                  <span className="cf-cap__main">
+                    <span className="cf-cap__name">{c.name}</span>
+                    {c.desc && <span className="cf-cap__desc">{c.desc}</span>}
+                  </span>
+                  <span className="cf-cap__kind">
+                    {c.enabled ? t(c.kind === 'skill' ? 'cf.kindSkill' : 'cf.kindMcp') : t('cf.capDisabled')}
+                  </span>
                 </button>
               ))
             )}
@@ -5019,17 +5220,48 @@ function PersonaEditor({
     else onClose()
   }
 
-  // 模型下拉：所有**对话**服务商 × 其模型 → "providerId:modelId"；空 = 跟随默认。
+  // 模型下拉：「跟随默认」+ 按服务商分组的模型（同输入框的模型选择）→ "providerId:modelId"；空 = 跟随默认。
   // 决策模型（purpose==='decision'）不参与对话生成，排除在角色偏好模型之外。
-  const modelOptions = useMemo(
-    () =>
-      providers
-        .filter((p) => (p.purpose ?? 'llm') === 'llm')
-        .flatMap((p) =>
-          p.models.map((m) => ({ value: `${p.id}:${m.id}`, label: `${p.name} · ${m.name}` }))
-        ),
+  const llmProviders = useMemo(
+    () => providers.filter((p) => (p.purpose ?? 'llm') === 'llm' && p.models.length > 0),
     [providers]
   )
+  const modelItems = useMemo<SelectEntry<string>[]>(
+    () => [
+      {
+        value: '',
+        label: t('cf.defaultModel'),
+        sub: t('cf.defaultModelHint'),
+        lead: (
+          <span className="select-icon">
+            <Sparkles size={14} />
+          </span>
+        )
+      },
+      ...llmProviders.flatMap((p): SelectEntry<string>[] => [
+        { separator: true },
+        { group: p.name, lead: <span className="select-dot" style={{ background: p.accent }} /> },
+        ...p.models.map((m) => ({ value: `${p.id}:${m.id}`, label: m.name }))
+      ])
+    ],
+    [llmProviders, t]
+  )
+  // 收起态：选中模型带服务商色点；引用的模型已删除时如实显示原引用（与资料卡原先的兜底一致）。
+  const modelDisplay = useMemo(() => {
+    if (!model) return undefined
+    const idx = model.indexOf(':')
+    const p = idx > 0 ? llmProviders.find((x) => x.id === model.slice(0, idx)) : undefined
+    const m = p?.models.find((x) => x.id === model.slice(idx + 1))
+    if (!p || !m) return <span className="select__label select__placeholder">{model}</span>
+    return (
+      <>
+        <span className="select__lead">
+          <span className="select-dot" style={{ background: p.accent }} />
+        </span>
+        <span className="select__label">{m.name}</span>
+      </>
+    )
+  }, [model, llmProviders])
 
   // 保存（create/edit）/ 接受（propose）：同一条渲染层 upsertPersona（用户点击即授权，零提权）。
   // propose 态额外落定名片终态为 accepted（重开不退回 pending、不重复建角色）。
@@ -5152,18 +5384,13 @@ function PersonaEditor({
 
               <div className="cf-field">
                 <label className="cf-field__label">{t('cf.fModel')}</label>
-                <select
-                  className="cf-select"
+                <Select
+                  aria-label={t('cf.fModel')}
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                >
-                  <option value="">{t('cf.defaultModel')}</option>
-                  {modelOptions.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setModel}
+                  items={modelItems}
+                  display={modelDisplay}
+                />
               </div>
 
               <div className="cf-field">
@@ -5199,10 +5426,14 @@ function PersonaEditor({
 
 /* ============================ 系统设置（Part H） ============================ */
 type SettingsSection = 'general' | 'models' | 'extensions' | 'about'
+/** 打开设置时的落点：哪一页，以及（扩展页）直接打开哪一项的详情。 */
+type SettingsInit = { section?: SettingsSection; ext?: { kind: 'skill' | 'mcp'; id: string } }
 
-function Settings({ onClose }: { onClose: () => void }): React.JSX.Element {
+function Settings({ initial, onClose }: { initial?: SettingsInit; onClose: () => void }): React.JSX.Element {
   const { t } = useI18n()
-  const [section, setSection] = useState<SettingsSection>('general')
+  const [section, setSection] = useState<SettingsSection>(initial?.section ?? 'general')
+  // 直达的扩展详情只在首次进入扩展页时生效；切到别的页再回来是普通的扩展列表。
+  const [extTarget, setExtTarget] = useState(initial?.ext ?? null)
   const navRef = useRef<HTMLElement | null>(null)
   // 手机端导航是横向滚动条：切换分页后把选中项滚进视野（桌面端不滚动，无副作用）
   useEffect(() => {
@@ -5231,7 +5462,10 @@ function Settings({ onClose }: { onClose: () => void }): React.JSX.Element {
               <button
                 key={n.id}
                 className={`cf-nav__item${section === n.id ? ' is-active' : ''}`}
-                onClick={() => setSection(n.id)}
+                onClick={() => {
+                  setSection(n.id)
+                  setExtTarget(null)
+                }}
               >
                 <span className="cf-nav__icon">{n.icon}</span>
                 {n.label}
@@ -5241,7 +5475,7 @@ function Settings({ onClose }: { onClose: () => void }): React.JSX.Element {
           <div className="cf-pane">
             {section === 'general' && <GeneralPane />}
             {section === 'models' && <ModelSettings />}
-            {section === 'extensions' && <ExtensionsPane />}
+            {section === 'extensions' && <ExtensionsPane initialOpen={extTarget} />}
             {section === 'about' && <AboutPane />}
           </div>
         </div>
@@ -5346,7 +5580,11 @@ function GeneralPane(): React.JSX.Element {
   )
 }
 
-function ExtensionsPane(): React.JSX.Element {
+function ExtensionsPane({
+  initialOpen
+}: {
+  initialOpen?: { kind: 'skill' | 'mcp'; id: string } | null
+}): React.JSX.Element {
   const { t } = useI18n()
   // 角色（persona）不在此列出：它有专属的「角色」tab 与资料卡来管理，扩展页只管技能 / MCP。
   // 子智能体亦不在此列：它是内置能力（通用 / Explore / Research / Plan），不可配置，见 main/services/subagents.ts。
@@ -5359,7 +5597,7 @@ function ExtensionsPane(): React.JSX.Element {
 
   // 钻取导航：点开某行 → 进入详情（对齐模型设置页的主从抽屉）。MCP 详情可编辑；技能详情只读，
   // 只提供删除与启停；内置技能不展示详情。新增经对话工具 / 上传 / 直接改盘，扩展页不放新增入口。
-  const [open, setOpen] = useState<{ kind: 'skill' | 'mcp'; id: string } | null>(null)
+  const [open, setOpen] = useState<{ kind: 'skill' | 'mcp'; id: string } | null>(initialOpen ?? null)
   const openMcp = open?.kind === 'mcp' ? mcp.find((m) => m.id === open.id) : undefined
   const openSkill = open?.kind === 'skill' ? skills.find((s) => s.id === open.id) : undefined
 
@@ -5379,6 +5617,8 @@ function ExtensionsPane(): React.JSX.Element {
     note?: string
     /** 注记以警示色显示（MCP 已启用却没连上：失败 / 待填密钥 / 待完善配置）。 */
     noteWarn?: boolean
+    /** 可用角色（null = 所有角色，行尾不显示；内置技能不设）。 */
+    roles?: string[] | null
     locked?: boolean
   }
   const items: Item[] = [
@@ -5390,6 +5630,7 @@ function ExtensionsPane(): React.JSX.Element {
         enabled: s.enabled,
         badge: t('cf.kindSkill'),
         note: s.source === 'builtin' ? t('cf.builtin') : undefined,
+        roles: s.source === 'builtin' ? undefined : s.roles,
         locked: s.source === 'builtin'
       })
     ),
@@ -5402,7 +5643,8 @@ function ExtensionsPane(): React.JSX.Element {
         badge: t('cf.kindMcp'),
         // 未启用不加注记（开关本身已表达）；已启用则如实给出连接状态，没连上的原因用警示色。
         note: m.enabled ? t(`extensions.status.${m.status}`) : undefined,
-        noteWarn: m.enabled && MCP_STATUS_WARN.has(m.status)
+        noteWarn: m.enabled && MCP_STATUS_WARN.has(m.status),
+        roles: m.roles
       })
     )
   ]
@@ -5416,7 +5658,9 @@ function ExtensionsPane(): React.JSX.Element {
           {items.map((x) => {
             const name = (
               <span className="cf-setrow__name">
-                {x.name}
+                <span className="cf-setrow__label" title={x.name}>
+                  {x.name}
+                </span>
                 <span className="cf-badge">{x.badge}</span>
                 {x.note && (
                   <span className={`cf-setrow__note${x.noteWarn ? ' cf-setrow__note--warn' : ''}`}>
@@ -5434,6 +5678,7 @@ function ExtensionsPane(): React.JSX.Element {
                   // 主区做按钮（点开详情），开关作兄弟节点独立触发（互不干扰）。
                   <button className="cf-setrow__open" onClick={() => setOpen({ kind: x.kind, id: x.id })}>
                     {name}
+                    {x.roles !== undefined && <RolesBadge roles={x.roles} />}
                     <ChevronRight className="cf-setrow__chevron" size={15} />
                   </button>
                 )}
@@ -5444,6 +5689,154 @@ function ExtensionsPane(): React.JSX.Element {
         </div>
       )}
     </>
+  )
+}
+
+/** 头像堆叠：最多 max 个，超出时末位换成 +N；悬停显示全部角色名。 */
+function AvatarStack({
+  personas,
+  size = 20,
+  max = 3
+}: {
+  personas: Persona[]
+  size?: number
+  max?: number
+}): React.JSX.Element {
+  const { locale } = useI18n()
+  const shown = personas.length > max ? personas.slice(0, max - 1) : personas
+  const more = personas.length - shown.length
+  return (
+    <span
+      className="cf-avstack"
+      style={{ '--sz': `${size}px` } as React.CSSProperties}
+      title={personas.map((p) => p.name).join(locale === 'en' ? ', ' : '、')}
+    >
+      {shown.map((p) => (
+        <span key={p.id} className="cf-avstack__ava">
+          <PersonaFace seed={p.id} spec={parseAvatarSpec(p.avatar)} image={p.avatarImage} />
+        </span>
+      ))}
+      {more > 0 && <span className="cf-avstack__more">+{more}</span>}
+    </span>
+  )
+}
+
+/** 可用角色里还存在的角色（按花名册顺序）；null = 所有角色。 */
+function usePickedPersonas(roles: string[] | null): Persona[] {
+  const { personas } = useExtensions()
+  return useMemo(() => (roles === null ? [] : personas.filter((p) => roles.includes(p.id))), [personas, roles])
+}
+
+/**
+ * 扩展列表行尾的可用角色：指定了角色显示头像堆叠，所有角色不显示。指定的角色都删了时主进程会把该项
+ * 改回所有角色并停用（personas.ts pruneExtRoles），渲染层不再有「无可用角色」这一态。
+ */
+function RolesBadge({ roles }: { roles: string[] | null }): React.JSX.Element | null {
+  const picked = usePickedPersonas(roles)
+  return picked.length ? <AvatarStack personas={picked} /> : null
+}
+
+/**
+ * 技能 / MCP 详情的「可用角色」：统一下拉框的多选模式。收起时显示「所有角色」或所选角色的头像堆叠与名字；
+ * 浮层第一项「所有角色」（点了即收起），其下「只给这些角色」逐个勾选，即时生效。从所有角色点某个角色即只给它，
+ * 取消到一个不剩即回到所有角色。
+ */
+/** 「所有角色」选项的值：角色 id 只含字母数字与 _.-，不会与之相撞。 */
+const ROLES_GENERAL = '*'
+
+function RolesPicker({
+  kind,
+  id,
+  roles
+}: {
+  kind: 'skill' | 'mcp'
+  id: string
+  roles: string[] | null
+}): React.JSX.Element {
+  const { t, locale } = useI18n()
+  const { personas, setRoles } = useExtensions()
+  const picked = usePickedPersonas(roles)
+  // 没有指定（或指定的角色刚被删、主进程正改回所有角色）都按所有角色显示。
+  const all = picked.length === 0
+  const sep = locale === 'en' ? ', ' : '、'
+
+  const toggle = (pid: string): void => {
+    if (pid === ROLES_GENERAL) {
+      if (roles !== null) setRoles(kind, id, null)
+      return
+    }
+    if (all) return setRoles(kind, id, [pid])
+    const live = picked.map((p) => p.id)
+    const next = live.includes(pid) ? live.filter((x) => x !== pid) : [...live, pid]
+    setRoles(kind, id, next.length ? next : null)
+  }
+
+  const summary =
+    picked.length <= 2
+      ? picked.map((p) => p.name).join(sep)
+      : t('extensions.rolesSummary')
+          .replace('{names}', picked
+            .slice(0, 2)
+            .map((p) => p.name)
+            .join(sep))
+          .replace('{n}', String(picked.length))
+          .replace('{rest}', String(picked.length - 2))
+
+  const display = all ? (
+    <>
+      <span className="select__lead">
+        <span className="select-icon">
+          <Users size={12} />
+        </span>
+      </span>
+      <span className="select__label">{t('extensions.rolesGeneral')}</span>
+    </>
+  ) : (
+    <>
+      <span className="select__lead">
+        <AvatarStack personas={picked} size={20} max={4} />
+      </span>
+      <span className="select__label">{summary}</span>
+    </>
+  )
+
+  return (
+    <div className="ext-field">
+      <label className="ext-field__label">{t('extensions.roles')}</label>
+      <Select
+        multiple
+        aria-label={t('extensions.roles')}
+        display={display}
+        isSelected={(v) => (v === ROLES_GENERAL ? all : picked.some((p) => p.id === v))}
+        onToggle={toggle}
+        items={[
+          {
+            value: ROLES_GENERAL,
+            label: t('extensions.rolesGeneral'),
+            sub: t('extensions.rolesGeneralHint'),
+            // 「所有角色」是一个整体，点了同单选一样收起；只有具体角色才多选。
+            closeOnPick: true,
+            lead: (
+              <span className="select-icon">
+                <Users size={14} />
+              </span>
+            )
+          },
+          { separator: true },
+          { group: t('extensions.rolesOnly') },
+          ...personas.map((p) => ({
+            value: p.id,
+            label: p.name,
+            sub: p.desc || undefined,
+            lead: (
+              <span className="select-ava">
+                <PersonaFace seed={p.id} spec={parseAvatarSpec(p.avatar)} image={p.avatarImage} />
+              </span>
+            )
+          }))
+        ]}
+      />
+    </div>
   )
 }
 
@@ -5499,7 +5892,6 @@ function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): Rea
           <Puzzle size={18} />
         </span>
         <h2 className="ext-detail__name ext-detail__name--mono">{item.name}</h2>
-        <span className="ext-detail__scope">{t('common.global')}</span>
       </header>
 
       {item.desc && (
@@ -5509,6 +5901,8 @@ function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): Rea
           </p>
         </div>
       )}
+
+      <RolesPicker kind="skill" id={item.id} roles={item.roles} />
 
       {props.length > 0 && (
         <div className="ext-field">
@@ -5605,12 +5999,10 @@ function McpEditor({ item, onBack }: { item: McpServer; onBack: () => void }): R
         <span className="ext-detail__icon">
           <Plug size={18} />
         </span>
-        <h2 className="ext-detail__name ext-detail__name--mono">{item.name}</h2>
-        <span className="ext-detail__scope">{t('common.global')}</span>
-      </header>
-
-      {/* 启用即连接：状态只读展示，唯一的动作是失败后「重试」。未启用一律显示「未启用」。 */}
-      <div className="ext-status">
+        <h2 className="ext-detail__name ext-detail__name--mono ext-detail__name--clip" title={item.name}>
+          {item.name}
+        </h2>
+        {/* 启用即连接：状态只读展示在标题行最右侧，唯一的动作是失败后「重试」。未启用一律显示「未启用」。 */}
         <span className={`ext-status__live ext-status__live--${item.enabled ? item.status : 'disconnected'}`}>
           {item.enabled
             ? `${MCP_STATUS_GLYPH[item.status]} ${t(`extensions.status.${item.status}`)}`
@@ -5619,13 +6011,12 @@ function McpEditor({ item, onBack }: { item: McpServer; onBack: () => void }): R
             ? ` · ${item.toolCount} ${t('extensions.tools')}`
             : ''}
         </span>
-        <span className="ext-detail__spacer" />
         {item.enabled && item.status === 'error' && (
           <button className="ext-linkbtn" onClick={() => mcpRetry(item.id)}>
             {t('extensions.retry')}
           </button>
         )}
-      </div>
+      </header>
       {item.enabled && item.status === 'error' && item.lastError && (
         <div className="mcp-error">{item.lastError}</div>
       )}
@@ -5647,19 +6038,21 @@ function McpEditor({ item, onBack }: { item: McpServer; onBack: () => void }): R
         />
       </div>
 
+      <RolesPicker kind="mcp" id={item.id} roles={item.roles} />
+
       <div className="ext-field">
         <label className="ext-field__label">{t('extensions.transport')}</label>
-        <select
-          className="ext-select ext-select--mono"
+        <Select<McpServer['transport']>
+          mono
+          aria-label={t('extensions.transport')}
           value={item.transport}
-          onChange={(e) =>
-            update('mcp', item.id, { transport: e.target.value as McpServer['transport'] })
-          }
-        >
-          <option value="stdio">stdio</option>
-          <option value="sse">sse</option>
-          <option value="http">http (streamable)</option>
-        </select>
+          onChange={(transport) => update('mcp', item.id, { transport })}
+          items={[
+            { value: 'stdio', label: 'stdio', sub: t('extensions.transportSub.stdio') },
+            { value: 'sse', label: 'sse', sub: t('extensions.transportSub.sse') },
+            { value: 'http', label: 'http (streamable)', sub: t('extensions.transportSub.http') }
+          ]}
+        />
       </div>
 
       {isStdio ? (

@@ -66,7 +66,7 @@ import { sweepCheckpoints } from '../main/services/checkpoints'
 import { sweepSubagents } from '../main/services/subagent-store'
 import { sweepMedia } from '../main/services/media-store'
 import { registerSkillsIpc, startSkillsWatcher } from '../main/services/skills'
-import { ensureSeededPersonas, registerPersonasIpc } from '../main/services/personas'
+import { ensureSeededPersonas, pruneOrphanExtRoles, registerPersonasIpc } from '../main/services/personas'
 import { registerProfileIpc } from '../main/services/profile'
 import { registerMemoryIpc } from '../main/services/memory'
 import {
@@ -205,6 +205,9 @@ function bootServices(): void {
   // 技能目录监听：变化后向所有客户端推 skills:changed（输入框 / 联想与扩展页随之刷新）
   startSkillsWatcher(webWindowRef)
   ensureSeededPersonas()
+  // 上游 v0.1.11：技能/MCP 的「可用角色」指向的角色被删后，该项改回全部角色并停用。
+  // 桌面端在 main/index.ts 里调用，Web 版不跑那个入口，必须在这里补一次。
+  pruneOrphanExtRoles()
   registerPersonasIpc()
   registerProfileIpc()
   registerMemoryIpc()
