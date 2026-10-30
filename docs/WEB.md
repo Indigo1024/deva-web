@@ -14,7 +14,7 @@
 本文档只讲**本改版自己的东西**：Web 层怎么搭的、怎么部署、怎么跟随上游更新。
 上游 Deva 本身有哪些功能，属于上游的成果，请查阅[上游项目](https://github.com/sqfcyily/deva)。
 
-当前跟随的上游版本：**v0.1.10**。
+当前跟随的上游版本：**v0.1.12**。
 
 ---
 
@@ -318,15 +318,68 @@ function hideSplash() { if (splashGone) return; splashGone = true; ... }
 
 点「立即安装并重启」之后，服务器会：
 
-1. `git archive` 把目标 commit 导出到 `.deva-update-build/`（不动工作区，本地改动不受影响）
+1. 把目标 commit 的源码导出到 `.deva-update-build/`（`git archive`；非 git 部署走 GitHub tarball）
 2. 复用现有 `node_modules`；`package.json` 里的依赖变了才重新装
 3. 跑 `gen-web-api.mjs` + `build-web.mjs`
 4. 校验产物完整，然后把旧的 `out/web` 改名成 `web.bak.<时间戳>`，新产物就位
-5. `systemctl restart deva-web`
+5. 把工作区 HEAD 对齐到目标 commit
+6. 重启服务
 
 构建失败不会动线上产物，旧版继续跑。切换过程中失败会自动回滚。产物备份保留最近 2 份。
 
-因为重启会断开当前连接，前端点完安装后进入等待态，轮询 `/api/health`，服务回来之后自动刷新页面。安装日志写在 `$DEVA_HOME/web-update.log`，也可以在浏览器里打开 `/api/update-log` 看。
+### 重启是怎么做的
+
+这里踩过坑，写清楚免得再犯：**早期版本写死 `systemctl restart deva-web`**。在非 systemd 部署（直接 `node out/web/index.cjs`、docker、或者服务名不叫 `deva-web`）上这条命令必然失败，而失败又被 `.catch()` 吞掉只写日志——界面显示更新成功，进程根本没重启，用户看到的还是旧版本。
+
+现在按顺序尝试三种方式，前一个不成就走下一个：
+
+| 顺序 | 方式 | 适用 |
+| --- | --- | --- |
+| 1 | `DEVA_WEB_RESTART_CMD` 环境变量 | 部署方自己指定（docker restart、supervisorctl 等） |
+| 2 | `systemctl restart <unit>` | systemd 部署。单元名从 cgroup 探测，**且要求该单元的 MainPID 就是本进程**，避免误重启父进程所在的单元 |
+| 3 | 进程自我替换 | 任何方式都能用。spawn 新进程 → 本进程退出释放端口 → 新进程重试 bind |
+
+另外，`systemctl restart` 会先杀掉本进程，所以这条命令几乎必然以非零退出——不能据此判定失败，否则会再触发一次自我替换，凭空多起一个进程抢端口。代码里发完请求等 3 秒，自己还活着才判定「该单元没接管」。
+
+`/api/health` 返回的 `up` 是进程已运行秒数。前端靠它判断服务是否真的重启过（`up` 变小 = 新进程），**不能只看 HTTP 200**——构建期间旧进程还活着，一直是 200，那样会在构建没完成时就刷新页面，用户看到的还是旧版。
+
+### 更新检查比对三个维度
+
+| 维度 | 覆盖场景 |
+| --- | --- |
+| 上游版本（`package.json`） | 合并了新上游 |
+| Web 改版版本（`web-version.json`） | 纯 Web 层更新（最常见） |
+| commit | 远端推了新提交但**没升版本号** |
+
+只比版本号的话，第三种情况的更新永远收不到。
+
+### 排错
+
+更新点了没反应，按这个顺序看：
+
+```bash
+# 1. 安装日志（也在浏览器里打开 /api/update-log）
+tail -50 $DEVA_HOME/web-update.log
+
+# 2. 产物版本 vs 源码版本，看是不是没切过去
+grep '"version"' apps/desktop/out/web/package.json
+grep '"version"' apps/desktop/package.json
+
+# 3. 进程起来没有
+ss -ltnp | grep 8790
+
+# 4. 手动跑一次
+bash scripts/deva-update.sh
+```
+
+常见原因：
+
+| 现象 | 原因 |
+| --- | --- |
+| 日志停在「构建完成，重启服务」 | 重启失败。设 `DEVA_WEB_RESTART_CMD` 或 `DEVA_WEB_SERVICE` 指对 |
+| 提示已是最新但其实有新版 | 远端没升版本号且本地 HEAD 恰好等于远端 commit（罕见）；或 `DEVA_WEB_UPDATE_REPO` 指错仓库 |
+| 报 `git: command not found` | 非 git 部署会走 tarball 路径，不需要 git；若报这个说明 `.git` 存在但 git 不可用 |
+| 构建失败 | 看日志里的 npm/tsc 报错，依赖变了会跑 `pnpm install` |
 
 ### 老版本怎么升上来
 
@@ -348,6 +401,8 @@ bash scripts/deva-update.sh --rollback  # 回滚到上一份产物
 | --- | --- | --- |
 | `DEVA_WEB_UPDATE_REPO` | `https://github.com/Indigo1024/deva-web` | 更新源仓库 |
 | `DEVA_WEB_UPDATE_BRANCH` | `main` | 跟踪的分支 |
+| `DEVA_WEB_SERVICE` | 自动探测 | systemd 单元名。探测不准时手动指定，例如 `deva` |
+| `DEVA_WEB_RESTART_CMD` | 无 | 自定义重启命令，优先于 systemd。例如 `docker restart deva-web` |
 
 ## 附件上传
 
@@ -449,7 +504,7 @@ systemctl restart deva-web
 - **无审计**：谁在什么时候跑了什么命令，没有独立日志
 - **无沙箱**：agent 的终端和文件工具权限等于启动服务的系统用户
 - **PTY 会话随服务重启丢失**：终端里跑到一半的进程会断
-- **自动更新不适用**：升级靠 `git pull` + 重新构建 + 重启
+- **在线更新会重启服务**：正在跑的对话会中断，PTY 会话丢失
 - **通知需要浏览器授权**，且页面关闭后收不到（没有 Service Worker 推送）
 
 ---
