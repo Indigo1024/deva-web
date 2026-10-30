@@ -1802,9 +1802,10 @@ button.tl__line:hover {
     border-color 0.15s ease,
     background 0.15s ease;
 }
+/* 悬停用主题色浅底而非灰底：与提问卡、定时任务卡同一色系。 */
 .agentcard.is-clickable:hover {
   border-color: var(--accent);
-  background: var(--bg-hover);
+  background: var(--accent-tint);
 }
 .agentcard.is-clickable:focus-visible {
   outline: 2px solid var(--accent);
@@ -2086,6 +2087,43 @@ button.tl__line:hover {
 .ask__option-desc {
   font-size: 12px;
   color: var(--fg-muted);
+}
+/* 「自己输入」选中后原地变输入框：编辑时白底 + 主题色边框 + 聚焦光圈（同 .input:focus），离开后同其他选中项。
+   行高取 normal，与未选中时的 button 一致，切换时这一行不跳。 */
+.ask__option--custom {
+  line-height: normal;
+  cursor: text;
+}
+.ask__option--custom:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-elevated));
+}
+.ask__option--custom:focus-within {
+  border-color: var(--accent);
+  background: var(--bg-elevated);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.ask__option--custom .ask__option-mark {
+  cursor: pointer;
+}
+/* 行内文本框：无边框透明，随内容自动增高（长答案换行而非横向滚动）。 */
+.ask__inline {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  field-sizing: content;
+  background: transparent;
+  color: var(--fg);
+  font-weight: 500;
+  line-height: inherit;
+}
+.ask__inline::placeholder {
+  color: var(--fg-subtle);
+  font-weight: 400;
 }
 /* 可跳过题的说明：告知用户可留空。 */
 .ask__optional {
@@ -4485,7 +4523,8 @@ button.projmenu__item:disabled {
   min-width: 0;
   user-select: text;
 }
-/* 撑满父容器高度、自身不溢出（技能详情）：由 .ext-field--grow 吃掉剩余高度并在框内滚动 */
+/* 撑满父容器高度、自身不溢出（技能详情）：由 .ext-field--grow 吃掉剩余高度并在框内滚动。
+   名称分隔线上下间距沿用 .provider-detail__head，与 MCP 详情一致，不另调 */
 .provider-detail--fill {
   height: 100%;
   display: flex;
@@ -4493,16 +4532,6 @@ button.projmenu__item:disabled {
 }
 .provider-detail--fill > .ext-field:last-child {
   margin-bottom: 0;
-}
-/* 技能详情：收窄名称分隔线与描述、描述与下一段之间的间距（默认 20px / 16px），描述小一号字 */
-.provider-detail--fill .provider-detail__head {
-  margin-bottom: var(--space-2);
-}
-.provider-detail--fill .ext-detail__desc {
-  margin-bottom: var(--space-2);
-}
-.provider-detail--fill .ext-detail__desc .ext-detail__text {
-  font-size: 12px;
 }
 /* 详情态顶部工具条：左「返回」，右「删除 + 启用」同一行 */
 .provider-detail__topbar {
@@ -4990,45 +5019,10 @@ button.projmenu__item:disabled {
 }
 
 /* ---------- 技能：只读结构化详情（去表单后） ---------- */
-.ext-detail__text {
-  max-width: 620px;
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--fg);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 .ext-detail__muted {
   color: var(--fg-subtle);
   font-size: 13px;
   font-style: italic;
-}
-/* 单行文本：超出部分省略（技能描述，全文见悬停提示） */
-.ext-detail__text--line {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-/* 技能属性（运行环境要求 / 许可 / metadata）：键值两列，每项单行省略 */
-.ext-meta {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 2px var(--space-4);
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.6;
-}
-.ext-meta dt {
-  color: var(--fg-muted);
-  white-space: nowrap;
-}
-.ext-meta dd {
-  margin: 0;
-  color: var(--fg);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .ext-detail__md {
   max-width: 720px;
@@ -5264,7 +5258,7 @@ button.projmenu__item:disabled {
 /* 技能 SKILL.md 预览（只读 Markdown）：按内容取高、最多缩到容器剩余高度，过长时框内滚动 */
 .ext-field--grow .ext-detail__md {
   flex: 0 1 auto;
-  /* 窗口最小高度（600）且属性项齐全时也不把外层撑出滚动条 */
+  /* 窗口最小高度（600）时也不把外层撑出滚动条 */
   min-height: 64px;
   max-height: none;
 }

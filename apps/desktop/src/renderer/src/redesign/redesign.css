@@ -2702,6 +2702,29 @@ body.cf-resizing-y * {
   background: var(--accent-tint);
   color: var(--accent);
 }
+/*
+ * 「源码已更新但还没构建」提示：用警示色，因为这是一个需要用户处置的状态。
+ * 不自动构建 —— 构建会重启服务，不能在用户不知情时做。
+ */
+.cf-about__stale {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  max-width: 320px;
+  margin-top: var(--space-3);
+  padding: 7px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.cf-about__stale-hint {
+  color: var(--fg-muted);
+  font-size: 11px;
+}
 /* 版本行里的小标签：区分「上游」与「Web 改版」 */
 .cf-about__ver-tag {
   display: inline-block;
@@ -2858,14 +2881,6 @@ body.cf-resizing-y * {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-/* 开场白：左侧竖线引言 */
-.cf-phead__quote {
-  margin-top: 14px;
-  padding-left: 12px;
-  border-left: 2px solid var(--border-strong);
-  font-size: 13px;
-  color: var(--fg-muted);
 }
 .cf-ptabs {
   flex: none;

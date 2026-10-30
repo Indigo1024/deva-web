@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { existsSync, promises as fs } from 'node:fs'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { ipcMain } from 'electron'
-import { assertInside } from './fs-guard'
+import { assertAllInside, assertInside, insideRootFlags } from './fs-guard'
 import { getConfig, getDevaHome } from './config'
 import { detectShells } from './shells'
 import { loadProjectDoc, PROJECT_DOC_NAME, type ProjectDoc } from './project-doc'
@@ -177,11 +177,16 @@ interface RunResult {
  * 底层执行（不做 assertInside）：供 `git --version` 等无仓库根上下文的命令用。
  * 用户可控串一律作独立 argv；env 关掉交互提示与可选锁，锁定英文错误文案便于解析。
  */
-function runGitRaw(cwd: string | undefined, args: string[], timeout = DEFAULT_TIMEOUT): Promise<RunResult> {
+function runGitRaw(
+  cwd: string | undefined,
+  args: string[],
+  timeout = DEFAULT_TIMEOUT,
+  input?: string
+): Promise<RunResult> {
   const git = resolveGitPath()
   if (!git) return Promise.resolve({ code: -1, stdout: '', stderr: 'git-not-found' })
   return new Promise((res) => {
-    execFile(
+    const child = execFile(
       git,
       args,
       {
@@ -199,13 +204,39 @@ function runGitRaw(cwd: string | undefined, args: string[], timeout = DEFAULT_TI
         res({ code, stdout: stdout ?? '', stderr: stderr ?? '' })
       }
     )
+    // 经 stdin 传入数据（如 --pathspec-from-file=-）。git 提前退出时写管道会报 EPIPE，须吞掉，否则主进程崩溃。
+    if (input !== undefined) {
+      child.stdin?.on('error', () => {})
+      child.stdin?.end(input)
+    }
   })
 }
 
 /** 仓库操作执行器：首行 `assertInside(dir)`，随后交给 runGitRaw。 */
-function runGit(dir: string, args: string[], timeout = DEFAULT_TIMEOUT): Promise<RunResult> {
+function runGit(dir: string, args: string[], timeout = DEFAULT_TIMEOUT, input?: string): Promise<RunResult> {
   assertInside(dir)
-  return runGitRaw(dir, args, timeout)
+  return runGitRaw(dir, args, timeout, input)
+}
+
+/** 路径作 argv 时的总长预算（字符）：Windows 整条命令行上限 32767，留足余量。 */
+const ARGV_PATHS_BUDGET = 24_000
+
+/**
+ * 对一批路径执行 git（add / reset / rm --cached / checkout）：总长在预算内照常作 argv（`-- p1 p2…`）；
+ * 超出则经 stdin 传入（`--pathspec-from-file=- --pathspec-file-nul`，需 git ≥ 2.25）——提交框会一次传入
+ * 全部改动文件，几百个绝对路径就会超出 Windows 命令行上限（spawn ENAMETOOLONG）。
+ * 大批量时 git 本身就慢（Windows 上暂存 3 万个文件实测约 20 秒），超时放宽到 REMOTE_TIMEOUT：
+ * 超时被杀可能残留 index.lock，导致后续 git 操作全部失败。
+ */
+function runGitPaths(dir: string, args: string[], paths: string[]): Promise<RunResult> {
+  const len = paths.reduce((n, p) => n + p.length + 3, 0)
+  if (len <= ARGV_PATHS_BUDGET) return runGit(dir, [...args, '--', ...paths])
+  return runGit(
+    dir,
+    [...args, '--pathspec-from-file=-', '--pathspec-file-nul'],
+    REMOTE_TIMEOUT,
+    paths.join('\0')
+  )
 }
 
 // ── 解析 ─────────────────────────────────────────────────────────────────────
@@ -462,16 +493,11 @@ function classifyCommitError(stderr: string): GitFailReason {
   return 'error'
 }
 
-/** 把渲染层传来的路径数组归一为绝对路径并逐个 assertInside（越界即抛）。 */
-function safeAbsPaths(paths: unknown): string[] {
+/** 把渲染层传来的路径数组归一为绝对路径并批量校验（任一越界即抛）。提交时会一次传入全部改动文件。 */
+async function safeAbsPaths(paths: unknown): Promise<string[]> {
   if (!Array.isArray(paths)) return []
-  const out: string[] = []
-  for (const p of paths) {
-    if (typeof p !== 'string' || !p) continue
-    const abs = resolve(p)
-    assertInside(abs)
-    out.push(abs)
-  }
+  const out = paths.filter((p): p is string => typeof p === 'string' && !!p).map((p) => resolve(p))
+  await assertAllInside(out)
   return out
 }
 
@@ -613,15 +639,17 @@ export function registerGitIpc(): void {
     const top = await runGitRaw(dir, ['rev-parse', '--show-toplevel'])
     const root = top.code === 0 && top.stdout.trim() ? resolve(top.stdout.trim()) : resolve(dir)
     const parsed = parsePorcelainV2(st.stdout, root)
-    // 只保留落在受信根内的文件（常见情形 root===项目根，无过滤；子目录场景下过滤根外文件）
-    const inside = (f: GitFileStatus): boolean => {
-      try {
-        assertInside(f.path)
-        return true
-      } catch {
-        return false
-      }
+    // 只保留落在受信根内的文件（常见情形 root===项目根，无过滤；子目录场景下过滤根外文件）。
+    // 须批量判定：未跟踪文件逐个列出（-uall），大仓可达上万条，逐条 assertInside 会把主进程卡住。
+    const keepInside = async (list: GitFileStatus[]): Promise<GitFileStatus[]> => {
+      const ok = await insideRootFlags(list.map((f) => f.path))
+      return list.filter((_, i) => ok[i])
     }
+    const [staged, unstaged, conflicts] = await Promise.all([
+      keepInside(parsed.staged),
+      keepInside(parsed.unstaged),
+      keepInside(parsed.conflicts)
+    ])
     const remotes = await listRemotes(dir)
     const merge = await runGitRaw(dir, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])
     return {
@@ -634,9 +662,9 @@ export function registerGitIpc(): void {
       behind: parsed.behind,
       remotes,
       mergeInProgress: merge.code === 0,
-      staged: parsed.staged.filter(inside),
-      unstaged: parsed.unstaged.filter(inside),
-      conflicts: parsed.conflicts.filter(inside)
+      staged,
+      unstaged,
+      conflicts
     }
   })
 
@@ -665,22 +693,22 @@ export function registerGitIpc(): void {
   // 暂存（改/加/删都由 add 记录）
   ipcMain.handle('git:stage', async (_e, dir: string, paths: string[]) => {
     assertInside(dir)
-    const abs = safeAbsPaths(paths)
+    const abs = await safeAbsPaths(paths)
     if (!abs.length) return { ok: false as const, message: 'no paths' }
-    const res = await runGit(dir, ['add', '--', ...abs])
+    const res = await runGitPaths(dir, ['add'], abs)
     return res.code === 0 ? { ok: true as const } : { ok: false as const, message: res.stderr.trim() }
   })
 
   // 取消暂存：有 HEAD → reset；首提交前无 HEAD → rm --cached
   ipcMain.handle('git:unstage', async (_e, dir: string, paths: string[]) => {
     assertInside(dir)
-    const abs = safeAbsPaths(paths)
+    const abs = await safeAbsPaths(paths)
     if (!abs.length) return { ok: false as const, message: 'no paths' }
     const head = await runGit(dir, ['rev-parse', '--verify', 'HEAD'])
     const res =
       head.code === 0
-        ? await runGit(dir, ['reset', '-q', 'HEAD', '--', ...abs])
-        : await runGit(dir, ['rm', '--cached', '-q', '--', ...abs])
+        ? await runGitPaths(dir, ['reset', '-q', 'HEAD'], abs)
+        : await runGitPaths(dir, ['rm', '--cached', '-q'], abs)
     return res.code === 0 ? { ok: true as const } : { ok: false as const, message: res.stderr.trim() }
   })
 
@@ -689,9 +717,9 @@ export function registerGitIpc(): void {
     'git:discard',
     async (_e, dir: string, trackedPaths: string[], untrackedPaths: string[]) => {
       assertInside(dir)
-      const tracked = safeAbsPaths(trackedPaths)
-      const untracked = safeAbsPaths(untrackedPaths)
-      if (tracked.length) await runGit(dir, ['checkout', 'HEAD', '--', ...tracked])
+      const tracked = await safeAbsPaths(trackedPaths)
+      const untracked = await safeAbsPaths(untrackedPaths)
+      if (tracked.length) await runGitPaths(dir, ['checkout', 'HEAD'], tracked)
       for (const p of untracked) {
         await fs.rm(p, { force: true }).catch(() => {})
       }

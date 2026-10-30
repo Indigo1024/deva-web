@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
 import { existsSync, promises as fs, type Dirent } from 'fs'
 import { homedir } from 'node:os'
-import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'path'
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path'
+import ignore, { type Ignore } from 'ignore'
 import { resolveExecShell } from './exec-policy'
 import { skillsDir, upsertSkill } from './skills'
 import {
@@ -75,7 +76,7 @@ export const toolSpecs: ToolSpec[] = [
   {
     name: 'grep',
     description:
-      '在工作区内按正则搜索文件内容，返回匹配行（格式 路径:行号: 内容）。可选 glob 限定文件范围（如 *.ts）、ignore_case 忽略大小写。默认忽略 node_modules/.git/dist 等目录，跳过二进制与超大文件。用于快速定位代码。',
+      '在工作区内按正则搜索文件内容，返回匹配行（格式 路径:行号: 内容）。可选 glob 限定文件范围（如 *.ts）、ignore_case 忽略大小写。默认忽略 node_modules/.git/dist 等目录及 .gitignore 忽略的文件（path 直接指向被忽略的目录时照常搜索），跳过二进制与超大文件。用于快速定位代码。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -164,6 +165,7 @@ export const toolSpecs: ToolSpec[] = [
     description:
       '执行一条 shell 命令并返回标准输出/错误与退出码（非交互、一次性）。用于构建、测试、git、脚本等。' +
       '查找文件、搜索内容、阅读文件请用专用工具 glob / grep / read_file / list_dir，不要用 find、grep、cat、ls、head 之类的 shell 命令代替。' +
+      '修改文件请用 edit_file，写文件请用 write_file，不要用 sed、awk、echo 重定向代替；除非用户明确要求，或已确认专用工具做不到。专用工具的改动用户能直接看到，也能用检查点回滚。' +
       (process.platform === 'win32'
         ? '命令在 bash 中运行（优先使用 Git Bash，请写 POSIX/bash 命令；若本机未装 Git Bash 则回落到 cmd.exe，此时请改用 Windows 命令）。'
         : '命令在 bash/sh 中运行，请写 POSIX/bash 命令。') +
@@ -284,6 +286,7 @@ export const toolSpecs: ToolSpec[] = [
       '`global`（新增时的默认）= 用户本人在所有项目都适用的稳定习惯/偏好/纠正（如「用户偏好用 pnpm 而非 npm」）；' +
       '`project` = 仅在当前工作区有用、只属于用户本人的私有经验（如「本项目 e2e 测试须先启动 mock 服务（原因：否则全部超时）」），不入版本库，须已挂载工作区；' +
       '用户纠正你的做法时务必记下，同样的错不应再犯第二次；你走了弯路才发现的项目坑（原因在环境、工具链或项目约定，而非你刚写错的代码）也应记下。' +
+      '**必须**在写本轮最终回复之前调用（先记再回复，回复里顺带告知），严禁写完回复再补记——回复之后的调用会让整段回复被界面收进过程里。' +
       '两者都不是用来记通用知识或代码里能直接看出的内容的；团队共享的项目约定应写进 AGENTS.md（仅当用户要求时）。' +
       '不带 id 为新增；带已有记忆的 id 为覆盖更新（同一主题请更新而非重复新增），更新时可省略 scope，按 id 前缀自动定位（m_ 为全局，p_ 为项目）。' +
       `内容须是一句话（≤${MEMORY_MAX_CHARS} 字）：偏好与背景写成事实陈述，纠正与踩坑写成「做法 + 原因」；不得记录密码/密钥等敏感信息或一次性任务细节。` +
@@ -310,7 +313,8 @@ export const toolSpecs: ToolSpec[] = [
   {
     name: 'memory_delete',
     description:
-      '删除一条记忆（用户要求忘记、或该记忆已过时/与新偏好或代码现状矛盾时使用）。按 id 前缀自动定位作用域：m_ 为全局记忆，p_ 为当前工作区的项目私有记忆。',
+      '删除一条记忆（用户要求忘记、或该记忆已过时/与新偏好或代码现状矛盾时使用）。按 id 前缀自动定位作用域：m_ 为全局记忆，p_ 为当前工作区的项目私有记忆。' +
+      '同样**必须**在写本轮最终回复之前调用，严禁写完回复再补删。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -486,7 +490,8 @@ export function buildTodoTool(): ToolSpec {
       '创建并维护当前任务的待办清单，界面会在输入框上方以进度胶囊实时显示给用户。' +
       '适用：需要 3 步及以上的多步骤任务、计划获批后开始执行、用户一次交代了多件事。不适用：单步或琐碎的任务、纯答疑。' +
       '每次调用都传**完整**清单（整表覆盖，不是增量）；同一时刻只保留一项 in_progress；开始某项前先把它标为 in_progress，' +
-      '做完立即标为 completed（别攒到最后一起勾）；执行中发现新步骤随时补进清单，不再需要的项直接删掉。' +
+      '做完立即标为 completed（别攒到最后一起勾），最后一项也在写最终回复之前勾掉，不要写完回复再补勾；' +
+      '执行中发现新步骤随时补进清单，不再需要的项直接删掉。' +
       '某项受阻或失败时保持 in_progress，并新增一项写明要解决的问题，切勿谎报完成。' +
       '清单全部完成后界面会把它收成一张「已完成清单」卡；之后开始另一件事直接写新清单即可。' +
       '任务被暂停、用户转向别的事而不再进行当前清单时，传 cancel: true 取消它（无需 todos）。',
@@ -622,6 +627,8 @@ const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp'])
 const WALK_MAX = 20_000
 const GLOB_RESULT_MAX = 500
 const GREP_MATCH_MAX = 200
+/** grep 同时读取的文件数。 */
+const GREP_CONCURRENCY = 16
 /** web_fetch 护栏：请求超时 / 下载字节上限 / 返回文本字符上限。 */
 const WEB_FETCH_TIMEOUT_MS = 30_000
 const WEB_FETCH_MAX_BYTES = 5 * 1024 * 1024
@@ -643,6 +650,30 @@ export function looksBinary(buf: Buffer): boolean {
   const n = Math.min(buf.length, 8000)
   for (let i = 0; i < n; i++) if (buf[i] === 0) return true
   return false
+}
+
+/** \r\n、孤立 \r（老式 Mac）统一为 \n。 */
+function normEol(s: string): string {
+  return s.replace(/\r\n|\r/g, '\n')
+}
+
+/** 文件的主导换行风格：CRLF 行数不少于纯 LF 行数即视为 CRLF；无换行按 LF。 */
+function dominantEol(text: string): '\r\n' | '\n' {
+  const crlf = (text.match(/\r\n/g) || []).length
+  const lfOnly = (text.match(/\n/g) || []).length - crlf
+  return crlf > 0 && crlf >= lfOnly ? '\r\n' : '\n'
+}
+
+/** 文件是否以 UTF-8 BOM 开头（只读前 3 字节）；不存在或读不了按否。 */
+async function hasUtf8Bom(abs: string): Promise<boolean> {
+  const fh = await fs.open(abs, 'r').catch(() => null)
+  if (!fh) return false
+  try {
+    const { buffer, bytesRead } = await fh.read(Buffer.alloc(3), 0, 3, 0)
+    return bytesRead === 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf
+  } finally {
+    await fh.close()
+  }
 }
 
 /**
@@ -853,30 +884,110 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp('^' + re + '$')
 }
 
-/** 递归收集受信根内的文件（相对 posix 路径），跳过噪音目录；至多 WALK_MAX 个。 */
-async function collectFiles(root: string): Promise<{ abs: string; rel: string }[]> {
-  const out: { abs: string; rel: string }[] = []
-  async function walk(dir: string, rel: string): Promise<void> {
-    if (out.length >= WALK_MAX) return
+/** 一层 .gitignore：规则相对其所在目录 base 匹配。 */
+interface IgnoreLayer {
+  base: string
+  ig: Ignore
+}
+
+async function loadIgnoreLayer(dir: string): Promise<IgnoreLayer | null> {
+  try {
+    return { base: dir, ig: ignore().add(await fs.readFile(join(dir, '.gitignore'), 'utf8')) }
+  } catch {
+    return null
+  }
+}
+
+/** 按 git 的叠加语义判定：由浅到深逐层套用，深层的命中（含 ! 反选）覆盖浅层。 */
+function isIgnoredBy(layers: IgnoreLayer[], abs: string, isDir: boolean): boolean {
+  let ignored = false
+  for (const l of layers) {
+    const rel = relative(l.base, abs).split(sep).join('/') + (isDir ? '/' : '')
+    const r = l.ig.test(rel)
+    if (r.ignored) ignored = true
+    else if (r.unignored) ignored = false
+  }
+  return ignored
+}
+
+/**
+ * dir 的祖先目录（仓库根 → dir 的父目录）上的 .gitignore 层：从子目录开始搜也要遵守上层规则。
+ * dir 不在 git 仓库内则为空：上溯不越过仓库根，免得套用无关上层目录（如用户主目录）里的 .gitignore。
+ */
+async function ancestorIgnoreLayers(dir: string): Promise<IgnoreLayer[]> {
+  const exists = (p: string): Promise<boolean> =>
+    fs.stat(p).then(
+      () => true,
+      () => false
+    )
+  const chain: string[] = []
+  let cur = resolve(dir)
+  let inRepo = await exists(join(cur, '.git'))
+  while (!inRepo) {
+    const parent = dirname(cur)
+    if (parent === cur) return []
+    cur = parent
+    chain.unshift(cur)
+    inRepo = await exists(join(cur, '.git'))
+  }
+  const layers = await Promise.all(chain.map(loadIgnoreLayer))
+  return layers.filter((l): l is IgnoreLayer => l !== null)
+}
+
+/**
+ * 逐个产出受信根内的文件（相对 posix 路径），跳过噪音目录；至多 WALK_MAX 个。
+ * 边走边产出：调用方够数即可停下，不必先走完整棵树。
+ * gitignore=true 时遵守搜索根及其下各层的 .gitignore，在 git 仓库内还套用上层目录（至仓库根）的；
+ * 与 ripgrep 不同，不在仓库内也读（如下载解压的源码包）。显式指定的搜索根本身被上层忽略时（如直接搜
+ * build/）不套上层规则，照常搜索——那是用户 / 模型明确要看的地方。
+ */
+async function* walkFiles(
+  root: string,
+  gitignore = false
+): AsyncGenerator<{ abs: string; rel: string }> {
+  let count = 0
+  let base: IgnoreLayer[] = []
+  if (gitignore) {
+    base = await ancestorIgnoreLayers(root)
+    if (isIgnoredBy(base, root, true)) base = []
+  }
+  async function* walk(
+    dir: string,
+    rel: string,
+    layers: IgnoreLayer[]
+  ): AsyncGenerator<{ abs: string; rel: string }> {
     let entries: Dirent[]
     try {
       entries = await fs.readdir(dir, { withFileTypes: true })
     } catch {
       return
     }
+    if (gitignore) {
+      const own = await loadIgnoreLayer(dir)
+      if (own) layers = [...layers, own]
+    }
     for (const e of entries) {
-      if (out.length >= WALK_MAX) return
+      if (count >= WALK_MAX) return
       const childAbs = join(dir, e.name)
       const childRel = rel ? `${rel}/${e.name}` : e.name
       if (e.isDirectory()) {
         if (IGNORE_DIRS.has(e.name)) continue
-        await walk(childAbs, childRel)
+        if (layers.length && isIgnoredBy(layers, childAbs, true)) continue
+        yield* walk(childAbs, childRel, layers)
       } else if (e.isFile()) {
-        out.push({ abs: childAbs, rel: childRel })
+        if (layers.length && isIgnoredBy(layers, childAbs, false)) continue
+        count++
+        yield { abs: childAbs, rel: childRel }
       }
     }
   }
-  await walk(root, '')
+  yield* walk(root, '', base)
+}
+
+/** 一次收齐 walkFiles 的结果（glob 要按修改时间排序，须先拿到全部）。 */
+async function collectFiles(root: string): Promise<{ abs: string; rel: string }[]> {
+  const out: { abs: string; rel: string }[] = []
+  for await (const f of walkFiles(root)) out.push(f)
   return out
 }
 
@@ -1402,32 +1513,54 @@ export async function executeTool(
       } catch {
         return { content: `路径不存在：${String(a.path ?? '.')}`, summary: '路径不存在', isError: true }
       }
+      // 遍历遵守 .gitignore（同 ripgrep / Claude Code 的 Grep）：大项目里被忽略的构建产物、缓存目录动辄上万个
+      // 文件，不跳过的话既慢，还会占满 WALK_MAX 名额，让后面的源码目录根本扫不到。
       const files = st.isFile()
         ? [{ abs: target, rel: basename(target) }]
-        : await collectFiles(target)
-      const rows: string[] = []
-      let truncated = false
-      outer: for (const f of files) {
-        if (globRe && !globRe.test(globBase ? basename(f.rel) : f.rel)) continue
+        : walkFiles(target, true)
+      // 单个文件的匹配行（至多 GREP_MATCH_MAX 条，总数由下面汇总时截断）。
+      const searchFile = async (f: { abs: string }): Promise<string[]> => {
         let buf: Buffer
         try {
           buf = await fs.readFile(f.abs)
         } catch {
-          continue
+          return []
         }
-        if (buf.length > MAX_READ_BYTES || looksBinary(buf)) continue
+        if (buf.length > MAX_READ_BYTES || looksBinary(buf)) return []
         // 与 read_file 一致的行拆分：\r 不残留在行内，正则锚点 ^/$ 与显示都基于同一「干净行」。
         const lines = buf.toString('utf8').split(/\r\n|\r|\n/)
-        for (let i = 0; i < lines.length; i++) {
-          if (re.test(lines[i])) {
-            rows.push(`${displayPath(ctx.workspaceRoot, f.abs)}:${i + 1}: ${lines[i].trim().slice(0, 200)}`)
+        const hits: string[] = []
+        for (let i = 0; i < lines.length && hits.length < GREP_MATCH_MAX; i++) {
+          if (re.test(lines[i]))
+            hits.push(`${displayPath(ctx.workspaceRoot, f.abs)}:${i + 1}: ${lines[i].trim().slice(0, 200)}`)
+        }
+        return hits
+      }
+      // 按遍历顺序分批并发读取，结果仍按遍历顺序汇总（输出稳定）；凑满上限即停止遍历。
+      const rows: string[] = []
+      let truncated = false
+      let batch: { abs: string }[] = []
+      const flush = async (): Promise<void> => {
+        const results = await Promise.all(batch.map(searchFile))
+        batch = []
+        for (const hits of results)
+          for (const row of hits) {
+            rows.push(row)
             if (rows.length >= GREP_MATCH_MAX) {
               truncated = true
-              break outer
+              return
             }
           }
+      }
+      for await (const f of files) {
+        if (globRe && !globRe.test(globBase ? basename(f.rel) : f.rel)) continue
+        batch.push(f)
+        if (batch.length >= GREP_CONCURRENCY) {
+          await flush()
+          if (truncated) break
         }
       }
+      if (!truncated && batch.length) await flush()
       return {
         content:
           (note ? `${note}\n` : '') +
@@ -1530,15 +1663,21 @@ export async function executeTool(
     if (name === 'write_file') {
       const abs = resolvePath(ctx.workspaceRoot, a.path)
       const content = typeof a.content === 'string' ? a.content : ''
-      const bytes = Buffer.byteLength(content, 'utf8')
       // 父目录不存在时先自动创建，免得模型还得先 run_command mkdir。
       await fs.mkdir(dirname(abs), { recursive: true })
       if (a.append === true) {
-        await fs.appendFile(abs, content, 'utf8')
-        return { content: `已追加 ${bytes} 字节`, summary: '已追加' }
+        // 追加段按已有文件的主导换行写入，免得 CRLF 文件尾部混进 LF 行。
+        const prev = await fs.readFile(abs, 'utf8').catch(() => '')
+        const body = dominantEol(prev) === '\r\n' ? normEol(content).replace(/\n/g, '\r\n') : content
+        await fs.appendFile(abs, body, 'utf8')
+        return { content: `已追加 ${Buffer.byteLength(body, 'utf8')} 字节`, summary: '已追加' }
       }
-      await fs.writeFile(abs, content, 'utf8')
-      return { content: `已写入 ${bytes} 字节`, summary: '已写入' }
+      // 原文件带 UTF-8 BOM 而新内容没有时补回（对标 CC Write）：丢了 BOM，Windows PowerShell 5.1
+      // 等会按 ANSI 读文件，中文变乱码。
+      const out =
+        content !== '' && !content.startsWith('\uFEFF') && (await hasUtf8Bom(abs)) ? '\uFEFF' + content : content
+      await fs.writeFile(abs, out, 'utf8')
+      return { content: `已写入 ${Buffer.byteLength(out, 'utf8')} 字节`, summary: '已写入' }
     }
 
     if (name === 'edit_file') {
@@ -1570,11 +1709,13 @@ export async function executeTool(
       // ② 精确落空时，退回「换行规范化」匹配：把文件与 old/new 的 \r\n、孤立 \r 统一为 \n 再比对。
       //    这修复了「用户/模型从 read_file 的干净显示复制 old_string，在 CRLF 文件上必然匹配失败」的问题
       //    （read_file 现返回不含 \r 的行内容，old_string 天然无 \r，而磁盘文件是 \r\n）。
-      const normEol = (s: string): string => s.replace(/\r\n|\r/g, '\n')
+      // new_string 一律按文件主导换行写入：单行 old_string 在 CRLF 文件上也能精确命中，
+      // 不转换的话模型写的多行 new_string 会以 LF 插入，与其余 CRLF 行混在一起。
+      const eol = dominantEol(text)
       let count = countOcc(text, oldStr)
       let workText = text
       let workOld = oldStr
-      let workNew = newStr
+      let workNew = normEol(newStr).replace(/\n/g, eol)
       let normalized = false
       if (count === 0) {
         const tN = normEol(text)
@@ -1605,11 +1746,14 @@ export async function executeTool(
       let result = workText.split(workOld).join(workNew)
       // 规范化匹配后需还原文件的主导换行风格：CRLF 主导则把 \n 复原为 \r\n（保「CRLF 文件换行保留」）。
       // 纯 LF / 纯 CRLF 文件均可无损往返；仅极少见的混合换行文件会被统一（此路径本就是精确匹配失败的兜底）。
-      if (normalized) {
-        const crlf = (text.match(/\r\n/g) || []).length
-        const lfOnly = (text.match(/\n/g) || []).length - crlf
-        if (crlf > 0 && crlf >= lfOnly) result = result.replace(/\n/g, '\r\n')
-      }
+      if (normalized && eol === '\r\n') result = result.replace(/\n/g, '\r\n')
+      // old/new 只差换行符时，按文件风格写入后与原文相同——如实报无变化，不谎称已替换。
+      if (result === text)
+        return {
+          content: 'old_string 与 new_string 仅换行符不同；换行符跟随文件原有风格，文件无变化',
+          summary: '无变化',
+          isError: true
+        }
       await fs.writeFile(abs, result, 'utf8')
       const n = replaceAll ? count : 1
       const note = normalized ? '（已按换行规范匹配）' : ''

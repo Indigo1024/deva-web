@@ -1033,14 +1033,11 @@ function Rail({
       )
     })
   }, [sessions, personas, q])
-  // 角色列表按检索词过滤（角色名 + 简介 + 开场白，均大小写不敏感）；空词返回全部。
+  // 角色列表按检索词过滤（角色名 + 简介，均大小写不敏感）；空词返回全部。
   const shownPersonas = useMemo(() => {
     if (!q) return personas
     return personas.filter(
-      (p) =>
-        p.name.toLowerCase().includes(q) ||
-        p.desc.toLowerCase().includes(q) ||
-        p.tagline.toLowerCase().includes(q)
+      (p) => p.name.toLowerCase().includes(q) || p.desc.toLowerCase().includes(q)
     )
   }, [personas, q])
 
@@ -5020,7 +5017,7 @@ function EffortPicker(): React.JSX.Element | null {
 type ProfileTab = 'chats' | 'caps'
 
 /**
- * 角色资料卡：头像与名字并排、开场白引言、操作按钮，下面用「对话 / 能力」两个标签切换，一次只看一块。
+ * 角色资料卡：头像与名字并排、操作按钮，下面用「对话 / 能力」两个标签切换，一次只看一块。
  * 能力 = 在扩展页指定给这个角色的技能与 MCP（对所有角色开放的不在这里重复），点某项进入设置 › 扩展的详情；
  * 没有专属能力的角色不显示「能力」标签。标签选择跨角色保留，便于逐个查看各角色的能力。
  * 名片（头像到标签）固定不动，只有下方列表滚动。
@@ -5102,7 +5099,6 @@ function ProfileView({
               )}
             </div>
           </div>
-          {persona.tagline && <div className="cf-phead__quote">{persona.tagline}</div>}
 
           <div className="cf-profile__actions">
             <button className="cf-profile__new" onClick={onStart}>
@@ -5841,10 +5837,10 @@ function RolesPicker({
 }
 
 /**
- * 技能详情（对话优先外壳）：只读的钻取式主从抽屉，顶栏形态同 MCP 详情（返回 · 删除 · 启用）。
- * 只展示标准 SKILL.md 字段（name / description / compatibility / license / metadata）与 SKILL.md 正文，
- * allowed-tools 及 Deva 自有的 trigger 不显示，空字段整块隐藏。整页撑满设置面板、不出外层滚动条：
- * 描述不加标题、只占一行，正文吃掉剩余高度、过长时框内滚动。删除 = 技能文件夹移到系统回收站。
+ * 技能详情（对话优先外壳）：只读的钻取式主从抽屉，顶栏与名称分隔线同 MCP 详情（返回 · 删除 · 启用）。
+ * 只展示名称、可用角色与 SKILL.md 正文；描述及其余 frontmatter 字段（compatibility / license / metadata /
+ * allowed-tools，以及 Deva 自有的 trigger）一律不显示。整页撑满设置面板、不出外层滚动条：
+ * 正文吃掉剩余高度、过长时框内滚动。删除 = 技能文件夹移到系统回收站。
  * 仅自定义技能可进入；内置技能在列表里不可点开。
  */
 function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): React.JSX.Element {
@@ -5852,11 +5848,6 @@ function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): Rea
   const dialog = useDialog()
   const toast = useToast()
   const { toggle, removeSkill } = useExtensions()
-  // 运行环境要求 / 许可 / metadata 合成一张单行键值表，保证整页不出现外层滚动条。
-  const props: Array<[string, string]> = []
-  if (item.compatibility) props.push([t('extensions.compatibility'), item.compatibility])
-  if (item.license) props.push([t('extensions.license'), item.license])
-  props.push(...Object.entries(item.metadata))
 
   const onDelete = (): void => {
     const name = clipName(item.name)
@@ -5894,29 +5885,7 @@ function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): Rea
         <h2 className="ext-detail__name ext-detail__name--mono">{item.name}</h2>
       </header>
 
-      {item.desc && (
-        <div className="ext-field ext-detail__desc">
-          <p className="ext-detail__text ext-detail__text--line" title={item.desc}>
-            {item.desc}
-          </p>
-        </div>
-      )}
-
       <RolesPicker kind="skill" id={item.id} roles={item.roles} />
-
-      {props.length > 0 && (
-        <div className="ext-field">
-          <label className="ext-field__label">{t('extensions.properties')}</label>
-          <dl className="ext-meta">
-            {props.map(([k, v], i) => (
-              <Fragment key={i}>
-                <dt>{k}</dt>
-                <dd title={v}>{v}</dd>
-              </Fragment>
-            ))}
-          </dl>
-        </div>
-      )}
 
       <div className="ext-field ext-field--grow">
         <label className="ext-field__label">{t('extensions.instructions')}</label>
@@ -5947,7 +5916,8 @@ const MCP_STATUS_WARN = new Set<McpStatus>(['error', 'needs_config', 'needs_secr
 
 /**
  * MCP 详情编辑（对话优先外壳）：钻取式主从抽屉，形态对齐模型设置页（顶部返回 + 逐字段即时落盘）。
- * 名称 / 传输 / 命令 / 参数 / 环境变量（或 URL / 请求头）经 update('mcp', …) round-trip 到 mcp.json；
+ * 传输 / 命令 / 参数 / 环境变量（或 URL / 请求头）经 update('mcp', …) round-trip 到 mcp.json；名称只读
+ * （创建时定下，见 create_mcp：改名不改 id、也不刷新已发给模型的工具说明，故不提供）。
  * 密钥恒经 mcpSetSecret 加密另存、写后不回显（`{secretRef}` 占位符落盘，明文零留痕）。
  */
 function McpEditor({ item, onBack }: { item: McpServer; onBack: () => void }): React.JSX.Element {
@@ -6028,15 +5998,6 @@ function McpEditor({ item, onBack }: { item: McpServer; onBack: () => void }): R
           {t('extensions.missingSecrets').replace('{fields}', item.missingSecrets.join(', '))}
         </div>
       )}
-
-      <div className="ext-field">
-        <label className="ext-field__label">{t('extensions.name')}</label>
-        <input
-          className="ext-input"
-          value={item.name}
-          onChange={(e) => update('mcp', item.id, { name: e.target.value })}
-        />
-      </div>
 
       <RolesPicker kind="mcp" id={item.id} roles={item.roles} />
 
@@ -6338,13 +6299,20 @@ function AboutPane(): React.JSX.Element {
   const upstreamRepo = typeof __UPSTREAM_REPO__ === 'string' ? __UPSTREAM_REPO__ : null
   const webRepo = typeof __WEB_REPO__ === 'string' ? __WEB_REPO__ : null
   /**
-   * 版本优先取服务端注入的运行时值（window.__DEVA_VERSIONS__，每次渲染页面时读取文件），
-   * 这样升级源码后刷新页面就能看到新版本，不需要等前端重新构建。
-   * 取不到时回落到构建期常量。
+   * 版本取服务端注入的运行时值（window.__DEVA_VERSIONS__，每次渲染页面时读文件）。
+   *
+   * - running：当前进程真正在跑的构建产物版本 —— 展示给用户看的是这个
+   * - source：磁盘上源码目录的版本 —— 与 running 不同说明拉了新代码还没构建
+   * - stale：上面两者不一致，页面要明确提示「待构建」，不能假装已经是新版本
+   *
+   * 之前只显示 source，merge 完还没构建时版本号就跳了，看着像实时更新，
+   * 实际跑的仍是旧代码。现在把事实（running）和期望（source）分开说清楚。
    */
-  const runtimeVersions = (window as unknown as { __DEVA_VERSIONS__?: { source?: string; web?: string } })
-    .__DEVA_VERSIONS__
-  const sourceVersion = runtimeVersions?.source ?? __APP_VERSION__
+  type VerInfo = { running?: string; source?: string; web?: string; stale?: boolean }
+  const runtimeVersions = (window as unknown as { __DEVA_VERSIONS__?: VerInfo }).__DEVA_VERSIONS__
+  const runningVersion = runtimeVersions?.running ?? __APP_VERSION__
+  const sourceVersion = runtimeVersions?.source ?? runningVersion
+  const stale = Boolean(runtimeVersions?.stale)
   const webVersion =
     runtimeVersions?.web ?? (typeof __WEB_VERSION__ === 'string' ? __WEB_VERSION__ : null)
   return (
@@ -6354,11 +6322,21 @@ function AboutPane(): React.JSX.Element {
         <img className="cf-about__icon" src={devaIcon} alt="" aria-hidden />
         <div className="cf-about__name">{t('app.name')}</div>
         <div className="cf-about__ver cf-about__ver--src">
-          源码版 v{sourceVersion}
+          源码版 v{runningVersion}
         </div>
         {webVersion && (
           <div className="cf-about__ver cf-about__ver--web">
             Web 改版 v{webVersion}
+          </div>
+        )}
+        {/*
+         * 源码已更新但还没构建：如实提示。不显示成「已经是新版本」，
+         * 也不自动构建（那会在用户不知情时重启服务）。
+         */}
+        {stale && (
+          <div className="cf-about__stale">
+            磁盘上已有源码 v{sourceVersion}，当前运行的是 v{runningVersion}
+            <span className="cf-about__stale-hint">重新构建并重启后生效</span>
           </div>
         )}
         {t('app.tagline') && <p className="cf-about__desc">{t('app.tagline')}</p>}

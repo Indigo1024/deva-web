@@ -112,14 +112,19 @@ function loadAppTemplate(): string {
 
 /**
  * 版本信息：**运行时读取**，不写死也不依赖构建期常量。
- *  - source：上游源码版本，读 apps/desktop/package.json（升级源码后刷新页面即变，无需重建）
- *  - web：Web 改版版本，读 apps/desktop/web-version.json
- * 关于页从 __DEVA_BOOT__ 里取，所以刷新页面就能看到最新值。
  *
- * 优先级：**源码目录优先于产物目录**。产物的 package.json 是构建时拷贝的副本，
- * 源码升级但还没重建时副本仍是旧值 —— 那正是「版本号不跟着变」的根因。
+ * 这里有三个版本，含义必须分清（曾经混成一个，导致显示「假实时」的版本号）：
+ *  - **running**：当前进程真正在跑的构建产物版本，读 out/web/package.json。
+ *    进程启动时就把代码装进内存了，所以这个值在重启前不会变 —— 它才是「你正在用的版本」。
+ *  - **source**：磁盘上源码目录的版本，读 apps/desktop/package.json。
+ *    拉取了新源码但还没构建时，它会比 running 新 —— 这正是「有新代码但没生效」的信号。
+ *  - **web**：Web 改版版本，读 apps/desktop/web-version.json。
+ *
+ * 早期版本优先读源码目录，结果 git merge 完还没构建，关于页就显示新版本号，
+ * 实际跑的仍是旧代码 —— 看起来像「版本实时更新了」，其实是假的。
+ * 现在两者分开：running 是事实，source 与它不一致时明确提示「源码已更新，待构建」。
  */
-function readVersionInfo(): { source: string; web: string } {
+function readVersionInfo(): { running: string; source: string; web: string; stale: boolean } {
   const read = (p: string, key: string): string => {
     try {
       const o = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>
@@ -130,21 +135,25 @@ function readVersionInfo(): { source: string; web: string } {
   }
   // 构建产物 out/web/index.cjs → __dirname = apps/desktop/out/web，
   // 往上两级就是源码目录 apps/desktop；开发模式 __dirname 已是 src/web-server，
-  // 往上两级仍是 apps/desktop。两种形态都先落在这里。
-  const candidates = [
-    join(__dirname, '..', '..'), // apps/desktop（源码，实时）
-    __dirname // out/web（兜底：只部署产物、没有源码时）
-  ]
-  for (const dir of candidates) {
-    const pkg = join(dir, 'package.json')
-    if (existsSync(pkg)) {
-      return {
-        source: read(pkg, 'version'),
-        web: read(join(dir, 'web-version.json'), 'webVersion')
-      }
-    }
+  // 往上两级仍是 apps/desktop。
+  const outDir = __dirname
+  const srcDir = join(__dirname, '..', '..')
+
+  const running = read(join(outDir, 'package.json'), 'version')
+  const source = read(join(srcDir, 'package.json'), 'version')
+  // Web 改版版本同样以「产物里那份」为准：它随产物一起拷贝，能反映实际在跑的改版。
+  // 源码目录仅作兜底（比如只部署产物、没有源码的机器）。
+  const web = existsSync(join(outDir, 'web-version.json'))
+    ? read(join(outDir, 'web-version.json'), 'webVersion')
+    : read(join(srcDir, 'web-version.json'), 'webVersion')
+
+  return {
+    running,
+    source,
+    web,
+    // 源码版本与运行版本不同 → 磁盘上已有更新的代码，等构建重启才生效
+    stale: source !== '0.0.0' && running !== '0.0.0' && source !== running
   }
-  return { source: '0.0.0', web: '0.0.0' }
 }
 
 function renderAppHtml(): string {
@@ -155,7 +164,9 @@ function renderAppHtml(): string {
   const json = JSON.stringify({
     user: auth.user,
     config,
-    version: versions.source,
+    // 应用版本取「实际在跑的」那个 —— 它才是用户此刻使用的版本。
+    // 源码目录版本另存在 versions.source 里，与 running 不一致时前端提示待构建。
+    version: versions.running,
     versions
   }).replace(/</g, '\\u003c')
   return tpl.replace(
