@@ -53,7 +53,12 @@ export function UpdateSection(): React.JSX.Element {
 
   /**
    * Web 安装：服务会重启，不能等 IPC 返回（连接会断）。
-   * 进入等待态后轮询 /api/health，服务回来后自动刷新页面。
+   *
+   * 轮询 /api/health 有个陷阱：**构建期间旧进程还活着，health 一直是 200**。
+   * 早先只要看到 200 就刷新，结果构建还没完成页面就刷了，用户看到的仍是旧版本，
+   * 以为更新失败。现在必须先观测到「服务真的重启过」再刷新：
+   *  - 用 /api/health 返回的 `up`（进程已运行秒数）判断 —— 新进程的 up 会很小；
+   *  - 或者先经历一次连接失败（服务确实停了），再等到 200。
    */
   const installWeb = (): void => {
     setInstalling(true)
@@ -64,19 +69,37 @@ export function UpdateSection(): React.JSX.Element {
     })
 
     let tries = 0
+    /** 已观测到服务重启的证据：连接断过一次，或看到 up 变小。 */
+    let sawRestart = false
+    /** 首次拿到的 up 值，用来判断之后有没有「归零重来」。 */
+    let baseUp: number | null = null
+
     timer.current = window.setInterval(async () => {
       tries += 1
       try {
-        const r = await fetch('/api/health', { cache: 'no-store', signal: AbortSignal.timeout(4000) })
+        const r = await fetch('/api/health', {
+          cache: 'no-store',
+          signal: AbortSignal.timeout(4000)
+        })
         if (r.ok) {
-          window.clearInterval(timer.current!)
-          timer.current = null
-          setWaitNote('新版本已就绪，正在刷新…')
-          window.setTimeout(() => window.location.reload(), 800)
-          return
+          const data = (await r.json().catch(() => ({}))) as { up?: number }
+          const up = typeof data.up === 'number' ? data.up : null
+          if (baseUp === null && up !== null) baseUp = up
+          // 新进程的 up 一定比之前小很多（重启过）；差值 > 5 秒即认定重启
+          if (up !== null && baseUp !== null && up < baseUp - 5) sawRestart = true
+          if (sawRestart) {
+            window.clearInterval(timer.current!)
+            timer.current = null
+            setWaitNote('新版本已就绪，正在刷新…')
+            window.setTimeout(() => window.location.reload(), 800)
+            return
+          }
+          // 服务还在，但还没重启 —— 说明构建仍在进行
+          setWaitNote('正在服务器上构建新版本，这可能需要几分钟…')
         }
       } catch {
-        /* 服务重启中，继续等 */
+        // 请求失败 = 服务确实停了，这就是重启发生的证据
+        sawRestart = true
       }
       if (tries === 20) setWaitNote('构建仍在进行（已等约 1 分钟），请耐心等待…')
       if (tries === 100) {

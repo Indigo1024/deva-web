@@ -872,9 +872,32 @@ const heartbeat = setInterval(() => {
 }, 30_000)
 heartbeat.unref?.()
 
-server.listen(PORT, HOST, () => {
-  console.log(`[deva-web] listening on http://${HOST}:${PORT} (static: ${STATIC_ROOT})`)
-})
+/**
+ * 启动 HTTP 服务。
+ *
+ * 更新时新进程会被立刻拉起，而旧进程还要过几百毫秒才退出并释放端口。
+ * 所以端口被占（EADDRINUSE）不能直接崩 —— 在那个窗口里重试几次，
+ * 否则「更新成功但服务起不来」。
+ */
+function listenWithRetry(attempt = 0): void {
+  const onError = (e: NodeJS.ErrnoException): void => {
+    if (e.code === 'EADDRINUSE' && attempt < 20) {
+      const delay = 300
+      console.warn(`[deva-web] 端口 ${PORT} 被占用，${delay}ms 后重试（第 ${attempt + 1} 次）`)
+      setTimeout(() => listenWithRetry(attempt + 1), delay)
+      return
+    }
+    console.error('[deva-web] 监听失败', e)
+    process.exit(1)
+  }
+  server.once('error', onError)
+  server.listen(PORT, HOST, () => {
+    server.removeListener('error', onError)
+    console.log(`[deva-web] listening on http://${HOST}:${PORT} (static: ${STATIC_ROOT})`)
+  })
+}
+
+listenWithRetry()
 
 // ── 优雅退出 ───────────────────────────────────────────────────────────────
 let closing = false

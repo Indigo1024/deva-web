@@ -118,6 +118,25 @@ async function remoteVersion(sha: string): Promise<string> {
   return data.version
 }
 
+/**
+ * 本地当前部署对应的 commit（HEAD）。
+ *
+ * 版本号比较有个盲区：远端有新提交但没升版本号时，光比数字永远是「已是最新」。
+ * 拿 HEAD 与远端 commit 比一次，才能覆盖这种情况。
+ * 读不到（非 git 部署、浅克隆）返回 null，退化成纯版本号比较。
+ */
+async function localCommit(): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot(),
+      timeout: 10_000
+    })
+    return stdout.trim() || null
+  } catch {
+    return null
+  }
+}
+
 /** 读远端该 commit 的 web-version.json（Web 层自身版本），没有则 null。 */
 async function remoteWebVersion(sha: string): Promise<string | null> {
   try {
@@ -165,19 +184,29 @@ async function check(): Promise<void> {
     const current = app.getVersion()
     const currentWeb = localWebVersion()
 
-    // 两个版本都要比：上游版本（package.json）和 Web 改版版本（web-version.json）。
-    // 只比上游版本的话，纯 Web 层更新永远检测不到——那正是这个改版最常发的更新。
+    // 三个维度都要比：
+    //  1. 上游版本（package.json）—— 合并了新上游
+    //  2. Web 改版版本（web-version.json）—— 纯 Web 层更新，最常见
+    //  3. commit —— 远端推了新提交但没升版本号，光比数字永远收不到更新
     const sourceNewer = compareVersions(version, current) > 0
     const webNewer = Boolean(remoteWeb && currentWeb && compareVersions(remoteWeb, currentWeb) > 0)
-    if (!sourceNewer && !webNewer) {
+    const head = await localCommit()
+    const commitNewer = Boolean(head && head !== sha)
+
+    if (!sourceNewer && !webNewer && !commitNewer) {
       found = null
       setState({ phase: 'latest' })
       return
     }
 
     const release: UpdateRelease = {
-      // 显示用版本号：上游有新版就显示上游版本；只有 Web 层更新时显示 Web 版本号
-      version: sourceNewer ? version : String(remoteWeb ?? version),
+      // 显示用版本号：上游有新版就显示上游版本；只有 Web 层更新时显示 Web 版本号；
+      // 仅 commit 不同（版本号没动）时，用短 sha 标明是「有新代码」
+      version: sourceNewer
+        ? version
+        : webNewer
+          ? String(remoteWeb ?? version)
+          : `构建 ${sha.slice(0, 7)}`,
       pageUrl: `https://github.com/${REPO}/commit/${sha}`
     }
     found = { release, mode: 'auto', target: sha }
@@ -192,13 +221,57 @@ async function check(): Promise<void> {
   }
 }
 
-/** 「下载」= 把目标 commit 取到本地并确认可检出（真正构建留到 install）。 */
+/**
+ * 「下载」= 确认目标 commit 的源码能拿到。
+ *
+ * 两种部署都要支持：
+ *  - **git 部署**（clone 下来的）：`git fetch` 把 commit 取到本地对象库；
+ *  - **非 git 部署**（下载 zip 解压、或 git 目录被删）：走 GitHub tarball 下载到
+ *    `.deva-update-build/`，install 阶段直接用这份，不再依赖 git archive。
+ *
+ * 判断依据是仓库根目录有没有 `.git`。
+ */
 async function download(): Promise<void> {
   if (!found || state.phase === 'downloading' || state.phase === 'downloaded') return
   const { release, target } = found
   setState({ phase: 'downloading', release, percent: 0 })
+  const root = repoRoot()
+  const hasGit = existsSync(join(root, '.git'))
+
+  if (!hasGit) {
+    // 非 git 部署：直接下 tarball，解到 build 目录
+    try {
+      const buildDir = join(root, '.deva-update-build')
+      rmSync(buildDir, { recursive: true, force: true })
+      mkdirSync(buildDir, { recursive: true })
+      setState({ phase: 'downloading', release, percent: 20 })
+      const url = `https://codeload.github.com/${REPO}/tar.gz/${target}`
+      const res = await fetch(url, {
+        headers: { 'user-agent': 'deva-web' },
+        signal: AbortSignal.timeout(180_000)
+      })
+      if (!res.ok) throw new Error(`下载源码包失败：HTTP ${res.status}`)
+      const buf = Buffer.from(await res.arrayBuffer())
+      setState({ phase: 'downloading', release, percent: 70 })
+      const tarPath = join(buildDir, 'src.tar.gz')
+      writeFileSync(tarPath, buf)
+      // --strip-components=1 去掉 github 打的顶层目录名
+      await execFileAsync('tar', ['-xzf', tarPath, '-C', buildDir, '--strip-components=1'], {
+        timeout: 180_000
+      })
+      rmSync(tarPath, { force: true })
+      if (!existsSync(join(buildDir, 'apps', 'desktop', 'package.json'))) {
+        throw new Error('源码包解压后结构不对（缺 apps/desktop/package.json）')
+      }
+      setState({ phase: 'downloading', release, percent: 100 })
+      setState({ phase: 'downloaded', release })
+    } catch (e) {
+      setState({ phase: 'error', stage: 'download', message: errorText(e), release })
+    }
+    return
+  }
+
   try {
-    const root = repoRoot()
     const remote = await resolveWebRemote(root)
     setState({ phase: 'downloading', release, percent: 10 })
     await execFileAsync('git', ['fetch', '--quiet', remote, BRANCH], {
@@ -270,13 +343,27 @@ async function install(): Promise<void> {
     rmSync(buildDir, { recursive: true, force: true })
     mkdirSync(buildDir, { recursive: true })
 
-    // 1. 导出目标 commit 的源码树（不动工作区）
-    log('导出源码…')
-    await execFileAsync(
-      'bash',
-      ['-lc', `git archive ${JSON.stringify(target)} | tar -x -C ${JSON.stringify(buildDir)}`],
-      { cwd: root, timeout: 180_000 }
-    )
+    // 记录当前 HEAD，后面判断工作区是否需要对齐
+    const headAt = (await localCommit()) ?? ''
+
+    // 1. 导出目标 commit 的源码树（不改工作区）
+    //
+    // git 部署走 git archive；非 git 部署的 download 阶段已经下好 tarball 解在 buildDir，
+    // 直接复用，不再重复下载。
+    const buildDirHasSrc = existsSync(join(buildDir, 'apps', 'desktop', 'package.json'))
+    if (buildDirHasSrc) {
+      log('复用已下载的源码包')
+    } else {
+      log('导出源码…')
+      await execFileAsync(
+        'bash',
+        ['-lc', `git archive ${JSON.stringify(target)} | tar -x -C ${JSON.stringify(buildDir)}`],
+        { cwd: root, timeout: 180_000 }
+      )
+    }
+
+    // 非 git 部署没有 HEAD 可比，headAt 留空即可（reset 那段会跳过）
+    const canReset = existsSync(join(root, '.git'))
 
     // 2. 依赖：默认复用仓库里的 node_modules；package.json 变了才重新装
     const newPkgPath = join(buildDir, 'apps', 'desktop', 'package.json')
@@ -366,18 +453,35 @@ async function install(): Promise<void> {
       /* 清理失败无妨 */
     }
 
-    // 6. 记录待重启标记
-    writeFileSync(
-      join(root, '.deva-update-pending.json'),
-      JSON.stringify({ version: release.version, target, at: Date.now() })
-    )
+    // 5.5 工作区快进到目标 commit。
+    //
+    // 产物已经换成新的了，但工作区 HEAD 还停在旧 commit —— 那样 `check()` 里的
+    // commit 比对会永远判定「有更新」，用户会反复看到更新提示。这里把 HEAD 对齐。
+    // 用 reset --hard 而不是 pull：目标是确定的那个 commit，不该被本地改动干扰；
+    // 失败不阻塞更新（产物已经好了），只记日志。
+    if (canReset && headAt && headAt !== target) {
+      try {
+        log(`工作区对齐到 ${target.slice(0, 8)}…`)
+        await execFileAsync('git', ['reset', '--hard', target], { cwd: root, timeout: 60_000 })
+        log('工作区已对齐')
+      } catch (e) {
+        log(`工作区对齐失败（不影响已部署的产物）：${errorText(e)}`)
+      }
+    }
+
     rmSync(buildDir, { recursive: true, force: true })
 
     log('=== 构建完成，重启服务 ===')
     setState({ phase: 'downloaded', release })
-    await execFileAsync('systemctl', ['restart', 'deva-web'], { timeout: 30_000 }).catch((e) => {
-      log(`systemctl restart 返回：${errorText(e)}（进程可能已被重启，属正常）`)
-    })
+
+    // 6. 重启：优先用 systemd（能自愈、有日志），失败则进程自我替换。
+    //
+    // 早期版本这里写死 `systemctl restart deva-web`，在非 systemd 部署（直接
+    // `node out/web/index.cjs`、docker、其他服务名）上一律失败，而失败又被 catch
+    // 吞掉 —— 前端显示更新成功，实际进程没重启，用户看到的是旧界面。
+    //
+    // 现在按顺序试，每一步失败都记日志，最后一定落到「自我替换」这条保底路径。
+    await restartSelf(log)
   } catch (e) {
     log(`=== 更新失败：${errorText(e)} ===`)
     // 回滚：构建失败时线上产物没动过；只有「旧产物已改名、新产物未就位」才需要还原
@@ -404,6 +508,143 @@ async function install(): Promise<void> {
     }
     setState({ phase: 'error', stage: 'download', message: errorText(e), release })
   }
+}
+
+/**
+ * 重启自身，兼容各种部署方式。
+ *
+ * 顺序：
+ *  1. `DEVA_WEB_RESTART_CMD`（自定义命令，含管道时走 shell）—— 部署方能精确指定
+ *  2. `DEVA_WEB_SERVICE` 指定 / 自动探测到的 systemd 单元 —— `systemctl restart <unit>`
+ *  3. **进程自我替换 `execve`** —— 任何部署方式都能用，保底
+ *
+ * 自我替换的前提：进程由 `node out/web/index.cjs` 直接拉起，且当前环境变量就是启动时的
+ * 那一套（systemd 部署下由 Restart=always 兜底，用不到这一步）。
+ * 用 execve 而不是 spawn 新进程，是为了不留孤儿进程、端口也能立刻释放。
+ */
+async function restartSelf(log: (s: string) => void): Promise<void> {
+  const run = async (cmd: string, args: string[], useShell = false): Promise<boolean> => {
+    try {
+      if (useShell) {
+        await execFileAsync('bash', ['-lc', cmd], { timeout: 60_000 })
+      } else {
+        await execFileAsync(cmd, args, { timeout: 60_000 })
+      }
+      return true
+    } catch (e) {
+      log(`重启命令失败（${cmd} ${args.join(' ')}）：${errorText(e)}`)
+      return false
+    }
+  }
+
+  /**
+   * 静默执行：只回布尔，不把「被自己杀掉」当成错误记日志。
+   * systemctl restart 杀掉本进程时命令会以非零退出，那是正常现象。
+   */
+  const runQuiet = async (cmd: string, args: string[]): Promise<boolean> => {
+    try {
+      await execFileAsync(cmd, args, { timeout: 60_000 })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  // 1. 部署方自定义
+  const custom = process.env.DEVA_WEB_RESTART_CMD?.trim()
+  if (custom) {
+    log(`用自定义重启命令：${custom}`)
+    if (await run(custom, [], true)) return
+  }
+
+  // 2. systemd：显式指定的单元名，或探测到的、本进程确实是 MainPID 的单元
+  const unit = process.env.DEVA_WEB_SERVICE?.trim() || detectSystemdUnit()
+  if (unit) {
+    log(`用 systemd 重启：${unit}`)
+    // systemctl restart 会先杀掉本进程（我们就是那个进程），所以这条命令几乎必然
+    // 以「失败」返回 —— 但重启其实已经发生了。不能据此判定失败，否则会再走一次
+    // 自我替换，凭空多起一个进程抢同一个端口。
+    // 正确做法：发出请求后只等片刻；如果自己还活着，说明 systemd 没接管（单元名
+    // 不对、没有权限等），这时才回退到自我替换。
+    const started = await runQuiet('systemctl', ['restart', unit])
+    await new Promise((r) => setTimeout(r, 3000))
+    if (!started) {
+      // 命令返回失败，但我们已被杀 → 进程已经不在这里了，不会走到这行
+      log(`systemctl 返回失败，但本进程仍在运行 → 该单元未接管，改用自我替换`)
+    } else {
+      log(`已请求 systemd 重启 ${unit}`)
+      return
+    }
+  } else {
+    log('未探测到 systemd 单元（或本进程不是该单元的主进程），改用进程自我替换')
+  }
+
+  // 3. 保底：进程自我替换（spawn 新进程 + 本进程退出）
+  //
+  // 时序很关键：新进程要 bind 同一个端口，必须先让旧进程释放端口。
+  // 但反过来先退出又没人拉起新进程。做法是「先 spawn（它 bind 会失败几次重试），
+  // 本进程随即退出释放端口」——所以新进程必须允许端口被占时重试。
+  log('执行进程自我替换…')
+  try {
+    const { spawn } = await import('node:child_process')
+    const args = process.argv.slice(1)
+    const child = spawn(process.execPath, args, {
+      detached: true,
+      stdio: 'ignore',
+      // 告诉新进程：端口可能被上一任占着，等它退出再 bind
+      env: { ...process.env, DEVA_WEB_RESTARTING: String(Date.now()) }
+    })
+    child.unref()
+    log(`已拉起新进程 pid=${child.pid}，本进程退出以释放端口`)
+    // 给 spawn 一点时间完成 fork，再退出
+    setTimeout(() => {
+      try {
+        process.exit(0)
+      } catch {
+        process.kill(process.pid, 'SIGKILL')
+      }
+    }, 500)
+  } catch (e) {
+    log(`自我替换失败：${errorText(e)}`)
+    throw new Error('无法重启服务，请手动重启')
+  }
+}
+
+/**
+ * 探测当前进程是否真的由某个 systemd 单元直接拉起。
+ *
+ * 不能只读 cgroup 就算数：进程常常是「从别的服务里 fork 出来」的（比如在某个
+ * systemd 服务的 shell 里手动 `node index.cjs`），那时 cgroup 显示的是**父进程**
+ * 的单元。早期版本据此去 `systemctl restart` 那个单元，等于重启了毫不相干的服务
+ * —— 自己的进程却没动，用户看到界面还是旧的。
+ *
+ * 判定条件两条同时满足才算数：
+ *  1. cgroup 指向某个 .service；
+ *  2. 该单元的 MainPID 就是本进程。
+ */
+function detectSystemdUnit(): string | null {
+  let unit: string | null = null
+  try {
+    const cgroup = readFileSync('/proc/self/cgroup', 'utf8')
+    const m = cgroup.match(/\/system\.slice\/(?:system-)?([^/\n]+\.service)/)
+    if (m) unit = m[1]
+  } catch {
+    return null
+  }
+  if (!unit) return null
+
+  // 确认本进程就是这个单元的主进程；否则说明只是被它 fork 出来的子进程
+  try {
+    const { execFileSync } = require('node:child_process') as typeof import('node:child_process')
+    const out = execFileSync('systemctl', ['show', '-p', 'MainPID', '--value', unit], {
+      timeout: 5_000,
+      encoding: 'utf8'
+    }).trim()
+    if (Number(out) === process.pid) return unit
+  } catch {
+    /* systemctl 不可用或查询失败 → 当探测不到处理 */
+  }
+  return null
 }
 
 export function registerWebUpdaterIpc(getWin: () => BrowserWindow | null): void {
