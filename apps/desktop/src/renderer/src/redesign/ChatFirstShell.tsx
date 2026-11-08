@@ -4125,26 +4125,31 @@ function Conversation({
 
   // 单条消息渲染（选择态与常态复用；选择态下 active 恒 false，因选择只在非流式时可用）。
   // turn：常态渲染传入，标注到根 data-turn 供右键定位；选择态用卡片自身处理点击，无需传。
-  const renderMsg = (m: ChatMessage, i: number, turn?: number): React.JSX.Element => (
-    <ConvMessage
-      key={m.id}
-      msg={m}
-      owner={owner}
-      active={!selecting && streaming && i === messages.length - 1}
-      latest={i === messages.length - 1}
-      elapsedSec={i === messages.length - 1 ? streamStatus.elapsedSec : 0}
-      footer={statusInMsg && !selecting && i === messages.length - 1 ? statusLine : undefined}
-      dataTurn={turn}
-      actions={!selecting}
-      onRewindTurn={(n) => openRewind(n)}
-      onDeleteTurn={(n) => void onDeleteTurns([n])}
-      onAsk={onAsk}
-      onPlan={onPlan}
-      onMountReq={onMountReq}
-      onOpenProposal={onOpenProposal}
-      onOpenAutotask={onOpenAutotask}
-    />
-  )
+  const renderMsg = (m: ChatMessage, i: number, turn?: number): React.JSX.Element => {
+    // 「正在流式输出的那一条」：它的操作行一律不给 —— 回复还没写完，复制到的只是半截内容
+    // （复制键要在整段回复落定后才出现；回滚 / 删除本来也只对已完成的轮开放）。
+    const isLive = !selecting && streaming && i === messages.length - 1
+    return (
+      <ConvMessage
+        key={m.id}
+        msg={m}
+        owner={owner}
+        active={isLive}
+        latest={i === messages.length - 1}
+        elapsedSec={i === messages.length - 1 ? streamStatus.elapsedSec : 0}
+        footer={statusInMsg && !selecting && i === messages.length - 1 ? statusLine : undefined}
+        dataTurn={turn}
+        actions={!selecting && !isLive}
+        onRewindTurn={(n) => openRewind(n)}
+        onDeleteTurn={(n) => void onDeleteTurns([n])}
+        onAsk={onAsk}
+        onPlan={onPlan}
+        onMountReq={onMountReq}
+        onOpenProposal={onOpenProposal}
+        onOpenAutotask={onOpenAutotask}
+      />
+    )
+  }
 
   return (
     <main className="cf-conv">
@@ -4482,7 +4487,7 @@ function MsgActions({
   canAct: boolean
   onRewind?: (turn: number) => void
   onDelete?: (turn: number) => void
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   const copy = (): void => {
@@ -4508,18 +4513,24 @@ function MsgActions({
     }
   }
   const turnable = canAct && typeof turn === 'number' && turn >= 0
+  /** 正文为空（例如还没输出、或这一轮只有工具调用）时不给复制：点了什么也拿不到。 */
+  const canCopy = text.trim().length > 0
+  // 一个按钮都排不出来就不占位（否则气泡下面会多出一条空白）。
+  if (!canCopy && !turnable) return null
   return (
     <div className="cf-msg__acts">
-      <button
-        type="button"
-        className="cf-msg__act"
-        onClick={copy}
-        title={t('common.copy')}
-        aria-label={t('common.copy')}
-      >
-        {copied ? <Check size={13} /> : <Copy size={13} />}
-        <span>{copied ? t('chat.md.copied') : t('common.copy')}</span>
-      </button>
+      {canCopy && (
+        <button
+          type="button"
+          className="cf-msg__act"
+          onClick={copy}
+          title={t('common.copy')}
+          aria-label={t('common.copy')}
+        >
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+          <span>{copied ? t('chat.md.copied') : t('common.copy')}</span>
+        </button>
+      )}
       {turnable && onRewind && (
         <button
           type="button"
@@ -4681,17 +4692,19 @@ function ConvMessage({
             </div>
           )}
           {text && <UserText text={text} />}
-          {actions && (
-            <MsgActions
-              text={text}
-              turn={dataTurn}
-              canAct={!active}
-              onRewind={onRewindTurn}
-              onDelete={onDeleteTurn}
-            />
-          )}
         </div>
         <Avatar user size={32} />
+        {/* 操作行排在气泡**外面**（.cf-msg__acts 占满整行 grid-column: 1/-1）：
+            放在气泡里会受用户气泡 80% 宽度限制，三个按钮就折成两行了。 */}
+        {actions && (
+          <MsgActions
+            text={text}
+            turn={dataTurn}
+            canAct={!active}
+            onRewind={onRewindTurn}
+            onDelete={onDeleteTurn}
+          />
+        )}
       </div>
     )
   }
@@ -4775,20 +4788,22 @@ function ConvMessage({
           )}
           {!active && <DeliveryCards blocks={msg.blocks} />}
           {footer}
-          {actions && (
-            <MsgActions
-              text={msg.blocks
-                .filter((b) => b.kind === 'text')
-                .map((b) => (b.kind === 'text' ? b.text : ''))
-                .join('\n\n')}
-              turn={dataTurn}
-              canAct={!active}
-              onRewind={onRewindTurn}
-              onDelete={onDeleteTurn}
-            />
-          )}
         </div>
       </div>
+      {/* 操作行：回复**完成**后才出现（active = 还在流式输出，那时不给，用户看不到半截回复的复制键）。
+          位置与上面的用户消息同理，占满整行。 */}
+      {actions && (
+        <MsgActions
+          text={msg.blocks
+            .filter((b) => b.kind === 'text')
+            .map((b) => (b.kind === 'text' ? b.text : ''))
+            .join('\n\n')}
+          turn={dataTurn}
+          canAct={!active}
+          onRewind={onRewindTurn}
+          onDelete={onDeleteTurn}
+        />
+      )}
     </div>
   )
 }

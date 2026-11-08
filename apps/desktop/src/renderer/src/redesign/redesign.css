@@ -1727,16 +1727,27 @@ body.cf-resizing-y * {
 }
 
 /* 消息底部操作行：复制 / 回滚到此处 / 删除此轮。
-   常驻显示（不靠悬停），手机上一眼可见、一次点击就用；桌面悬停时加深一档。 */
+   常驻显示（不靠悬停），手机上一眼可见、一次点击就用；桌面悬停时加深一档。
+
+   两个排版约束（都是实测踩出来的）：
+   1. 必须 `grid-column: 1 / -1` 占满整行 —— 放进气泡里时，用户气泡 max-width:80% 会把
+      三个按钮挤成两行（手机上尤其明显）。所以它在 JSX 里排在同一条消息的 body **外面**。
+   2. `flex-wrap: nowrap`：按钮文字很短（复制 / 回到此处 / 删除此轮），320px 屏也放得下，
+      宁可靠左靠右挤一挤，也不要折行。 */
 .cf-msg__acts {
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 2px;
   margin-top: 2px;
-  /* 与气泡同侧：用户消息靠右，助手消息靠左（.cf-msg.is-user 里覆盖） */
+  flex-wrap: nowrap;
   justify-content: flex-start;
-  flex-wrap: wrap;
 }
+/* 助手消息：与正文左对齐（让开头绕过头像那一列） */
+.cf-msg:not(.is-user) .cf-msg__acts {
+  padding-left: calc(32px + var(--space-3));
+}
+/* 用户消息：靠右，与气泡同侧 */
 .cf-msg.is-user .cf-msg__acts {
   justify-content: flex-end;
 }
