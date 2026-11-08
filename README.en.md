@@ -141,6 +141,8 @@ This port puts the desktop app's full power behind a browser:
 **Do not expose this publicly with a weak password**, and don't run it on a shared machine.
 The server's PTY and filesystem are fully available to anyone who logs in.
 
+Provider API keys are encrypted at rest with AES-256-GCM, but the key file `web-secret.key` lives in the same `$DEVA_HOME` directory as the ciphertext `secrets.json`. Anyone who can read that directory — including the agent's own file tools — can decrypt those secrets; this protects against accidental single-file disclosure, not against reads under the same OS user. Because the agent's file tools and terminal have no path restrictions (a file-tool path denylist is intentionally omitted since shell access via the terminal would trivially bypass it), prompt injection from untrusted web content could coax the agent into reading those files. Run the service under a dedicated unprivileged Linux user for proper OS-level isolation, and always back up `web-secret.key` together with `secrets.json` — losing `web-secret.key` makes existing ciphertexts unrecoverable.
+
 ---
 
 ## Tracking upstream

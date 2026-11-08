@@ -34,6 +34,7 @@ import { WebSocketServer, type WebSocket } from 'ws'
 
 import {
   app,
+  safeStorage,
   invokeChannel,
   emitToMain,
   syncToMain,
@@ -41,6 +42,7 @@ import {
   fireNotifyClick,
   ipcMain as shimIpcMain
 } from './electron-shim'
+import { checkWsOrigin, resolveClientIp } from './net-guard'
 import { addClient, closeClient, requestClient, resolveRequest, clientCount, webWindow, broadcast } from './bus'
 import {
   COOKIE_NAME,
@@ -264,6 +266,8 @@ function bootServices(): void {
   registerConfigIpc()
   registerWorkspaceIpc(webWindowRef)
   registerSecretsIpc()
+  // 启动期预热密钥加载：若 secrets.json 已有密文而 web-secret.key 丢失，启动日志即刻打印明确告警
+  safeStorage.isEncryptionAvailable()
   registerProviderIpc()
   registerChatIpc(webWindowRef)
   registerRemoteIpc(webWindowRef)
@@ -471,9 +475,7 @@ const MIME: Record<string, string> = {
 }
 
 function clientIp(req: IncomingMessage): string {
-  const xff = req.headers['x-forwarded-for']
-  if (typeof xff === 'string' && xff.length > 0) return xff.split(',')[0].trim()
-  return req.socket.remoteAddress ?? 'unknown'
+  return resolveClientIp(req, process.env.DEVA_WEB_TRUST_PROXY)
 }
 
 function isSecure(req: IncomingMessage): boolean {
@@ -819,6 +821,11 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 512 * 1024 * 1024 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
   if (url.pathname !== '/ws') {
+    socket.destroy()
+    return
+  }
+  if (checkWsOrigin(req).action === 'deny') {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
     socket.destroy()
     return
   }

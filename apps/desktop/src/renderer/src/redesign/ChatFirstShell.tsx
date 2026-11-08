@@ -71,7 +71,7 @@ import {
   X
 } from 'lucide-react'
 import { BotsPane } from './BotsPane'
-import { useComposerEditor, type ComposerKey } from './composer-editor'
+import { useComposerEditor, type ComposerKey, type ComposerPasteEvent } from './composer-editor'
 import { UpdateSection } from './UpdateSection'
 import { MobileMenuButton } from '../web/MobileMenuButton'
 // 关于页的应用图标：直接用安装包图标的源文件，图形只维护一份
@@ -5333,8 +5333,8 @@ function Composer({
    *     但**只在「没有真正的文件项」时才让位给文本**——手机上复制图片常带一段空文本或 URL，
    *     早期写法直接 return false，图片就被当文本吞了。
    */
-  const onPaste = (e: ClipboardEvent): boolean => {
-    const dt = e.clipboardData
+  const onPaste = (e: ComposerPasteEvent): boolean => {
+    const dt = (e as ClipboardEvent).clipboardData ?? (e as InputEvent).dataTransfer
     if (!dt) return false
 
     // 先从 items 收文件（覆盖 files 为空的浏览器）

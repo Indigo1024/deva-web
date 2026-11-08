@@ -140,6 +140,8 @@ node out/web/ctl.cjs passwd
 
 别用弱密码暴露在公网，也别装在多人共用的机器上。登录的人能用服务器上的 shell 和整个文件系统。
 
+服务商密钥在落盘时用 AES-256-GCM 加密，但密钥文件 `web-secret.key` 与密文 `secrets.json` 放在同一个 `$DEVA_HOME` 目录里，能读该目录的系统用户或 Agent 的文件工具都能直接解密——它防的是单个文件意外泄露，不是同一系统用户下的读取。由于 Agent 的文件工具和终端都没有路径限制（不设文件工具路径黑名单，因为通过终端命令同样可绕过），网页抓取等外部内容里的提示注入可能诱导它去读这些文件；建议在服务器上新建专用的低权限 Linux 用户来运行服务，做好系统级隔离。另外备份数据时，`web-secret.key` 必须和 `secrets.json` 一起备份，丢了 `web-secret.key` 旧密文将无法解密。
+
 ## 跟着上游更新
 
 每次上游发版，合并之后都要检查 Web 层有没有被破坏——新的 IPC 通道、`BrowserWindow` 方法、`e.sender` 用法都可能让 Web 版在运行时崩掉。检查清单在 [docs/WEB.md](docs/WEB.md)。

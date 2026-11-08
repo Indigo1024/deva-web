@@ -8,8 +8,10 @@ import {
   $isElementNode,
   $isRangeSelection,
   $isTextNode,
+  BEFORE_INPUT_COMMAND,
   CLEAR_HISTORY_COMMAND,
   COMMAND_PRIORITY_HIGH,
+  CONTROLLED_TEXT_INSERTION_COMMAND,
   HISTORY_MERGE_TAG,
   KEY_ARROW_DOWN_COMMAND,
   KEY_ARROW_UP_COMMAND,
@@ -125,13 +127,15 @@ function $syncSlashToken(isToken: (name: string, whole: string) => boolean): voi
 /** 输入框交给外层处理的按键（其余按键走 Lexical 纯文本默认行为）。 */
 export type ComposerKey = 'enter' | 'up' | 'down' | 'tab' | 'escape'
 
+export type ComposerPasteEvent = ClipboardEvent | InputEvent | Event
+
 export interface ComposerEditorHandlers {
   /** 文本变化（含程序写入）；内容未变的更新（如仅移动光标）不触发。 */
   onChange: (text: string) => void
   /** 返回 true = 已处理（须自行 preventDefault），false = 交还编辑器默认行为。 */
   onKey: (key: ComposerKey, e: KeyboardEvent) => boolean
   /** 粘贴：返回 true = 已接管（如粘贴文件转附件），false = 按纯文本粘贴。 */
-  onPaste: (e: ClipboardEvent) => boolean
+  onPaste: (e: ComposerPasteEvent) => boolean
   /** 开头 `/name` 是否会生效（name 为去掉斜杠的原文，whole 为去首尾空白的整条消息）。 */
   isToken: (name: string, whole: string) => boolean
 }
@@ -209,9 +213,86 @@ export function useComposerEditor(handlers: ComposerEditorHandlers): ComposerEdi
       key(KEY_ARROW_DOWN_COMMAND, 'down'),
       key(KEY_TAB_COMMAND, 'tab'),
       key(KEY_ESCAPE_COMMAND, 'escape'),
+      // 粘贴命令拦截：涵盖标准 ClipboardEvent、移动端 insertFromPaste 等。
+      // 先让附件处理器嗅探文件/图片；纯文本则由 insertRawText 保真解构成 TextNode + LineBreakNode，防多行截断。
+      // 注意：Lexical 的 PASTE_COMMAND 是在 DOM 监听器直接派发的，未处于 update 上下文内，
+      // 读取与修改选区必须包裹在 editor.update 内，否则 $getSelection() 为 null。
       editor.registerCommand(
         PASTE_COMMAND,
-        (e) => e instanceof ClipboardEvent && handlersRef.current.onPaste(e),
+        (e) => {
+          if (handlersRef.current.onPaste(e)) return true
+          const dt = (e as ClipboardEvent).clipboardData ?? (e as InputEvent).dataTransfer
+          const text = dt?.getData('text/plain') ?? ((e as any).data as string | undefined)
+          if (typeof text === 'string' && text.length > 0) {
+            e.preventDefault()
+            editor.update(
+              () => {
+                const sel = $getSelection()
+                if ($isRangeSelection(sel)) {
+                  sel.insertRawText(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
+                }
+              },
+              { tag: 'paste' }
+            )
+            return true
+          }
+          return false
+        },
+        COMMAND_PRIORITY_HIGH
+      ),
+      // 移动端输入法剪贴板胶囊 / 语音输入 / 长文本注入：
+      // 在移动端（如 Gboard、搜狗输入法、iOS）从剪贴板点击或粘贴长文本时，会派发 beforeinput (insertText / insertReplacementText)，
+      // 若包含换行，原生 contentEditable 引擎会把后续行吞掉导致只剩首行（严重短节）；
+      // 在此提前拦截并以 insertRawText 完整录入。
+      editor.registerCommand(
+        BEFORE_INPUT_COMMAND,
+        (e) => {
+          const type = e.inputType
+          if (
+            type === 'insertText' ||
+            type === 'insertReplacementText' ||
+            type === 'insertFromPaste' ||
+            type === 'insertFromPasteAsQuotation' ||
+            type === 'insertFromYank' ||
+            type === 'insertFromDrop'
+          ) {
+            const dt = e.dataTransfer
+            if (dt && dt.files && dt.files.length > 0) {
+              if (handlersRef.current.onPaste(e)) {
+                e.preventDefault()
+                return true
+              }
+            }
+            const raw = dt?.getData('text/plain') ?? e.data
+            if (raw && (raw.includes('\n') || raw.includes('\r') || type.startsWith('insertFromPaste'))) {
+              e.preventDefault()
+              const sel = $getSelection()
+              if ($isRangeSelection(sel)) {
+                sel.insertRawText(raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
+              }
+              return true
+            }
+          }
+          return false
+        },
+        COMMAND_PRIORITY_HIGH
+      ),
+      // 兜底受控输入：含换行的文本改用 insertRawText 拆解为 LineBreakNode，杜绝单一 TextNode 包含 raw \n
+      editor.registerCommand(
+        CONTROLLED_TEXT_INSERTION_COMMAND,
+        (eventOrText) => {
+          const sel = $getSelection()
+          if (!$isRangeSelection(sel)) return false
+          const text =
+            typeof eventOrText === 'string'
+              ? eventOrText
+              : eventOrText.dataTransfer?.getData('text/plain') ?? eventOrText.data
+          if (typeof text === 'string' && (text.includes('\n') || text.includes('\r'))) {
+            sel.insertRawText(text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
+            return true
+          }
+          return false
+        },
         COMMAND_PRIORITY_HIGH
       ),
       // 拖入文件：不让 Lexical 按文本落入，事件继续冒泡，由外层在窗口级统一转成附件。

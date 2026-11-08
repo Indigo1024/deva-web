@@ -16,6 +16,9 @@ import { getDevaHome } from './config'
 let store: Record<string, string> = {}
 let filePath = ''
 let loaded = false
+let loading: Promise<void> | null = null
+let tmpSeq = 0
+let persistChain: Promise<void> = Promise.resolve()
 
 /** 从旧位置 userData/secrets.json 一次性迁移（密文原样搬运，加密不受路径影响）。 */
 async function migrateLegacy(): Promise<void> {
@@ -35,20 +38,40 @@ async function migrateLegacy(): Promise<void> {
 
 async function ensureLoaded(): Promise<void> {
   if (loaded) return
-  filePath = join(getDevaHome(), 'secrets.json')
-  try {
-    const raw = await fs.readFile(filePath, 'utf8')
-    const parsed = JSON.parse(raw)
-    if (parsed && typeof parsed === 'object') store = parsed as Record<string, string>
-  } catch {
-    // 新位置不存在：尝试从旧 userData 位置迁移一次
-    await migrateLegacy()
+  if (!loading) {
+    loading = (async () => {
+      filePath = join(getDevaHome(), 'secrets.json')
+      try {
+        const raw = await fs.readFile(filePath, 'utf8')
+        const parsed = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object') store = parsed as Record<string, string>
+      } catch {
+        // 新位置不存在：尝试从旧 userData 位置迁移一次
+        await migrateLegacy()
+      }
+      loaded = true
+    })().finally(() => {
+      loading = null
+    })
   }
-  loaded = true
+  await loading
 }
 
-async function persist(): Promise<void> {
-  await fs.writeFile(filePath, JSON.stringify(store, null, 2), 'utf8')
+function persist(): Promise<void> {
+  const writeOnce = async (): Promise<void> => {
+    const tmpPath = `${filePath}.${process.pid}.${++tmpSeq}.tmp`
+    try {
+      await fs.writeFile(tmpPath, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 })
+      await fs.rename(tmpPath, filePath)
+    } catch (e) {
+      await fs.unlink(tmpPath).catch(() => {})
+      throw e
+    }
+    await fs.chmod(filePath, 0o600).catch(() => {})
+  }
+  const next = persistChain.then(writeOnce, writeOnce)
+  persistChain = next.catch(() => {})
+  return next
 }
 
 /**

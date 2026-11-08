@@ -206,12 +206,39 @@ export const app = {
 
 // ── safeStorage：AES-256-GCM ──────────────────────────────────────────────
 let keyCache: Buffer | null = null
+let decryptWarned = false
+
+function hasNonEmptySecretsFile(homeDir: string): boolean {
+  try {
+    const sp = nodePath.join(homeDir, 'secrets.json')
+    if (!nodeFs.existsSync(sp)) return false
+    const raw = nodeFs.readFileSync(sp, 'utf8').trim()
+    if (!raw) return false
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return Object.keys(parsed).length > 0
+      }
+    } catch {
+      // 非空但无法解析为对象：保守视为已有内容
+    }
+    return true
+  } catch {
+    return false
+  }
+}
 
 function loadKey(): Buffer | null {
   if (keyCache) return keyCache
   try {
-    const p = nodePath.join(devaHome(), 'web-secret.key')
+    const homeDir = devaHome()
+    const p = nodePath.join(homeDir, 'web-secret.key')
     if (!nodeFs.existsSync(p)) {
+      if (hasNonEmptySecretsFile(homeDir)) {
+        console.error(
+          '[deva-web] 警告：已有密文但密钥文件缺失，已生成新密钥，旧密钥将无法解密，请从备份恢复 web-secret.key。'
+        )
+      }
       nodeFs.mkdirSync(nodePath.dirname(p), { recursive: true })
       const k = nodeCrypto.randomBytes(32)
       nodeFs.writeFileSync(p, k.toString('hex'), { mode: 0o600 })
@@ -241,13 +268,30 @@ export const safeStorage = {
   },
   decryptString(enc: Buffer): string {
     const k = loadKey()
-    if (!k) throw new Error('decryption unavailable')
-    const iv = Buffer.from(enc.subarray(0, 12))
-    const tag = Buffer.from(enc.subarray(12, 28))
-    const ct = Buffer.from(enc.subarray(28))
-    const d = nodeCrypto.createDecipheriv('aes-256-gcm', k, iv)
-    d.setAuthTag(tag)
-    return Buffer.concat([d.update(ct), d.final()]).toString('utf8')
+    if (!k) {
+      if (!decryptWarned) {
+        decryptWarned = true
+        console.error('[deva-web] 警告：safeStorage 解密失败（密钥不可用），后续同类错误不再重复打印。')
+      }
+      throw new Error('decryption unavailable')
+    }
+    try {
+      if (enc.length < 28) throw new Error('invalid ciphertext')
+      const iv = Buffer.from(enc.subarray(0, 12))
+      const tag = Buffer.from(enc.subarray(12, 28))
+      const ct = Buffer.from(enc.subarray(28))
+      const d = nodeCrypto.createDecipheriv('aes-256-gcm', k, iv)
+      d.setAuthTag(tag)
+      return Buffer.concat([d.update(ct), d.final()]).toString('utf8')
+    } catch (e) {
+      if (!decryptWarned) {
+        decryptWarned = true
+        console.error(
+          `[deva-web] 警告：safeStorage 解密失败（${e instanceof Error ? e.message : String(e)}），请检查 web-secret.key 是否与 secrets.json 匹配；后续同类错误不再重复打印。`
+        )
+      }
+      throw e
+    }
   }
 }
 

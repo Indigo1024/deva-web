@@ -98,6 +98,14 @@ cat ~/.deva/web-login.txt
 | `DEVA_WEB_STATIC` | `out/web/renderer` | 前端静态资源目录 |
 | `DEVA_WEB_PASSWORD` | 随机生成 | 首次初始化时的管理员密码（设了就不随机） |
 
+### 安全相关环境变量
+
+| 变量 | 可选值（默认） | 用途与适用场景 |
+| --- | --- | --- |
+| `DEVA_WEB_TRUST_PROXY` | `auto`（默认）/ `cloudflare` / `none` | 控制如何提取客户端真实 IP（用于登录失败限速）：`auto` 在回环/内网对端下取 `X-Forwarded-For` 末项，适合单层反代或 Cloudflare Tunnel；`cloudflare` 在内网对端下优先取 `CF-Connecting-IP`，适合 `Cloudflare → nginx → 服务` 多层链路；`none` 始终取连接对端 IP，适合无反代直连。 |
+| `DEVA_WEB_ORIGIN_CHECK` | `strict`（默认）/ `warn` / `off` | 控制 `/ws` WebSocket 升级的 `Origin` 校验策略（防跨站 WebSocket 劫持）：`strict` 在不匹配时拒绝连接；`warn` 仅打印告警并放行，适合迁移排障期观察；`off` 完全关闭校验。 |
+| `DEVA_WEB_ALLOWED_ORIGINS` | 空 | 逗号分隔的额外允许 `Origin` 列表（如 `https://deva.example.com,https://alt.example.com`），适用于反代未透传 `Host` 或多域名访问场景。 |
+
 ### 改密码 / 重置会话
 
 ```bash
@@ -179,6 +187,8 @@ location / {
     proxy_read_timeout 3600s;
 }
 ```
+
+反代信任说明：Cloudflare Tunnel 直接用默认值（`DEVA_WEB_TRUST_PROXY=auto`）即可；如果是 `Cloudflare → nginx → 服务` 这种多层链路，`X-Forwarded-For` 末尾会变成 Cloudflare 回源节点 IP，请设置 `DEVA_WEB_TRUST_PROXY=cloudflare` 以读取真实的 `CF-Connecting-IP`。
 
 ---
 
@@ -461,6 +471,12 @@ bash scripts/deva-update.sh --rollback  # 回滚到上一份产物
 
 渲染层去掉了右键菜单（`user-select: none`，可编辑区与代码块再放开），桌面客户端的主进程原生菜单也做了命中测试：落在 `.cf-msg` 上不弹，输入框等可编辑区保留剪切/复制/粘贴。
 
+**5. 移动端与输入法多行/长文本无损粘贴（防短节）**
+
+移动端（Android Gboard、搜狗、百度输入法剪贴板胶囊，iOS 粘贴与语音长文本）通常通过 `beforeinput`（`insertText` / `insertReplacementText` / `insertFromPaste`）或 `insertFromPaste` 派发文本，而非桌面标准 `ClipboardEvent`。若不拦截，原生 contentEditable 引擎会把多行内容切碎且仅落入首行（严重短节），或因事件非 `ClipboardEvent` 实例而被 Lexical 默认处理器吞没。
+
+`composer-editor.ts` 在 `PASTE_COMMAND`、`BEFORE_INPUT_COMMAND`、`CONTROLLED_TEXT_INSERTION_COMMAND` 三处高优先级拦截，用 `insertRawText` 将多行纯文本保真解构成 `TextNode` 与 `LineBreakNode`，无论带前缀还是空输入框、单行还是上万字长文本均完整落入。
+
 ---
 
 ## 移动端设计
@@ -507,7 +523,8 @@ git diff --name-only <老HEAD>..HEAD -- 'src/main/**' 'src/preload/**'
 5. **新的 `app.getPath()` / `app.isPackaged`？** → 确认 `electron-shim.ts` 的 `app` 替身能返回合理值
 6. **新增的启动期清扫 / 定时逻辑？** → web-server 的启动流程要跟着加（例：v0.1.9 的 `sweepMedia`）
 7. **桌面专用交互（打开文件、系统通知、托盘）？** → 前端要降级成 Web 可行的行为（下载、浏览器通知、忽略）
-8. **跑两个 typecheck + 构建 + 真机验证**
+8. **`src/main/services/secrets.ts` 有改动吗？** → 合并后确认 `persist()` 仍是 `0600` 权限 + 同目录临时文件原子改名 + Promise 链串行化写入
+9. **跑两个 typecheck + 构建 + 真机验证**
 
 ```bash
 npm run typecheck:web      # 前端
