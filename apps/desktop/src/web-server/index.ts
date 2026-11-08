@@ -28,6 +28,7 @@ import {
   writeSync
 } from 'fs'
 import { extname, join, normalize, resolve, dirname, basename, isAbsolute } from 'path'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { WebSocketServer, type WebSocket } from 'ws'
 
@@ -118,13 +119,53 @@ function loadAppTemplate(): string {
  *    进程启动时就把代码装进内存了，所以这个值在重启前不会变 —— 它才是「你正在用的版本」。
  *  - **source**：磁盘上源码目录的版本，读 apps/desktop/package.json。
  *    拉取了新源码但还没构建时，它会比 running 新 —— 这正是「有新代码但没生效」的信号。
- *  - **web**：Web 改版版本，读 apps/desktop/web-version.json。
+ *  - **web** / **webSource**：Web 改版版本，分别读产物里那份与源码目录那份。
+ *    同理，webSource !== web 就是「Web 层源码也更新了，同样待构建」。
  *
- * 早期版本优先读源码目录，结果 git merge 完还没构建，关于页就显示新版本号，
- * 实际跑的仍是旧代码 —— 看起来像「版本实时更新了」，其实是假的。
- * 现在两者分开：running 是事实，source 与它不一致时明确提示「源码已更新，待构建」。
+ * 光有版本号还说不清「差了多少」：上游合并后 deva-web 自己的 package.json 版本跟着上游走，
+ * 但改版可能只动 Web 层、版本号不动。故再加一层事实证据：
+ *  - **buildCommit** / **builtAt**：构建产物是用哪个提交、什么时候构建的（build-web.mjs 写进 build-info.json）；
+ *  - **sourceCommit**：磁盘源码目录此刻的 HEAD（git 读不到则为空，如 zip 部署）。
+ *  两者不同就是「磁盘上有更新的代码，跑着的还是旧的」，关于页据此直说，不靠版本号猜。
  */
-function readVersionInfo(): { running: string; source: string; web: string; stale: boolean } {
+interface VersionInfo {
+  running: string
+  source: string
+  web: string
+  webSource: string
+  /** 源码版本与运行版本不一致 → 磁盘上已有更新的代码，等构建重启才生效。 */
+  stale: boolean
+  /** Web 改版版本与源码里那份不一致 → 同上。 */
+  webStale: boolean
+  /** 构建产物的来源提交（短 sha，非 git 部署为空串）。 */
+  buildCommit: string
+  /** 构建时间（ISO，读不到为空串）。 */
+  builtAt: string
+  /** 磁盘源码目录当前的提交（短 sha，读不到为空串）。 */
+  sourceCommit: string
+}
+
+/** 源码目录 HEAD（带短缓存：关于页每次渲染页面都会读一次，别每回都 fork 一个 git）。 */
+let headCache: { at: number; value: string } | null = null
+function readSourceCommit(srcDir: string): string {
+  const now = Date.now()
+  if (headCache && now - headCache.at < 5_000) return headCache.value
+  let value = ''
+  try {
+    value = execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+      cwd: srcDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3_000
+    }).trim()
+  } catch {
+    value = ''
+  }
+  headCache = { at: now, value }
+  return value
+}
+
+function readVersionInfo(): VersionInfo {
   const read = (p: string, key: string): string => {
     try {
       const o = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>
@@ -142,17 +183,35 @@ function readVersionInfo(): { running: string; source: string; web: string; stal
   const running = read(join(outDir, 'package.json'), 'version')
   const source = read(join(srcDir, 'package.json'), 'version')
   // Web 改版版本同样以「产物里那份」为准：它随产物一起拷贝，能反映实际在跑的改版。
-  // 源码目录仅作兜底（比如只部署产物、没有源码的机器）。
   const web = existsSync(join(outDir, 'web-version.json'))
     ? read(join(outDir, 'web-version.json'), 'webVersion')
     : read(join(srcDir, 'web-version.json'), 'webVersion')
+  // 源码目录那份：与上面不同即「Web 层源码也更新了」
+  const webSource = read(join(srcDir, 'web-version.json'), 'webVersion')
+  // 构建来源（build-web.mjs 写出；老产物没有这个文件，回落空值）
+  const build = ((): { commit: string; builtAt: string } => {
+    try {
+      const o = JSON.parse(readFileSync(join(outDir, 'build-info.json'), 'utf8')) as Record<string, unknown>
+      return { commit: String(o.commit ?? ''), builtAt: String(o.builtAt ?? '') }
+    } catch {
+      return { commit: '', builtAt: '' }
+    }
+  })()
+  const sourceCommit = existsSync(join(srcDir, '.git')) || existsSync(join(srcDir, '..', '..', '.git'))
+    ? readSourceCommit(join(srcDir, '..', '..'))
+    : ''
 
   return {
     running,
     source,
     web,
+    webSource,
     // 源码版本与运行版本不同 → 磁盘上已有更新的代码，等构建重启才生效
-    stale: source !== '0.0.0' && running !== '0.0.0' && source !== running
+    stale: source !== '0.0.0' && running !== '0.0.0' && source !== running,
+    webStale: webSource !== '0.0.0' && web !== '0.0.0' && webSource !== web,
+    buildCommit: build.commit,
+    builtAt: build.builtAt,
+    sourceCommit
   }
 }
 
@@ -247,12 +306,58 @@ function registerWebChannels(): void {
   shimIpcMain.handle('window:is-fullscreen', () => false)
   shimIpcMain.handle('app:get-platform', () => 'linux')
   registerDeliverablesWeb()
+  // 内置浏览器（上游 v0.1.13）在 Web 版整体不可用：构建期已把 ./browser 换成替身
+  // （src/web-server/browser-unavailable.ts），这里只需让界面侧的查询有个正常应答 ——
+  // 胶囊组件拿到空状态就不渲染，界面上不会出现浏览器相关的死界面。
+  registerBrowserWeb()
   // 通知点击回流（浏览器点了通知 → 触发主进程 Notification click 回调）
   shimIpcMain.on('web:notify-click', (_e: unknown, id: string) => fireNotifyClick(id))
   // 剪贴板同步（浏览器聚焦时把本机剪贴板送进服务端缓存）
   shimIpcMain.on('web:clipboard-cache', (_e: unknown, text: string) => {
     ;(globalThis as any).__devaClipboardCache = typeof text === 'string' ? text : String(text ?? '')
   })
+}
+
+// ── 内置浏览器（Web 版不可用） ───────────────────────────────────────────────
+/**
+ * 上游 v0.1.13 的「Deva 浏览器」靠 Electron 的 WebContentsView + debugger/CDP + 屏幕外窗口续跑，
+ * 服务端没有窗口这一层，无法实现（要做得另写一份无头 Chromium 的 pages/host）。
+ *
+ * 所以 Web 版：
+ *  · 构建期把 main/services/browser 换成替身 → browser 工具不出现，模型不会去调；
+ *  · 界面侧的查询回一个「空状态」→ 胶囊组件（本对话打开过网页才出现）永远不渲染；
+ *  · 其余动作统一回 ok:false，万一有残留调用也不会静默失败。
+ */
+function registerBrowserWeb(): void {
+  const empty = {
+    open: false,
+    pinned: false,
+    active: null,
+    tabs: [] as unknown[],
+    current: {} as Record<string, string>,
+    operating: {} as Record<string, string>,
+    handoff: {} as Record<string, string>
+  }
+  shimIpcMain.handle('browser:state', () => empty)
+  shimIpcMain.handle('browser:ready', () => empty)
+  for (const ch of [
+    'browser:activate',
+    'browser:close-session',
+    'browser:close-tab',
+    'browser:dock',
+    'browser:handoff',
+    'browser:live-start',
+    'browser:live-stop',
+    'browser:menu',
+    'browser:nav',
+    'browser:open',
+    'browser:pin',
+    'browser:preview-pinned',
+    'browser:stop',
+    'browser:thumbnail'
+  ]) {
+    shimIpcMain.handle(ch, () => ({ ok: false }))
+  }
 }
 
 // ── 交付卡（present_files）Web 适配 ─────────────────────────────────────────

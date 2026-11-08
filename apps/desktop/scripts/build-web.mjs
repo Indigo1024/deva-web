@@ -15,6 +15,7 @@ import { build as esbuild } from 'esbuild'
 import { build as viteBuild } from 'vite'
 import react from '@vitejs/plugin-react'
 import { cpSync, mkdirSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -55,6 +56,23 @@ const webVersion = (() => {
 const UPSTREAM_REPO = 'https://github.com/sqfcyily/deva'
 const WEB_REPO = process.env.DEVA_WEB_REPO?.trim() || 'https://github.com/Indigo1024/deva-web'
 
+/**
+ * 本次构建对应的源码提交与时间，写进产物里的 build-info.json。
+ *
+ * 为什么要落一份：版本号文件（package.json / web-version.json）只能说明「源码树上是几版」，
+ * 说不清「此刻跑着的这份产物是用哪个提交构建的」。有了提交与构建时间，关于页就能把
+ * 「运行中」和「磁盘源码」摆在一起比，用户一眼看出差在哪、差多少（见 web-server 的 readVersionInfo）。
+ * 非 git 部署（zip 解压）拿不到提交，回落空串，关于页只显示构建时间。
+ */
+const buildCommit = (() => {
+  try {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+  } catch {
+    return ''
+  }
+})()
+const builtAt = new Date().toISOString()
+
 // 构建产物依赖外置（node_modules 就近解析；hoisted 布局下从 apps/desktop 起向上都能找到）
 const externalDeps = [
   'ws',
@@ -77,6 +95,20 @@ const shimPlugin = {
     b.onResolve({ filter: /^electron-updater$/ }, () => ({
       path: join(root, 'src', 'web-server', 'electron-updater-stub.ts')
     }))
+    /*
+     * 内置浏览器（上游 v0.1.13）是纯桌面的：WebContentsView 叠窗口 + debugger/CDP + 屏幕外窗口续跑，
+     * 服务端没有对应物。这里把 main/services 里对 './browser' 的引用换成替身：
+     *  · 不把 Electron 的 WebContentsView / screen 拖进 Node 包；
+     *  · browserToolSpec 置空 → browser 工具不出现在工具清单里；
+     *  · chat.ts 的调用点照常可调（空实现）。
+     * 只拦「main/services 目录下直接引用 ./browser」这一种写法，桌面源码零改动。
+     * main/index.ts 里的 './services/browser' 不在此列（web-server 有自己的引导，不打这个包）。
+     */
+    b.onResolve({ filter: /^\.\/browser$/ }, (args) => {
+      const importer = args.importer.replace(/\\/g, '/')
+      if (!importer.includes('/main/services/')) return null
+      return { path: join(root, 'src', 'web-server', 'browser-unavailable.ts') }
+    })
   }
 }
 
@@ -126,6 +158,11 @@ async function buildServer() {
   // 版本文件：服务端运行时读取（关于页「源码版 / Web 改版」双版本），必须随产物一起走
   cpSync(join(root, 'package.json'), join(outDir, 'package.json'))
   cpSync(join(root, 'web-version.json'), join(outDir, 'web-version.json'))
+  // 本次构建的来源（提交 + 时间）：关于页据此说清「跑的是哪一份」，并在源码更新后提示待构建
+  writeFileSync(
+    join(outDir, 'build-info.json'),
+    `${JSON.stringify({ commit: buildCommit, builtAt, appVersion, webVersion }, null, 2)}\n`
+  )
 
   // 管理工具 ctl（重置密码等）
   await esbuild({

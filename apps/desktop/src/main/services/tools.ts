@@ -109,7 +109,9 @@ export const toolSpecs: ToolSpec[] = [
       required: ['url']
     }
   },
-  browserToolSpec,
+  // browser 只在桌面客户端可用：Web 版构建把 ./browser 换成替身，browserToolSpec 为 null
+  // （见 src/web-server/browser-unavailable.ts 与 scripts/build-web.mjs 的解析覆盖）。
+  ...(browserToolSpec ? [browserToolSpec] : []),
   {
     name: 'write_file',
     description:

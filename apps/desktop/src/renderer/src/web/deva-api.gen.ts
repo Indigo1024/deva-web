@@ -4,6 +4,7 @@ import { webIpc as ipcRenderer } from './web-ipc'
 import type { EffortLevel } from '../../../shared/effort'
 import type { UpdateState } from '../../../shared/update'
 import type { DeliverableInfo } from '../../../shared/deliverables'
+import type { BrowserLiveFrame, BrowserUiState } from '../../../shared/browser'
 
 /** 目录项（单层）。 */
 export interface DirEntry {
@@ -56,6 +57,18 @@ export interface ChatSendRequest {
   /** 本对话生效的思考等级：发送时恒带上并落库（同 modelRef）。缺省 = 不改动已存值。 */
   effort?: EffortLevel
 }
+
+/**
+ * 回合进行中插入一条消息：当前步骤结束后交给模型，来不及就在本轮结束后作为普通消息发出（model 此时作回落）。
+ */
+export interface ChatInsertRequest {
+  sessionId: string
+  text: string
+  model: ChatModelConfig
+}
+
+/** idle = 回合刚结束（改走普通发送）；busy = 正在跑的不接受插入（如定时任务）；empty = 正文为空。 */
+export type ChatInsertResult = { ok: true } | { ok: false; reason: 'idle' | 'busy' | 'empty' }
 
 /** 手动 /compact 压缩请求（无用户文本、无后续模型轮；locale 在主进程解析）。 */
 export interface ChatCompactRequest {
@@ -129,6 +142,8 @@ export interface ChatSessionMeta {
   model?: string
   /** 本对话思考等级；缺省 = 尚未定格（渲染层打开时定格为「最近使用」）。 */
   effort?: EffortLevel
+  /** 已归档（不在左侧对话列表里显示）；缺省 = 未归档。 */
+  archived?: boolean
 }
 
 /** 角色名片草稿（与 services/chat.ts 的 AgentDraft 对齐）。 */
@@ -153,7 +168,7 @@ export type DisplayBlock =
   | { kind: 'tool'; id: string; name: string; args: unknown; status: 'ok' | 'error' | 'running'; summary?: string }
   | {
       kind: 'notice'
-      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
+      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted' | 'step_limit' | 'repeated'
     }
   /** 较早历史已压缩：一行提示，摘要正文（已去掉写给模型的开头）默认折叠。 */
   | { kind: 'compaction'; summary: string }
@@ -470,7 +485,7 @@ export interface TaskAuthorization {
 export interface TaskRun {
   firedAt: number
   finishedAt?: number
-  status: 'ok' | 'error' | 'skipped'
+  status: 'ok' | 'error' | 'skipped' | 'aborted'
   summary?: string
   error?: string
 }
@@ -745,6 +760,12 @@ export type ChatStreamEvent =
       /** notify：本轮由后台任务通知自动发起，text 为通知标题。 */
       user: { text: string; attachments: { name: string; kind: 'image' | 'document' | 'text' | 'archive' }[]; notify?: true }
     }
+  /** 插入的消息已随本步工具结果交给模型：执行步骤里添一个节点。 */
+  | { type: 'insert'; text: string }
+  /** 该对话待送达的插入消息（会话级，turnId 为空串）；空数组 = 没有。 */
+  | { type: 'inserts'; pending: string[] }
+  /** 回合被停止或出错，待送达的插入消息退回（会话级，turnId 为空串）：放回该对话的输入框。 */
+  | { type: 'inserts_returned'; text: string }
   /** durationMs：本轮耗时（扣除等用户处置的时间）。 */
   | { type: 'done'; stopReason: string; durationMs?: number }
 
@@ -956,6 +977,11 @@ const api = {
   chat: {
     send: (req: ChatSendRequest): Promise<{ turnId: string }> =>
       ipcRenderer.invoke('chat:send', req),
+    /** 回合进行中插入一条消息（见 ChatInsertRequest）。 */
+    insert: (req: ChatInsertRequest): Promise<ChatInsertResult> => ipcRenderer.invoke('chat:insert', req),
+    /** 撤回某对话全部待送达的插入消息，返回合并后的原文（没有则为空串）。 */
+    withdrawInserts: (sessionId: string): Promise<{ text: string }> =>
+      ipcRenderer.invoke('chat:withdraw-inserts', sessionId),
     /** 手动压缩历史（/compact）：无后续模型轮，只回发 compacted + done 事件。 */
     compact: (req: ChatCompactRequest): Promise<{ turnId: string }> =>
       ipcRenderer.invoke('chat:compact', req),
@@ -963,7 +989,7 @@ const api = {
     createSession: (req: ChatCreateSessionRequest): Promise<{ ok: true }> =>
       ipcRenderer.invoke('chat:create-session', req),
     /** 切换本对话模型并立即落库（不等下一次发送）。 */
-    setModel: (req: ChatSetModelRequest): Promise<{ ok: true }> =>
+    setModel: (req: ChatSetModelRequest): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('chat:set-model', req),
     /** 切换本对话思考等级并立即落库（不等下一次发送）。 */
     setEffort: (req: ChatSetEffortRequest): Promise<{ ok: true }> =>
@@ -974,6 +1000,9 @@ const api = {
     /** 重命名对话并立即落库，回传最终标题（清空即恢复自动标题）；尚未建档的会话回 null。 */
     renameSession: (req: ChatRenameSessionRequest): Promise<{ title: string } | null> =>
       ipcRenderer.invoke('chat:rename-session', req),
+    /** 归档 / 取消归档并立即落库（不改顺序）；尚未建档的会话回 ok:false。 */
+    setArchived: (req: { sessionId: string; archived: boolean }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('chat:set-archived', req),
     abort: (turnId: string): Promise<{ ok: true }> => ipcRenderer.invoke('chat:abort', turnId),
     /** 停止一个后台运行的子智能体（toolUseId = 其 Task 卡 id）；已结束 / 不存在回 ok:false。 */
     stopSubagent: (sessionId: string, toolUseId: string): Promise<{ ok: boolean }> =>
@@ -1239,6 +1268,57 @@ const api = {
    * 检查更新（设置 → 关于）。状态由主进程持有，经 onState 推送；check / download / install 只负责触发。
    * download：Windows exe 安装的在应用内下载，其余在浏览器里打开安装包直链。
    */
+  /**
+   * 内置浏览器（Deva 操作网页用）。主窗口输入框上方的胶囊与「Deva 浏览器」窗口的外框共用：状态经 onState 推送；
+   * 窗口收起时网页在屏幕外继续运行。
+   */
+  browser: {
+    getState: (): Promise<BrowserUiState> => ipcRenderer.invoke('browser:state'),
+    /** 外框界面载入完成，拉一次状态。 */
+    ready: (): Promise<BrowserUiState> => ipcRenderer.invoke('browser:ready'),
+    onState: (cb: (state: BrowserUiState) => void): (() => void) => {
+      const listener = (_e: unknown, state: BrowserUiState): void => cb(state)
+      ipcRenderer.on('browser:state', listener)
+      return () => ipcRenderer.removeListener('browser:state', listener)
+    },
+    /** 展开窗口：切到指定标签，或某个对话的当前标签。 */
+    open: (opts: { tab?: string; sessionId?: string } = {}): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('browser:open', opts),
+    /** 收起到胶囊（网页继续在后台运行）。 */
+    dock: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('browser:dock'),
+    /** 关闭某对话打开的全部网页（正等用户操作时不关，返回 ok:false）。 */
+    closeSession: (sessionId: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('browser:close-session', sessionId),
+    /** 胶囊预览卡「固定」着看哪个标签（null = 没固定）：用户正在看，Deva 关不掉、闲置也不回收。 */
+    setPreviewPinned: (tab: string | null): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('browser:preview-pinned', tab),
+    /** 预览卡开始显示某个标签的实时画面（同一时间只推一个标签）；帧经 onLiveFrame 到达。 */
+    liveStart: (tab: string): Promise<boolean> => ipcRenderer.invoke('browser:live-start', tab),
+    liveStop: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('browser:live-stop'),
+    onLiveFrame: (cb: (frame: BrowserLiveFrame) => void): (() => void) => {
+      const listener = (_e: unknown, frame: BrowserLiveFrame): void => cb(frame)
+      ipcRenderer.on('browser:live-frame', listener)
+      return () => ipcRenderer.removeListener('browser:live-frame', listener)
+    },
+    pin: (on: boolean): Promise<{ ok: boolean }> => ipcRenderer.invoke('browser:pin', on),
+    activate: (tab: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('browser:activate', tab),
+    closeTab: (tab: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('browser:close-tab', tab),
+    nav: (tab: string, what: 'back' | 'forward' | 'reload' | 'stop'): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('browser:nav', tab, what),
+    /**
+     * 标签条「⋯」的系统菜单（前进 / 刷新 / 复制链接 / 在系统浏览器中打开），弹在窗口内坐标 at；菜单关闭后才返回。
+     * labels 是各项文案（forward、reload、stopLoading、copyLink、openExternal），由外框按界面语言传入。
+     */
+    menu: (tab: string, labels: Record<string, string>, at: { x: number; y: number }): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('browser:menu', tab, labels, at),
+    /** 网页当前画面的缩略图（data URL，宽 480）；取不到返回 null。 */
+    thumbnail: (tab: string): Promise<string | null> => ipcRenderer.invoke('browser:thumbnail', tab),
+    /** 等用户操作时的「完成，继续」/「跳过」。 */
+    handoff: (sessionId: string, answer: 'done' | 'skip'): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('browser:handoff', sessionId, answer),
+    /** 停止该对话正在进行的回合。 */
+    stop: (sessionId: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('browser:stop', sessionId)
+  },
   update: {
     getState: (): Promise<UpdateState> => ipcRenderer.invoke('update:get-state'),
     check: (): Promise<void> => ipcRenderer.invoke('update:check'),

@@ -3772,17 +3772,9 @@ function Conversation({
   const [atBottom, setAtBottom] = useState(true)
 
   // 选择态（按轮删除）：selecting=是否在选择模式；selected=选中的轮下标集合（0 基，与 groupTurns 一致）。
+  // 入口是标题栏的「选择」。早先由聊天区右键菜单进入，现已去掉右键菜单（复制等动作改成每条消息下面的操作行）。
   const [selecting, setSelecting] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(() => new Set())
-  // 右键菜单：记录光标位置、命中的轮下标（turn=null 表示未落在某一轮上），以及右键那一刻的选中文字与是否可删。
-  // selection 有值 → 提供「复制」；canDelete（非流式且有内容）→ 提供「选择删除」。二者各自独立成项。
-  const [ctxMenu, setCtxMenu] = useState<{
-    x: number
-    y: number
-    turn: number | null
-    selection: string
-    canDelete: boolean
-  } | null>(null)
   // 每条消息所属轮下标：与 groupTurns 同源（每遇 user +1），前言为 -1；供常态渲染在根节点标注 data-turn。
   const turnOf = useMemo(() => {
     const arr: number[] = []
@@ -4013,28 +4005,8 @@ function Conversation({
       if (done) exitSelect()
     })()
   }
-  // 聊天区右键：按当下情形组装菜单。
-  // - 选中文字 → 提供「复制」（不论是否流式，复制只读无副作用）；
-  // - 非流式且有内容 → 提供「选择删除」（流式/改写中删除会撞上正在变的 messages，故此时不给）。
-  // 选择态下让位给选择态自身交互；既无选中又不可删则不接管右键（放行系统默认菜单）。
-  const onMsgsContextMenu = (e: React.MouseEvent): void => {
-    if (selecting) return
-    const selection = (window.getSelection()?.toString() ?? '').trim()
-    const canDelete = !streaming && messages.length > 0
-    if (!selection && !canDelete) return
-    e.preventDefault()
-    const hit = (e.target as HTMLElement).closest('[data-turn]') as HTMLElement | null
-    const n = hit ? Number(hit.dataset.turn) : NaN
-    const turn = Number.isInteger(n) && n >= 0 ? n : null
-    setCtxMenu({ x: e.clientX, y: e.clientY, turn, selection, canDelete })
-  }
-  // 复制选中文字到系统剪贴板：优先走原生 clipboard 桥（sandbox 下最稳），失败回退 navigator.clipboard。
-  const copySelection = (text: string): void => {
-    if (!text) return
-    void window.deva?.clipboard?.writeText(text).catch(() => {
-      void navigator.clipboard?.writeText(text).catch(() => {})
-    })
-  }
+  // 聊天区右键改为「什么都不弹」：消息体已 user-select:none，长按不会拉起原生选择菜单，
+  // 桌面的右键菜单也一并去掉 —— 复制 / 回滚到此处 / 删除此轮都排在每条消息下面（见 MsgActions）。
   // 会话内消息被删空（选中全部轮）后自动退出选择态，避免停留在空白选择界面。
   useEffect(() => {
     if (selecting && messages.length === 0) exitSelect()
@@ -4056,7 +4028,6 @@ function Conversation({
     setAtBottom(true)
     setSelecting(false)
     setSelected(new Set())
-    setCtxMenu(null)
     setRewind(null)
     setActiveTurn(-1)
     restoreRef.current = null
@@ -4164,6 +4135,9 @@ function Conversation({
       elapsedSec={i === messages.length - 1 ? streamStatus.elapsedSec : 0}
       footer={statusInMsg && !selecting && i === messages.length - 1 ? statusLine : undefined}
       dataTurn={turn}
+      actions={!selecting}
+      onRewindTurn={(n) => openRewind(n)}
+      onDeleteTurn={(n) => void onDeleteTurns([n])}
       onAsk={onAsk}
       onPlan={onPlan}
       onMountReq={onMountReq}
@@ -4196,16 +4170,24 @@ function Conversation({
             </button>
           </>
         )}
+        {/* 多轮删除的入口：原来藏在聊天区右键菜单里，现在固定在标题栏（右键菜单已整体去掉，见下方说明）。 */}
+        {!selecting && !streaming && messages.length > 0 && (
+          <button className="cf-conv__headbtn" onClick={() => setSelecting(true)}>
+            <ListChecks size={13} />
+            {t('cf.select')}
+          </button>
+        )}
       </div>
 
-      {/* 删除入口在聊天区右键唤起（见 onMsgsContextMenu）；选择态由右键菜单的「选择删除」开启。 */}
+      {/* 聊天区不再接管右键：长按 / 右键一律不弹菜单（连带浏览器原生菜单也一并挡掉），
+          复制、回滚到此处、删除此轮都做成每条消息下面的操作行按钮（见 MsgActions）。 */}
       {/* .cf-convmid 只为给右侧轮次索引面板提供定位上下文（.cf-msgs 自身会滚动，面板不能放里面）。 */}
       <div className="cf-convmid">
         <div
           className="cf-msgs"
           ref={scrollRef}
           onScroll={onScroll}
-          onContextMenu={onMsgsContextMenu}
+          onContextMenu={(e) => e.preventDefault()}
         >
           <div className={`cf-msgs__inner${selecting ? ' is-selecting' : ''}`}>
             {messages.length === 0 ? (
@@ -4262,43 +4244,6 @@ function Conversation({
         )}
       </div>
 
-      {ctxMenu && (
-        <ContextMenu
-          x={ctxMenu.x}
-          y={ctxMenu.y}
-          onClose={() => setCtxMenu(null)}
-          items={[
-            ...(ctxMenu.selection
-              ? [
-                  {
-                    label: t('common.copy'),
-                    icon: <Copy size={14} />,
-                    onClick: () => copySelection(ctxMenu.selection)
-                  }
-                ]
-              : []),
-            // 落在某一轮上才给：回到的是「这一轮开始之前」，前言区（压缩摘要等）不算轮。
-            ...(ctxMenu.canDelete && ctxMenu.turn !== null && canRewind
-              ? [
-                  {
-                    label: t('cf.rewind.here'),
-                    icon: <RotateCcw size={14} />,
-                    onClick: () => openRewind(ctxMenu.turn)
-                  }
-                ]
-              : []),
-            ...(ctxMenu.canDelete
-              ? [
-                  {
-                    label: t('cf.selectToDelete'),
-                    icon: <ListChecks size={14} />,
-                    onClick: () => setSelecting(true)
-                  }
-                ]
-              : [])
-          ]}
-        />
-      )}
 
       {selecting ? (
         <div className="cf-selbar">
@@ -4509,6 +4454,98 @@ function UserText({ text }: { text: string }): React.JSX.Element {
 const NO_HOLD =
   '.msg__process [aria-expanded="true"], .ask:not(.is-answered), .msg__plan:not(.is-decided), .msg__mount:not(.is-decided)'
 
+/**
+ * 单条消息底部的操作行：复制 / 回滚到此处 / 删除此轮。
+ *
+ * 为什么排到气泡下面，而不是右键菜单或长按：
+ *  · 手机上长按会先撞上浏览器原生的「选择文字」菜单（选择手柄、拷贝/查询弹层），既慢又不好点，
+ *    应用自己的长按菜单也被它盖住；
+ *  · 桌面上右键菜单要靠鼠标找位置，还要先选中文字才有「复制」。
+ * 把这些动作固定排在每条消息下面：一次点击就能用，长按与右键一律不再弹菜单
+ * （消息体的 user-select 已在 redesign.css 关掉；需要精确复制片段时在代码块里拖选——代码块自带复制按钮）。
+ *
+ * 复制取该条消息的正文（助手消息取全部 text 块，不含思考与工具过程）。turn 为 undefined 或 <0 时
+ * 不给删除与回滚：前言区（压缩摘要等）不属于任何一轮，删不了也回滚不了。
+ */
+function MsgActions({
+  text,
+  turn,
+  canAct,
+  onRewind,
+  onDelete
+}: {
+  /** 该条消息的正文（复制的内容）。 */
+  text: string
+  /** 该条消息所属轮下标；undefined / <0 = 前言，不给删除与回滚。 */
+  turn?: number
+  /** 是否可执行有副作用的动作（回合进行中一律不给：删除 / 回滚会撞上正在变的 messages）。 */
+  canAct: boolean
+  onRewind?: (turn: number) => void
+  onDelete?: (turn: number) => void
+}): React.JSX.Element {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const copy = (): void => {
+    const v = text
+    if (!v) return
+    const done = (): void => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    }
+    // 首选浏览器 / 桌面自带的系统剪贴板（同代码块复制按钮）；被权限或非安全上下文拦下时，
+    // 回落到主进程剪贴板桥（Web 版它会把写入广播回浏览器，用户照样能粘贴）。
+    const viaBridge = (): void => {
+      try {
+        void Promise.resolve(window.deva?.clipboard?.writeText(v)).then(done).catch(() => {})
+      } catch {
+        /* noop */
+      }
+    }
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(v).then(done).catch(viaBridge)
+    } else {
+      viaBridge()
+    }
+  }
+  const turnable = canAct && typeof turn === 'number' && turn >= 0
+  return (
+    <div className="cf-msg__acts">
+      <button
+        type="button"
+        className="cf-msg__act"
+        onClick={copy}
+        title={t('common.copy')}
+        aria-label={t('common.copy')}
+      >
+        {copied ? <Check size={13} /> : <Copy size={13} />}
+        <span>{copied ? t('chat.md.copied') : t('common.copy')}</span>
+      </button>
+      {turnable && onRewind && (
+        <button
+          type="button"
+          className="cf-msg__act"
+          onClick={() => onRewind(turn as number)}
+          title={t('cf.rewind.here')}
+        >
+          <RotateCcw size={13} />
+          <span>{t('cf.rewind.here')}</span>
+        </button>
+      )}
+      {turnable && onDelete && (
+        <button
+          type="button"
+          className="cf-msg__act cf-msg__act--danger"
+          onClick={() => onDelete(turn as number)}
+          title={t('cf.deleteTurn')}
+        >
+          <Trash2 size={13} />
+          <span>{t('cf.deleteTurn')}</span>
+        </button>
+      )}
+    </div>
+  )
+}
+
 /** 单条消息：IM 头像外壳 + 复用 features/chat/blocks 的 BlockView（安全渲染器不重写）。 */
 function ConvMessage({
   msg,
@@ -4518,6 +4555,9 @@ function ConvMessage({
   elapsedSec,
   footer,
   dataTurn,
+  actions,
+  onRewindTurn,
+  onDeleteTurn,
   onAsk,
   onPlan,
   onMountReq,
@@ -4535,6 +4575,12 @@ function ConvMessage({
   footer?: React.ReactNode
   /** 该消息所属的对话轮下标（0 基）；标注在根节点上，供右键菜单定位「删除此轮」。前言/未知为 undefined。 */
   dataTurn?: number
+  /** 是否在气泡下面画操作行（复制 / 回滚到此处 / 删除此轮）。选择态不画（点击要让给勾选）。 */
+  actions?: boolean
+  /** 操作行「回滚到此处」：回到该轮开始之前。 */
+  onRewindTurn?: (turn: number) => void
+  /** 操作行「删除此轮」：删掉该轮全部消息。 */
+  onDeleteTurn?: (turn: number) => void
   onAsk: (key: string, answers: string[]) => void
   onPlan: (key: string, decision: 'approve' | 'keep' | 'ignore', feedback?: string) => void
   onMountReq: (key: string, path: string | null) => void
@@ -4635,6 +4681,15 @@ function ConvMessage({
             </div>
           )}
           {text && <UserText text={text} />}
+          {actions && (
+            <MsgActions
+              text={text}
+              turn={dataTurn}
+              canAct={!active}
+              onRewind={onRewindTurn}
+              onDelete={onDeleteTurn}
+            />
+          )}
         </div>
         <Avatar user size={32} />
       </div>
@@ -4720,6 +4775,18 @@ function ConvMessage({
           )}
           {!active && <DeliveryCards blocks={msg.blocks} />}
           {footer}
+          {actions && (
+            <MsgActions
+              text={msg.blocks
+                .filter((b) => b.kind === 'text')
+                .map((b) => (b.kind === 'text' ? b.text : ''))
+                .join('\n\n')}
+              turn={dataTurn}
+              canAct={!active}
+              onRewind={onRewindTurn}
+              onDelete={onDeleteTurn}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -6975,18 +7042,48 @@ function AboutPane(): React.JSX.Element {
    *
    * - running：当前进程真正在跑的构建产物版本 —— 展示给用户看的是这个
    * - source：磁盘上源码目录的版本 —— 与 running 不同说明拉了新代码还没构建
-   * - stale：上面两者不一致，页面要明确提示「待构建」，不能假装已经是新版本
+   * - web / webSource：Web 改版版本（产物 / 源码各一份）
+   * - buildCommit / builtAt / sourceCommit：产物是用哪个提交、什么时候构建的，以及源码目录此刻的提交
+   * - stale / webStale：上面两组不一致，页面要明确提示「待构建」，不能假装已经是新版本
    *
    * 之前只显示 source，merge 完还没构建时版本号就跳了，看着像实时更新，
-   * 实际跑的仍是旧代码。现在把事实（running）和期望（source）分开说清楚。
+   * 实际跑的仍是旧代码。现在把事实（running）和期望（source）分开说清楚；
+   * 版本号相同的场合（改版只动 Web 层、或上游提交没升版本号）靠提交比对兜底，
+   * 所以「跑的是哪一份、磁盘上是不是更新的」始终看得出来。
    */
-  type VerInfo = { running?: string; source?: string; web?: string; stale?: boolean }
+  type VerInfo = {
+    running?: string
+    source?: string
+    web?: string
+    webSource?: string
+    stale?: boolean
+    webStale?: boolean
+    buildCommit?: string
+    builtAt?: string
+    sourceCommit?: string
+  }
   const runtimeVersions = (window as unknown as { __DEVA_VERSIONS__?: VerInfo }).__DEVA_VERSIONS__
   const runningVersion = runtimeVersions?.running ?? __APP_VERSION__
   const sourceVersion = runtimeVersions?.source ?? runningVersion
   const stale = Boolean(runtimeVersions?.stale)
   const webVersion =
     runtimeVersions?.web ?? (typeof __WEB_VERSION__ === 'string' ? __WEB_VERSION__ : null)
+  const webSource = runtimeVersions?.webSource
+  const webStale = Boolean(runtimeVersions?.webStale)
+  const buildCommit = runtimeVersions?.buildCommit ?? ''
+  const sourceCommit = runtimeVersions?.sourceCommit ?? ''
+  const builtAt = runtimeVersions?.builtAt ?? ''
+  // 提交不同 = 磁盘上确实有更新的代码（版本号没动也认得出来）
+  const commitNewer = Boolean(buildCommit && sourceCommit && buildCommit !== sourceCommit)
+  const pending = stale || webStale || commitNewer
+  const builtText = builtAt
+    ? (() => {
+        const d = new Date(builtAt)
+        return Number.isNaN(d.getTime())
+          ? builtAt
+          : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      })()
+    : ''
   return (
     <>
       <h2 className="cf-pane__title">{t('settings.about')}</h2>
@@ -7001,13 +7098,35 @@ function AboutPane(): React.JSX.Element {
             Web 改版 v{webVersion}
           </div>
         )}
+        {/* 构建来源：说明「此刻跑的是哪一份」。缺提交（zip 部署）时只显示构建时间。 */}
+        {(builtText || buildCommit) && (
+          <div className="cf-about__build">
+            当前运行：{builtText && `构建于 ${builtText}`}
+            {builtText && buildCommit && ' · '}
+            {buildCommit && `提交 ${buildCommit}`}
+          </div>
+        )}
         {/*
-         * 源码已更新但还没构建：如实提示。不显示成「已经是新版本」，
-         * 也不自动构建（那会在用户不知情时重启服务）。
+         * 磁盘源码比跑着的这份新：如实提示，并给出具体差在哪（版本号 / 提交），
+         * 不显示成「已经是新版本」，也不自动构建（那会在用户不知情时重启服务）。
          */}
-        {stale && (
+        {pending && (
           <div className="cf-about__stale">
-            磁盘上已有源码 v{sourceVersion}，当前运行的是 v{runningVersion}
+            {stale && (
+              <div>
+                磁盘上已有源码 v{sourceVersion}，当前运行的是 v{runningVersion}
+              </div>
+            )}
+            {webStale && (
+              <div>
+                Web 改版源码已是 v{webSource}，当前运行的是 v{webVersion}
+              </div>
+            )}
+            {commitNewer && (
+              <div>
+                磁盘源码已更新到提交 {sourceCommit}（当前运行的是 {buildCommit}）
+              </div>
+            )}
             <span className="cf-about__stale-hint">重新构建并重启后生效</span>
           </div>
         )}

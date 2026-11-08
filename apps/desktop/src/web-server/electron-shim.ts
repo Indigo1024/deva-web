@@ -290,6 +290,35 @@ export const net = {
   fetch: (input: any, init?: any): Promise<any> => (globalThis.fetch as any)(input, init)
 }
 
+// ── session：出站请求的「网络栈」替身 ──────────────────────────────────────
+/**
+ * 上游 v0.1.13 起，主进程的统一出站请求（main/http.ts）走 Chromium 网络栈
+ * （`session.fromPartition(...).fetch`），为的是绕开被第三方 DLL 搞坏的系统 Winsock、
+ * 并用系统证书库。纯 Node 进程里没有 Chromium，这里把同一个接口落到 Node 的全局 fetch 上：
+ *
+ *  · `fetch` 语义与 Chromium 的 `session.fetch` 一致（都是一个符合 fetch 规范的函数），
+ *    差别只在证书库与代理判定——桌面版的两条线路（直连 / 系统代理）在服务端无意义，
+ *    这里恒为直连（`resolveProxy` 返回 DIRECT，http.ts 据此不会走「换线路重试」分支）。
+ *  · 代理仍按上游口径认 HTTPS_PROXY / HTTP_PROXY / ALL_PROXY，但那由 http.ts 自己拼规则；
+ *    服务端的进程代理变量由 Node 侧（undici）按需处理，这里不改动请求本身。
+ *  · setProxy / cookies 等窗口侧能力是空实现：服务端不需要给「某分区」单独设代理。
+ */
+const sessionStub = {
+  fetch: (input: any, init?: any): Promise<any> => (globalThis.fetch as any)(input, init),
+  setProxy: async (): Promise<void> => {},
+  resolveProxy: async (): Promise<string> => 'DIRECT',
+  cookies: {
+    get: async (): Promise<any[]> => [],
+    set: async (): Promise<void> => {},
+    remove: async (): Promise<void> => {}
+  }
+}
+
+export const session = {
+  fromPartition: (_name: string): typeof sessionStub => sessionStub,
+  defaultSession: sessionStub
+}
+
 // ── clipboard：缓存 + 往返 ────────────────────────────────────────────────
 export const clipboard = {
   readText(): string {
