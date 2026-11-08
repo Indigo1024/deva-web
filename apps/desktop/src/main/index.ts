@@ -177,6 +177,12 @@ function createWindow(): void {
   // 编辑上下文菜单：Electron 默认不给可编辑元素任何原生右键菜单（故对话输入框无法右键粘贴）。
   // 这里补一个最小编辑菜单——可编辑处给 剪切/复制/粘贴/全选（按 editFlags 灰显不可用项，走原生
   // role 直接操作系统剪贴板）；非编辑但有选区时给 复制/全选。其余情形不弹菜单（保持干净）。
+  //
+  // 消息气泡例外（与 Web 版一致）：对话里的右键一律不弹任何菜单 —— 复制、回滚到此处、删除此轮
+  // 都做成了每条消息下面的操作行按钮（见 renderer 的 MsgActions），右键再弹一个原生菜单会与
+  // 「动作都在气泡下面」的交互打架，用户也反馈它挡着复核。判据是命中元素是否落在 .cf-msg 里
+  // （params 里没有 DOM 信息，只能问渲染层要一次命中测试）。
+  // 可编辑处（输入框、设置里的文本框）仍保留原生菜单：那里的右键粘贴/全选没法用操作行替代。
   mainWindow.webContents.on('context-menu', (_e, params) => {
     const win = mainWindow
     if (!win) return
@@ -185,31 +191,54 @@ function createWindow(): void {
       ? { cut: 'Cut', copy: 'Copy', paste: 'Paste', selectAll: 'Select All' }
       : { cut: '剪切', copy: '复制', paste: '粘贴', selectAll: '全选' }
     const { isEditable, editFlags } = params
-    const hasSelection = params.selectionText.trim().length > 0
-    const template: Electron.MenuItemConstructorOptions[] = []
     if (isEditable) {
-      template.push(
+      Menu.buildFromTemplate([
         { role: 'cut', label: L.cut, enabled: editFlags.canCut },
         { role: 'copy', label: L.copy, enabled: editFlags.canCopy },
         { role: 'paste', label: L.paste, enabled: editFlags.canPaste },
         { type: 'separator' },
         { role: 'selectAll', label: L.selectAll }
-      )
-    } else if (hasSelection) {
-      template.push(
+      ]).popup({ window: win })
+      return
+    }
+    const hasSelection = params.selectionText.trim().length > 0
+    void hitTestMessage(win, params.x, params.y).then((overMessage) => {
+      if (overMessage || win.isDestroyed() || !hasSelection) return
+      Menu.buildFromTemplate([
         { role: 'copy', label: L.copy, enabled: editFlags.canCopy },
         { type: 'separator' },
         { role: 'selectAll', label: L.selectAll }
-      )
-    }
-    if (template.length === 0) return
-    Menu.buildFromTemplate(template).popup({ window: win })
+      ]).popup({ window: win })
+    })
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+}
+
+/**
+ * 命中测试：右键位置是否落在某条消息（.cf-msg）里。
+ *
+ * main 进程的 'context-menu' 事件只给坐标与几个标志，没有 DOM 信息，所以只能向渲染层要一次命中测试。
+ * 坐标口径与 elementFromPoint 一致（相对视图左上角的 CSS 像素），少数缩放下可能有半像素偏差——
+ * 判据取「是否在消息里」，边界偏差最多让气泡边缘 1px 处弹不弹菜单有别，可接受。
+ * 渲染层不可用（未加载完 / 执行失败）时返回 false：宁可保留原生菜单，也不要让右键彻底失灵。
+ */
+async function hitTestMessage(win: BrowserWindow, x: number, y: number): Promise<boolean> {
+  try {
+    const hit = await win.webContents.executeJavaScript(
+      `(() => {
+        const el = document.elementFromPoint(${Math.round(x)}, ${Math.round(y)})
+        return !!(el && el.closest && el.closest('.cf-msg'))
+      })()`,
+      true
+    )
+    return hit === true
+  } catch {
+    return false
   }
 }
 
