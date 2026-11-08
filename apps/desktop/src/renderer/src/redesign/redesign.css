@@ -1707,8 +1707,23 @@ body.cf-resizing-y * {
   grid-template-columns: 32px minmax(0, 1fr);
   gap: var(--space-3);
 }
-.cf-msg__body {
+/*
+ * 每条消息内部的位置**全部显式指定**，不靠自动布局。
+ *
+ * 原因：用户消息的 .cf-ava 带着 `order: 2`（早先靠它把头像排到气泡之后）。CSS Grid 的自动放置
+ * 按 order 顺序走游标 —— 游标先给 body（第 1 行左列），再遇到跨整行的 .cf-msg__acts（第 1 行放不下，
+ * 顺延到第 2 行），最后轮到 order:2 的头像，它只能落到第 3 行第 1 列：头像跑到操作行**下面**、
+ * 还回到左边缘（实测 avLeft=404，本该是右侧 32px 那一列）。手机上同样错位。
+ * 显式写 grid-row/column 后与 order、DOM 顺序都无关，两个方向都不会再错。
+ */
+.cf-msg > .cf-ava {
+  grid-column: 1;
+  grid-row: 1;
+}
+.cf-msg > .cf-msg__body {
   min-width: 0;
+  grid-column: 2;
+  grid-row: 1;
   /* 消息体默认不参与文字选择：手机长按气泡不再拉起浏览器原生的「选择文字」菜单（选择手柄 +
      拷贝/搜索弹层），桌面右键也不再弹原生菜单 —— 复制、回滚到此处、删除此轮都做成气泡下面的
      操作行按钮（见 .cf-msg__acts 与 ChatFirstShell 的 MsgActions）。
@@ -1736,6 +1751,8 @@ body.cf-resizing-y * {
       宁可靠左靠右挤一挤，也不要折行。 */
 .cf-msg__acts {
   grid-column: 1 / -1;
+  /* 固定第 2 行：第 1 行是头像 + 气泡（见 .cf-msg > .cf-ava / .cf-msg > .cf-msg__body） */
+  grid-row: 2;
   display: flex;
   align-items: center;
   gap: 2px;
@@ -1844,6 +1861,9 @@ body.cf-resizing-y * {
 .cf-msg.is-user .cf-msg__body {
   justify-self: end;
   max-width: 80%;
+  /* 用户消息：气泡占左列（内容自身靠右），头像占右列 —— 位置靠显式列号，不靠 order */
+  grid-column: 1;
+  grid-row: 1;
 }
 .cf-msg.is-user .cf-msg__head {
   justify-content: flex-end;
@@ -1855,7 +1875,12 @@ body.cf-resizing-y * {
   border-top-right-radius: var(--radius-sm);
 }
 .cf-msg.is-user .cf-ava {
-  order: 2;
+  /* 位置改由显式 grid-column（.cf-msg.is-user .cf-ava 的列号规则见上方的显式布局块）决定。
+     这里保留 order: 0：早先靠 order: 2 把头像排到气泡之后，结果把自动放置游标带偏，
+     头像掉到操作行下面并跑回左边缘（见 .cf-msg 上方注释）。 */
+  grid-column: 2;
+  grid-row: 1;
+  order: 0;
 }
 
 /* 后台任务通知：后台子智能体结束后自动起的那一轮的起点，居中一行系统通知（不是用户说的话） */
