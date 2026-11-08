@@ -198,10 +198,15 @@ export type ChatBlock =
    */
   | {
       kind: 'notice'
-      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
+      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted' | 'step_limit' | 'repeated'
     }
   /** 较早历史已压缩为摘要（只来自主进程重建）：一行提示，摘要正文默认折叠、点开才显示。 */
   | { kind: 'compaction'; summary: string }
+  /**
+   * 回合进行中插入、已交给模型的消息：执行步骤里的一个节点，排在它送达时的两步之间（不计入步数）。
+   * 送达前的消息不在这里，显示在输入框上方的胶囊里（见 pendingInserts）。
+   */
+  | { kind: 'insert'; text: string }
 
 export interface ChatMessage {
   id: string
@@ -232,6 +237,8 @@ export interface SessionMeta {
   model?: string
   /** 本对话思考等级；缺省 = 尚未定格（打开时定格为「最近使用」）。见 chat store 的 bindings.effort。 */
   effort?: EffortLevel
+  /** 已归档（不在左侧对话列表里显示）；缺省 = 未归档。 */
+  archived?: boolean
 }
 
 /** send 接受的附件（路径给主进程读取，名称/类型用于本地乐观气泡）。 */
@@ -271,7 +278,7 @@ type DisplayBlock =
   | { kind: 'tool'; id: string; name: string; args: unknown; status: 'ok' | 'error' | 'running'; summary?: string }
   | {
       kind: 'notice'
-      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
+      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted' | 'step_limit' | 'repeated'
     }
   | { kind: 'compaction'; summary: string }
   | { kind: 'error'; message: string }
@@ -292,6 +299,7 @@ type DisplayBlock =
       feedback?: string
     }
   | { kind: 'todolist'; id: string; title: string; items: TodoItem[] }
+  | { kind: 'insert'; text: string }
 type DisplayMessage =
   | { role: 'user'; text: string; attachments: { name: string; kind: AttachKind }[]; notify?: true }
   | { role: 'assistant'; blocks: DisplayBlock[]; durationMs?: number }
@@ -365,6 +373,9 @@ type StreamEvent =
       type: 'turn_start'
       user: { text: string; attachments: { name: string; kind: AttachKind }[]; notify?: true }
     }
+  | { type: 'insert'; text: string }
+  | { type: 'inserts'; pending: string[] }
+  | { type: 'inserts_returned'; text: string }
   | { type: 'done'; stopReason: string; durationMs?: number }
 
 /**
@@ -427,6 +438,8 @@ interface ChatContextValue {
   deleteSession: (id: string) => void
   /** 重命名对话（立即落库）；title 为空即恢复自动标题（由首条用户消息派生）。不改列表顺序。 */
   renameSession: (id: string, title: string) => void
+  /** 归档 / 取消归档对话（立即落库）。不改列表顺序；在已归档的对话里发消息会由主进程自动取消归档。 */
+  setArchived: (id: string, archived: boolean) => void
   /**
    * 批量删除对话（删除角色时一并清理其名下历史）。一次性中止各自在跑回合、逐条落盘删除、清绑定
    * 覆盖层，最后只刷新一次列表；若当前会话在其中，则切到最近一条或起新会话。空数组为无操作。
@@ -503,9 +516,33 @@ interface ChatContextValue {
    * 结论随下一轮交给模型（不为此自动起一轮）。
    */
   stopSubagent: (toolId: string) => void
+  /**
+   * 回合进行中向当前会话插入一条消息：当前步骤结束后交给模型，来不及就在本轮结束后作为下一条发出。
+   * 回合恰好已经结束则改走普通发送。返回是否发出（false 时原因已 toast，调用方把文字放回输入框）。
+   */
+  insert: (text: string) => Promise<boolean>
+  /** 当前会话待送达的插入消息（输入框上方的胶囊），按插入先后。 */
+  pendingInserts: string[]
+  /** 撤回当前会话全部待送达的插入消息，返回合并后的原文（已送达或没有则为空串）。 */
+  withdrawInserts: () => Promise<string>
+  /**
+   * 订阅「插入消息被退回」（回合被停止或出错时还没送达）：(sessionId, 原文)。返回取消订阅函数。
+   * 由输入框所在的外壳把原文放回对应会话的输入框。
+   */
+  onInsertsReturned: (cb: (sessionId: string, text: string) => void) => () => void
 }
 
 const ChatContext = createContext<ChatContextValue | null>(null)
+
+/** 各会话「插入消息被退回」的订阅者（见 onInsertsReturned）。 */
+const insertReturnListeners = new Set<(sessionId: string, text: string) => void>()
+function onInsertsReturned(cb: (sessionId: string, text: string) => void): () => void {
+  insertReturnListeners.add(cb)
+  return () => {
+    insertReturnListeners.delete(cb)
+  }
+}
+const NO_INSERTS: string[] = []
 
 /** 空闲态的流式状态（归零）。 */
 /**
@@ -566,6 +603,8 @@ function displayToMessages(dms: DisplayMessage[]): ChatMessage[] {
         }
       // 历史回填：已完成的待办清单卡（条目取自主进程 todos 边车里令其完成的那次快照）。
       if (b.kind === 'todolist') return { kind: 'todolist', id: b.id, title: b.title, items: b.items }
+      // 历史回填：回合进行中插入的消息（执行步骤里的一个节点）。
+      if (b.kind === 'insert') return { kind: 'insert', text: b.text }
       const status: ToolStatus = b.status === 'error' ? 'error' : b.status === 'running' ? 'running' : 'ok'
       // 历史回填：run_subagent / send_to_subagent 复原为折叠 Task 卡（内部子调用不入父历史，故 children
       // 为空、仅存结论）。
@@ -789,6 +828,9 @@ function reduceBlocks(blocks: ChatBlock[], ev: StreamEvent): ChatBlock[] {
     case 'mount_request':
       next.push({ kind: 'mount', key: ev.key, tool: ev.tool, path: ev.path })
       return next
+    case 'insert':
+      next.push({ kind: 'insert', text: ev.text })
+      return next
     case 'error':
       next.push({ kind: 'error', message: ev.message })
       return next
@@ -808,9 +850,10 @@ function reduceBlocks(blocks: ChatBlock[], ev: StreamEvent): ChatBlock[] {
 function dropStepPartial(blocks: ChatBlock[]): ChatBlock[] {
   let lastTool = -1
   for (let i = blocks.length - 1; i >= 0; i--) {
-    // 工具卡、子智能体 Task 卡、已完成清单卡与步骤标记都是「步骤边界」：其后才是本步残缺的 thinking/text 尾部。
+    // 工具卡、子智能体 Task 卡、已完成清单卡、步骤标记与插入的消息（随上一步结果送达）都是「步骤边界」：
+    // 其后才是本步残缺的 thinking/text 尾部。
     const k = blocks[i].kind
-    if (k === 'tool' || k === 'subagent' || k === 'todolist' || k === 'step') {
+    if (k === 'tool' || k === 'subagent' || k === 'todolist' || k === 'step' || k === 'insert') {
       lastTool = i
       break
     }
@@ -845,12 +888,16 @@ function hasVisibleAnswer(blocks: ChatBlock[]): boolean {
  *   通篇为空才补一条「被拒绝」。**绝不并入空回合**：那会把拒绝谎报成上下文问题，误导排查；
  * - 自然结束（end_turn/stop）却通篇无可见回复：本轮未产生回复（原因不确定，文案不臆断）；
  * - aborted（用户主动停止）：标一条「已中止」——中止前的半截内容会随历史保留，得看得出是被打断的；
+ * - step_limit（定时任务达到步数上限）：标一条「已达到步数上限」——任务可能没做完；
+ * - repeated（同一工具同参数同结果连续出现到上限，被停下）：标一条说明；
  * - error（已另有红色错误块）不重复提示。
- * 与主进程 recordTurnNotice 同一套规则，故重开对话后所见一致。
+ * 与主进程 recordTurnNotice / runScheduledTurn 同一套规则，故重开对话后所见一致。
  * 无需补提示时返回原数组引用（updateLastAssistant 据引用相等短路，不触发无谓重渲染）。
  */
 function appendTerminalNotice(blocks: ChatBlock[], stopReason: string): ChatBlock[] {
   if (stopReason === 'aborted') return [...blocks, { kind: 'notice', code: 'aborted' }]
+  if (stopReason === 'step_limit') return [...blocks, { kind: 'notice', code: 'step_limit' }]
+  if (stopReason === 'repeated') return [...blocks, { kind: 'notice', code: 'repeated' }]
   if (stopReason === 'max_tokens') return [...blocks, { kind: 'notice', code: 'truncated' }]
   if (stopReason === 'refusal')
     return hasVisibleAnswer(blocks) ? blocks : [...blocks, { kind: 'notice', code: 'refused' }]
@@ -1012,6 +1059,9 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
   >(() => new Map())
   // 未读会话（键=sessionId）：不在查看时有回合完成即记入，切进该会话即清除。
   const [unread, setUnread] = useState<ReadonlySet<string>>(() => new Set())
+  // 别处发起、正在进行的回合（键=sessionId；定时任务 / 手机端）：turn_start 记入、done 移除。本层没缓存的
+  // 会话没有 runtime，列表头像的忙碌动效靠它；不然要点开（attachSession 建了 runtime）才看得到。
+  const [bgStreaming, setBgStreaming] = useState<ReadonlySet<string>>(() => new Set())
   // 每秒自增以触发重渲染，刷新当前所视会话「已用秒数」（不绑定变量，仅需其副作用）。
   const [, setTick] = useState(0)
 
@@ -1107,6 +1157,18 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     setTodoStates(map)
   }, [])
 
+  // 各会话待送达的插入消息（键=sessionId）：只由主进程的 inserts 事件更新（插入 / 送达 / 撤回 / 回合结束都会推）。
+  const [insertStates, setInsertStates] = useState<Map<string, string[]>>(() => new Map())
+  const setInsertState = useCallback((sid: string, pending: string[]): void => {
+    setInsertStates((prev) => {
+      if (!pending.length && !prev.has(sid)) return prev
+      const map = new Map(prev)
+      if (pending.length) map.set(sid, pending)
+      else map.delete(sid)
+      return map
+    })
+  }, [])
+
   // 只改某会话消息序列的便捷 patch（复用 updateLastAssistant 的引用短路，无变更则不提交）。
   const patchMessages = useCallback(
     (sid: string, mutate: (blocks: ChatBlock[]) => ChatBlock[]): void => {
@@ -1198,8 +1260,25 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     [refreshSessions]
   )
 
-  // 切项目：重载会话清单 + 载入最近一条到其活动态（无则起新会话）。
+  // 打开列表第一条：最近更新、且未归档的对话（已归档的不在列表里，不能跳进去），载入其历史；
+  // 一条都没有则起惰性新会话（右侧转「快速开启」）。启动 / 切项目，以及当前对话被删除或归档后都走这里。
   // 已有活动态（如后台正在流式的会话）不重载，避免冲掉实时累积的内容。
+  const openFirstSession = useCallback(
+    (list: SessionMeta[]): void => {
+      const first = list
+        .filter((s) => !s.archived)
+        .reduce<SessionMeta | null>((a, s) => (a && a.updatedAt >= s.updatedAt ? a : s), null)
+      if (!first) {
+        startFresh()
+        return
+      }
+      setCurrent(first.id)
+      if (!runtimesRef.current.has(first.id)) void attachSession(first.id)
+    },
+    [startFresh, attachSession]
+  )
+
+  // 切项目：重载会话清单 + 打开列表第一条（无则起新会话）。
   useEffect(() => {
     const path = activeProject?.path ?? null
     projectPathRef.current = path
@@ -1208,18 +1287,12 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       const list = await window.deva.chat.listSessions(path)
       if (cancelled || projectPathRef.current !== path) return
       setSessions(list)
-      if (list.length) {
-        const id = list[0].id
-        setCurrent(id)
-        if (!runtimesRef.current.has(id)) await attachSession(id)
-      } else {
-        startFresh()
-      }
+      openFirstSession(list)
     })()
     return () => {
       cancelled = true
     }
-  }, [activeProject?.path, startFresh, attachSession])
+  }, [activeProject?.path, openFirstSession])
 
   // 订阅主进程流事件（挂载一次）。按 payload.sessionId 路由进对应会话的活动态——
   // 不再丢弃「非当前会话」事件：后台那轮照常累积，切回去即见其实时流。
@@ -1272,6 +1345,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       if (ev.type === 'turn_start') {
         void refreshSessions() // 新会话 / 标题 / 排序
         if (localStreaming) return
+        setBgStreaming((prev) => (prev.has(sid) ? prev : new Set(prev).add(sid)))
         if (runtimesRef.current.has(sid)) {
           const [userMsg] = displayToMessages([{ role: 'user', ...ev.user }])
           patchRuntime(sid, (r) => ({
@@ -1304,6 +1378,16 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         return
       }
 
+      // 待送达的插入消息与退回的插入消息同样是会话级的：不论本层是否正流式该会话都要处理。
+      if (ev.type === 'inserts') {
+        setInsertState(sid, ev.pending)
+        return
+      }
+      if (ev.type === 'inserts_returned') {
+        for (const cb of insertReturnListeners) cb(sid, ev.text)
+        return
+      }
+
       // 本回合压缩成功（自动或 /compact）：主进程历史已改写为「摘要 + 近期轮」，本层气泡却仍是全量，
       // 两边的轮下标因此错开被压掉的轮数，回滚 / 删轮会落到错的轮上。先记下，done 时以主进程为准重载。
       if (ev.type === 'compacted' && ev.status === 'compacted') compactedSids.add(sid)
@@ -1329,6 +1413,12 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       if (ev.type === 'done') {
         const compacted = compactedSids.delete(sid)
         const compactDrop = compactDropSids.delete(sid)
+        setBgStreaming((prev) => {
+          if (!prev.has(sid)) return prev
+          const next = new Set(prev)
+          next.delete(sid)
+          return next
+        })
         // 不在查看的会话完成了一轮（本层发起后切走的 / 定时任务等后台回合）→ 记未读。
         // compactDrop（/compact 无可压或失败）没有新内容，不算。
         if (sessionIdRef.current !== sid && !compactDrop)
@@ -1428,7 +1518,8 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     dropRuntime,
     attachSession,
     toast,
-    setTodoState
+    setTodoState,
+    setInsertState
   ])
 
   // 切到某会话时拉取其待办清单（此后的变化走 todos 事件）。拉取期间事件已先到则以事件为准。
@@ -1469,16 +1560,22 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         }
       : IDLE_STATUS
 
-  // 各会话活动态摘要（左侧列表角标用）；仅 runtimes / 未读集变化时重算。
-  // 后台回合完成后 runtime 会被丢弃，故未读会话可能没有 runtime，单独补一条。
+  // 各会话活动态摘要（左侧列表角标用）；仅 runtimes / 未读集 / 后台进行中集变化时重算。
+  // 后台回合没缓存 runtime（进行中靠 bgStreaming，完成后 runtime 也会被丢弃），这类会话单独补一条。
   const sessionStates = useMemo<Record<string, SessionLiveState>>(() => {
     const out: Record<string, SessionLiveState> = {}
     for (const [id, r] of runtimes)
-      out[id] = { streaming: r.streaming, attention: hasAttention(r.messages), unread: unread.has(id) }
+      out[id] = {
+        streaming: r.streaming || bgStreaming.has(id),
+        attention: hasAttention(r.messages),
+        unread: unread.has(id)
+      }
+    for (const id of bgStreaming)
+      if (!out[id]) out[id] = { streaming: true, attention: false, unread: unread.has(id) }
     for (const id of unread)
       if (!out[id]) out[id] = { streaming: false, attention: false, unread: true }
     return out
-  }, [runtimes, unread])
+  }, [runtimes, unread, bgStreaming])
 
   // 当前对话的绑定读出（覆盖层优先于已落库 SessionMeta）：驱动对话优先外壳的头像 / 工作区 chip。
   // 覆盖层承载「尚未落库」（新会话首发前）或「刚 mount/unmount」的值；落库真值来自 listSessions。
@@ -1502,13 +1599,15 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     [currentSessionId, sessions, bindings]
   )
 
-  // 当前对话尚无自己的模型（新建时角色没设偏好模型、旧版本遗留对话、定时任务对话等）→ 把此刻显示的
+  // 当前对话尚无自己的模型（新建时角色没设偏好模型、旧版本遗留对话等）→ 把此刻显示的
   // 生效模型（即全局「最近使用」）定格为本对话模型并落库。否则它会一直隐式跟随全局：在别的对话里一切换，
   // 这里也跟着变（只有存过模型的对话不受影响，表现为「部分对话被连带切换」）。
   // 惰性未建档的会话主进程查不到会跳过，覆盖层随首发 modelRef 落库。
+  // 定时任务对话除外：它的模型与任务两边同步，没有模型 = 任务选了「跟随默认」（运行时用的正是全局最近使用，
+  // 与此处显示一致）。在这里定格会顺带把任务改成固定模型，只是打开看一眼就改了用户的设置。
   useEffect(() => {
     const sid = currentSessionId
-    if (!sid || currentBinding.model || !activeModel) return
+    if (!sid || currentBinding.model || !activeModel || sid.startsWith('task-')) return
     const ref = `${activeModel.provider.id}:${activeModel.model.id}`
     setBinding(sid, { model: ref })
     if (sessions.some((s) => s.id === sid))
@@ -1700,6 +1799,50 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       if (turnId) void window.deva.chat.abort(turnId)
     }
 
+    // 回合进行中插入（见 ChatContextValue.insert）。模型只在来不及送达、改作下一轮发出时用作回落，解析同 send。
+    const insert = async (text: string): Promise<boolean> => {
+      const sid = sessionIdRef.current
+      const body = text.trim()
+      if (!body) return false
+      const ov = bindingsRef.current.get(sid)
+      const meta = sessions.find((s) => s.id === sid)
+      const sessionModelRef = ov && ov.model !== undefined ? ov.model : meta?.model
+      const model = findActive(providers, sessionModelRef ?? null) ?? activeModel
+      if (!model) {
+        const msg = hasUsableModel(providers) ? t('chat.noModel') : t('chat.setup.noModel')
+        toast.show({ variant: 'warning', message: msg, duration: 6000 })
+        return false
+      }
+      try {
+        const r = await window.deva.chat.insert({
+          sessionId: sid,
+          text: body,
+          model: {
+            adapter: model.provider.adapter as 'anthropic' | 'openai' | 'responses',
+            providerId: model.provider.id,
+            baseURL: model.provider.apiHost,
+            model: model.model.id
+          }
+        })
+        if (r.ok) return true
+        // 回合恰好已经结束：照常发出，开始新的一轮。
+        if (r.reason === 'idle') return send(body)
+        if (r.reason === 'busy') toast.show({ variant: 'warning', message: t('chat.insert.busy') })
+        return false
+      } catch (e) {
+        toast.show({ variant: 'error', title: t('chat.error'), message: (e as Error)?.message ?? String(e), duration: 8000 })
+        return false
+      }
+    }
+
+    const withdrawInserts = async (): Promise<string> => {
+      try {
+        return (await window.deva.chat.withdrawInserts(sessionIdRef.current)).text
+      } catch {
+        return ''
+      }
+    }
+
     // 新建 / 切换 / 删除随时可用——即使别的会话正在流式（这正是多对话并行的关键）。
     // 对话优先外壳可传 personaId 绑定身份、focusRoot 预设聚焦、model 快照角色偏好模型；旧壳零参调用行为不变。
     const newSession = (personaId?: string, focusRoot?: string | null, model?: string): void => {
@@ -1725,8 +1868,17 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       const sid = sessionIdRef.current
       setBinding(sid, { model: modelRef })
       void (async () => {
-        await window.deva.chat.setModel({ sessionId: sid, modelRef })
+        const r = await window.deva.chat.setModel({ sessionId: sid, modelRef })
         await refreshSessions()
+        // 已落库：撤掉覆盖层里的模型，此后以主进程为准——定时任务对话的模型还会被任务表单改（两边同步），
+        // 覆盖层留着会把那次改动挡住。期间又切了别的模型（覆盖层已不是这个值）就不动，等那次落库再撤。
+        if (r.ok && bindingsRef.current.get(sid)?.model === modelRef) {
+          const { model: _persisted, ...rest } = bindingsRef.current.get(sid) ?? {}
+          const map = new Map(bindingsRef.current)
+          map.set(sid, rest)
+          bindingsRef.current = map
+          setBindings(map)
+        }
       })()
     }
 
@@ -1749,9 +1901,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     }
 
     const deleteSession = (id: string): void => {
-      // 删除正在跑的会话：先中止其回合，再落盘删除并移除其活动态。
-      const turnId = runtimesRef.current.get(id)?.turnId
-      if (turnId) void window.deva.chat.abort(turnId)
+      // 删除正在跑的会话：主进程删除时先中止其回合（含本层没打开过的后台回合），这里只移除其活动态。
       void (async () => {
         await window.deva.chat.deleteSession(id, projectPathRef.current)
         dropRuntime(id)
@@ -1766,18 +1916,8 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         const list = await window.deva.chat.listSessions(path)
         if (projectPathRef.current !== path) return
         setSessions(list)
-        if (id !== sessionIdRef.current) return
-        // 删的是当前会话：切到最近一条（载入其历史）或起新会话。
-        if (list.length) {
-          const nid = list[0].id
-          setCurrent(nid)
-          if (runtimesRef.current.has(nid)) return
-          const dms = await window.deva.chat.loadSession(nid, path)
-          if (sessionIdRef.current !== nid || runtimesRef.current.has(nid)) return
-          patchRuntime(nid, (r) => ({ ...r, messages: displayToMessages(dms as DisplayMessage[]) }))
-        } else {
-          startFresh()
-        }
+        // 删的是当前会话：打开列表第一条（不含已归档）或起新会话。
+        if (id === sessionIdRef.current) openFirstSession(list)
       })()
     }
 
@@ -1794,16 +1934,34 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       })()
     }
 
-    // 批量删除（删角色时清其名下全部对话）：中止各自在跑回合 → 逐条落盘删除 → 清绑定覆盖层 →
-    // 只刷新一次列表；当前会话若在删除集内，切到最近一条或起新会话。与单条 deleteSession 同语义，
+    // 归档 / 取消归档：先就地改标记（列表立刻移走 / 移回），再落盘；失败（尚未建档）则以主进程清单为准。
+    // 归档的是当前对话：右侧随之离开，与删除一样打开列表第一条。归档即清掉它的未读（取消归档也不恢复）。
+    const setArchived = (id: string, archived: boolean): void => {
+      setSessions((list) =>
+        list.map((s) => (s.id === id ? { ...s, archived: archived || undefined } : s))
+      )
+      if (archived)
+        setUnread((prev) => {
+          if (!prev.has(id)) return prev
+          const next = new Set(prev)
+          next.delete(id)
+          return next
+        })
+      if (archived && id === sessionIdRef.current)
+        openFirstSession(sessions.filter((s) => s.id !== id))
+      void (async () => {
+        const r = await window.deva.chat.setArchived({ sessionId: id, archived })
+        if (!r.ok) void refreshSessions()
+      })()
+    }
+
+    // 批量删除（删角色时清其名下全部对话）：逐条落盘删除（主进程顺带中止在跑回合）→ 清绑定覆盖层 →
+    // 只刷新一次列表；当前会话若在删除集内，打开列表第一条或起新会话。与单条 deleteSession 同语义，
     // 但合并刷新、避免 N 条并发各自 listSessions/切换互相打架。
     const deleteSessions = (ids: string[]): void => {
       if (ids.length === 0) return
       const idSet = new Set(ids)
-      for (const id of ids) {
-        const turnId = runtimesRef.current.get(id)?.turnId
-        if (turnId) void window.deva.chat.abort(turnId)
-      }
+      // 正在跑的回合由主进程删除时一并中止（见 deleteSession）。
       void (async () => {
         const path = projectPathRef.current
         for (const id of ids) {
@@ -1821,18 +1979,8 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         const list = await window.deva.chat.listSessions(path)
         if (projectPathRef.current !== path) return
         setSessions(list)
-        if (!idSet.has(sessionIdRef.current)) return
-        // 删的集合含当前会话：切到最近一条（载入其历史）或起新会话。
-        if (list.length) {
-          const nid = list[0].id
-          setCurrent(nid)
-          if (runtimesRef.current.has(nid)) return
-          const dms = await window.deva.chat.loadSession(nid, path)
-          if (sessionIdRef.current !== nid || runtimesRef.current.has(nid)) return
-          patchRuntime(nid, (r) => ({ ...r, messages: displayToMessages(dms as DisplayMessage[]) }))
-        } else {
-          startFresh()
-        }
+        // 删的集合含当前会话：打开列表第一条（不含已归档）或起新会话。
+        if (idSet.has(sessionIdRef.current)) openFirstSession(list)
       })()
     }
 
@@ -1991,6 +2139,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       selectSession,
       deleteSession,
       renameSession,
+      setArchived,
       deleteSessions,
       deleteTurns,
       rewindApply,
@@ -2007,13 +2156,18 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       resolveAutotask,
       todos: todoStates.get(currentSessionId) ?? EMPTY_TODOS,
       cancelTodoList,
-      stopSubagent
+      stopSubagent,
+      insert,
+      pendingInserts: insertStates.get(currentSessionId) ?? NO_INSERTS,
+      withdrawInserts,
+      onInsertsReturned
     }
   }, [
     sessions,
     currentSessionId,
     todoStates,
     setTodoState,
+    insertStates,
     messages,
     streaming,
     streamStatus,
@@ -2026,6 +2180,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     t,
     toast,
     startFresh,
+    openFirstSession,
     setBinding,
     refreshSessions,
     patchRuntime,

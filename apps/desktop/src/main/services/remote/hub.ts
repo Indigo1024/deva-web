@@ -12,6 +12,7 @@ import {
   DEFAULT_PERSONA_ID,
   getPersona,
   listPersonas,
+  resolvePersonaId,
   upsertPersona,
   type PersonaRecord
 } from '../personas'
@@ -270,10 +271,10 @@ function homeChats(sessionId?: string): ChatAddress[] {
 
 // ───────── 回复范围 ─────────
 
-/** 对话是否落在机器人的回复范围内（见 store.ts ReplyScope）；没绑定角色的旧对话算默认角色。 */
+/** 对话是否落在机器人的回复范围内（见 store.ts ReplyScope）；没绑定角色、或角色已不存在的对话算默认角色。 */
 function allows(channel: ChannelId, s: { id: string; personaId?: string }): boolean {
   const { scope } = getChannelConfig(channel)
-  if (scope.mode === 'personas') return scope.personas.includes(s.personaId || DEFAULT_PERSONA_ID)
+  if (scope.mode === 'personas') return scope.personas.includes(resolvePersonaId(s.personaId))
   if (scope.mode === 'sessions') return scope.sessions.includes(s.id)
   return true
 }
@@ -301,7 +302,7 @@ function sessionTitle(sessionId: string): string {
 
 function personaName(sessionId: string): string {
   const pid = getSession(sessionId)?.personaId
-  return (pid && getPersona(pid)?.name) || 'Deva'
+  return (pid && getPersona(resolvePersonaId(pid))?.name) || 'Deva'
 }
 
 // ───────── 出站：回合视图 ─────────
@@ -525,7 +526,11 @@ function finishTurn(t: TurnTrack, stopReason: string): void {
       ? '回复达到长度上限被截断'
       : stopReason === 'refusal'
         ? '模型拒绝回答或被内容策略拦截'
-        : undefined
+        : stopReason === 'step_limit'
+          ? '达到单次运行的步数上限，任务可能未完成'
+          : stopReason === 'repeated'
+            ? '相同的工具调用连续多次没有进展，已停止'
+            : undefined
   if (t.status === 'done' && !hasVisible(t) && t.eager) t.blocks.push({ kind: 'notice', text: '本轮没有产生回复。' })
   if (sessionTurn.get(t.sessionId) === t.turnId) sessionTurn.delete(t.sessionId)
   // 回合结束仍未决的交互卡：主进程已按取消解开，卡片收成「已结束」。
@@ -716,11 +721,15 @@ function onBusEvent({ turnId, sessionId, event }: ChatEventPayload): void {
   if (event.type === 'card_resolved') return applyCardResolution(sessionId, event)
   // 回合开始只为桌面窗口补用户气泡；手机端的回合视图在首个内容事件时建立。
   // 待办清单状态是会话级的胶囊数据（可能不属于任何回合），手机端不展示；「正在压缩」只驱动桌面的状态行。
+  // 插入消息只在桌面的执行步骤与输入框上方显示：手机端插入时已回过一句「已插入」，送达与退回都不推。
   if (
     event.type === 'usage' ||
     event.type === 'turn_start' ||
     event.type === 'todos' ||
-    event.type === 'compacting'
+    event.type === 'compacting' ||
+    event.type === 'insert' ||
+    event.type === 'inserts' ||
+    event.type === 'inserts_returned'
   )
     return
   // 后台子智能体的过程不属于任何回合（turnId 为空串），手机端不展示；它结束后的那一轮照常推送。
@@ -942,8 +951,9 @@ async function runCommand(chat: ChatAddress, name: string, arg: string, trail: T
       return true
     }
     case 'list': {
+      // 同桌面左侧列表：已归档的对话不列出。
       const all = listSessions()
-        .filter((s) => allows(chat.channel, s))
+        .filter((s) => !s.archived && allows(chat.channel, s))
         .sort((a, b) => b.updatedAt - a.updatedAt)
       const list = all.slice(0, LIST_MAX)
       if (!list.length) {
@@ -958,7 +968,7 @@ async function runCommand(chat: ChatAddress, name: string, arg: string, trail: T
         text: `共 ${all.length} 个对话${more}。点一下即可切换。`,
         buttonLayout: 'column',
         buttons: list.map((s, i) => {
-          const p = (s.personaId && getPersona(s.personaId)?.name) || 'Deva'
+          const p = (s.personaId && getPersona(resolvePersonaId(s.personaId))?.name) || 'Deva'
           return {
             // 截断交给客户端按屏宽处理（单行省略），这里只防极端长标题撑大卡片。
             label: `${i + 1}. ${truncate(s.title || '新对话', 80)} · ${p}${s.id === cur ? '（当前）' : ''}`,
@@ -1122,15 +1132,20 @@ async function sendToSession(chat: ChatAddress, text: string): Promise<void> {
     })
   }
 
-  if (rt.isBusy(sid))
-    return notice(chat, { tone: 'warning', text: '上一轮还在进行中。发送 /stop 可以停止它。' })
-
   const session = getSession(sid)
   const persona = session?.personaId ? getPersona(session.personaId) : null
   const model =
     resolveModelRefOrNull(session?.model) ?? resolveModelRefOrNull(persona?.model) ?? resolveDefaultModel()
   if (!model)
     return notice(chat, { tone: 'error', text: '还没有可用的模型，请先在电脑端的设置里配置并选定模型。' })
+
+  // 对话正在进行：与桌面一样插入当前这一轮，当前步骤结束后交给模型（刚好结束了就照常发送）。
+  if (rt.isBusy(sid)) {
+    const r = rt.insert({ sessionId: sid, text, model })
+    if (r.ok) return notice(chat, { tone: 'info', text: '已插入进行中的任务，当前步骤结束后送达。' })
+    if (r.reason === 'busy')
+      return notice(chat, { tone: 'warning', text: '上一轮还在进行中。发送 /stop 可以停止它。' })
+  }
 
   try {
     const { turnId } = await rt.send({

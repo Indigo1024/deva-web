@@ -33,3 +33,6 @@ AGENTS.md
 .deva-update-pending.json
 .deva-update-build/
 web.bak.*
+
+# Design mockups
+design/

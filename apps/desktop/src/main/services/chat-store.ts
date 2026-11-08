@@ -53,7 +53,7 @@ export interface StoredSession {
   lastCacheWrite?: number
   /**
    * 绑定的 persona id（对话优先外壳：一对话一身份，单选当值）。
-   * 缺省 = 旧 AppShell 路径（叠加式 enabledPersonas，不做单身份注入）。首发落库后绑定不再改。
+   * 缺省 = 旧版遗留的未绑定对话，执行与显示都按默认角色（见 personas.ts resolvePersonaId）。首发落库后绑定不再改。
    */
   personaId?: string
   /**
@@ -73,6 +73,11 @@ export interface StoredSession {
    * 缺省 = 尚未定格——runTurn 按 'default'（不发思考参数）处理；渲染层打开对话时会把「最近使用」定格进来。
    */
   effort?: EffortLevel
+  /**
+   * 已归档：从左侧对话列表移走（经「新建对话」浮层底部的「已归档对话」查看），内容与上下文不受影响。
+   * 缺省 = 未归档。在已归档的对话里开始新一轮（发消息 / 定时任务运行 / 后台任务通知）即自动取消。
+   */
+  archived?: boolean
   /**
    * 角色名片（propose_agent 提议）的终态边车，按 toolUseId 记录 accepted/rejected。
    * 名片本体随 Message[] 天然存活，但其接受/拒绝终态无处落——此边车确保重开不退回 pending、
@@ -182,7 +187,7 @@ export interface StoredNotice {
   /** kind='error' 时的错误文案。 */
   message?: string
   /** kind='notice' 时的提示码（aborted=用户中止了本轮，其前内容为中止前已产出的部分）。 */
-  code?: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted'
+  code?: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted' | 'step_limit' | 'repeated'
 }
 
 /** 会话元信息（左侧列表用，不含正文）。 */
@@ -197,6 +202,8 @@ export interface ChatSessionMeta {
   model?: string
   /** 本对话的思考等级。见 StoredSession.effort。 */
   effort?: EffortLevel
+  /** 已归档。见 StoredSession.archived。 */
+  archived?: boolean
 }
 
 /**
@@ -250,7 +257,8 @@ function metaOf(s: StoredSession): ChatSessionMeta {
     personaId: s.personaId,
     focusRoot: s.focusRoot ?? null,
     model: s.model,
-    effort: s.effort
+    effort: s.effort,
+    archived: s.archived
   }
 }
 
@@ -417,6 +425,39 @@ export function rebindSessionPersona(id: string, from: string, to: string): bool
   const s = loadSessionFile(id)
   if (!s || s.personaId !== from) return false
   s.personaId = to
+  save(id)
+  return true
+}
+
+/**
+ * 定时任务改了角色 / 模型：同步到它的独占对话（两边以同一个为准，见 tasks.ts updateTask）。对话不存在
+ * （任务从没运行过）则什么都不做。personaId 缺省 = 不动；model 空串 = 跟随全局默认。
+ * 返回是否改动。不动 updatedAt，列表顺序不变。
+ */
+export function syncSessionBinding(id: string, b: { personaId?: string; model: string }): boolean {
+  if (!ensureIndex().has(id)) return false
+  const s = loadSessionFile(id)
+  if (!s) return false
+  let changed = false
+  if (b.personaId && s.personaId !== b.personaId) {
+    s.personaId = b.personaId
+    changed = true
+  }
+  if ((s.model ?? '') !== b.model) {
+    s.model = b.model
+    changed = true
+  }
+  if (changed) save(id)
+  return changed
+}
+
+/** 归档 / 取消归档并落盘，返回是否找到该对话。不动 updatedAt（列表顺序不变）。 */
+export function setSessionArchived(id: string, archived: boolean): boolean {
+  const s = loadSessionFile(id)
+  if (!s) return false
+  if (!!s.archived === archived) return true
+  if (archived) s.archived = true
+  else delete s.archived
   save(id)
   return true
 }

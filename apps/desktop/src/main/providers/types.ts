@@ -14,12 +14,12 @@ export interface TextPart {
    */
   listing?: ListingRecord
 }
-/** 随消息下发的清单种类。 */
-export type ListingKind = 'skills' | 'memory'
+/** 随消息下发的清单种类。guide：复杂工具的详细用法（首次用到时附上，见 listing.ts toolGuidePart）。 */
+export type ListingKind = 'skills' | 'memory' | 'guide'
 /** 清单块的结构化记录：本块告知（新增或更新）的条目及其内容摘要、本块告知移除的条目。 */
 export interface ListingRecord {
   kind: ListingKind
-  /** key：技能名 / 记忆 id。 */
+  /** key：技能名 / 记忆 id / 工具名。 */
   listed: { key: string; digest: string }[]
   removed?: string[]
 }
@@ -86,6 +86,9 @@ export interface ToolSpec {
  * 'refusal' = 模型拒绝作答、或被服务端内容策略拦截（OpenAI finish_reason 'content_filter' /
  * 智谱 'sensitive' / Anthropic stop_reason 'refusal'）。**必须与 end_turn 区分**：这类回合同样「自然结束且无正文」，
  * 混作 end_turn 会让空回合被一律归咎于「上下文接近上限」，给出完全错误的排查方向。
+ * 'step_limit' / 'repeated' = 引擎层的终止原因（与 aborted / error 同属循环层，服务端不会给）：定时任务达到
+ * 单次运行的步数上限 / 同一工具同参数同结果连续出现到上限（原地打转），收尾后停下（见 shared/limits.ts）。
+ * **同样必须与 end_turn 区分**：任务没做完，运行记录须记失败而非成功，对话里也要留下说明。
  */
 export type StopReason =
   | 'end_turn'
@@ -95,6 +98,8 @@ export type StopReason =
   | 'refusal'
   | 'aborted'
   | 'error'
+  | 'step_limit'
+  | 'repeated'
 
 // 思考等级的档位定义与模型能力表在主进程 / 渲染层共用模块里（见 shared/effort.ts）。
 export { isEffortLevel, type EffortLevel } from '../../shared/effort'
@@ -117,6 +122,12 @@ export interface GenerateRequest {
    * 一次性调用（压缩摘要、生成提交信息）打了断点只会白付 1.25 倍缓存写入费，故默认关闭。
    */
   cache?: boolean
+  /**
+   * 所属对话 id（供需要「每对话一个稳定会话 id」的网关使用，如 OpenCode Go 的
+   * x-opencode-session，缺失即 400 MissingSessionID）。不经对话的一次性调用留空，由
+   * providers/opencode.ts 退回本次运行 id。
+   */
+  sessionId?: string
   /**
    * 思考参数（已按模型能力表收敛、映射好，见 shared/effort.ts 的 effortRequest）。
    * 缺省 = 不发任何思考 / 推理参数，请求体与改造前逐字节一致。适配器按 format 放进各家字段：
@@ -181,6 +192,11 @@ export type StreamEvent =
 export interface AdapterConfig {
   baseURL: string
   apiKey: string
+  /**
+   * 该服务商要求的专有请求头（由 providers/index.ts 按 baseURL + 对话 id 现算，见
+   * providers/opencode.ts）。适配器原样并进 fetch headers，无须知道其来源。
+   */
+  headers?: Record<string, string>
 }
 
 /**

@@ -33,12 +33,34 @@ import {
   ListChecks,
   Package,
   Archive,
+  Puzzle,
+  MousePointerClick,
+  Keyboard,
+  ScanText,
+  Camera,
+  ArrowLeft,
+  ArrowRight,
+  RotateCw,
+  Hourglass,
+  Code,
+  AppWindow,
+  ArrowDownUp,
+  ListFilter,
+  KeyRound,
+  ShieldCheck,
+  Upload,
+  Hand,
+  MessageSquare,
+  CircleCheckBig,
   type LucideIcon
 } from 'lucide-react'
 import { useI18n } from '../../i18n/i18n'
+import { REPEAT_STOP, TASK_MAX_STEPS } from '../../../../shared/limits'
+import { useExtensions } from '../../store/extensions'
 import type { ChatBlock, ChatMessage, StreamStatus, ToolStatus } from '../../store/chat'
 import { CopyButton, Markdown } from './Markdown'
-import { HumationFace } from '../../components/humation'
+import { HumationFace, PersonaFace, USER_AVATAR_SEED } from '../../components/humation'
+import { useProfile } from '../../store/profile'
 import { TaskConfirmCard } from './TaskConfirmCard'
 import { DeliverablesCard } from './DeliverablesCard'
 import { TodoItemList } from './Todos'
@@ -70,7 +92,79 @@ const TOOL_META: Record<string, { key: string; icon: LucideIcon }> = {
   // 正常的 todo_write 不画工具节点（进度在胶囊里）；只有参数被输出上限截断的那次会以普通工具节点出现。
   todo_write: { key: 'todoWrite', icon: ListChecks },
   // present_files 在时间轴上与普通工具一样是一步；成功的交付另在回合结束后于回复末尾画交付卡（见 deliveries）。
-  present_files: { key: 'presentFiles', icon: Package }
+  present_files: { key: 'presentFiles', icon: Package },
+  // 拼图与输入框「/」联想、角色资料卡里的技能图标一致。
+  skill: { key: 'skill', icon: Puzzle },
+  // 内置浏览器：时间轴上按动作区分（见 BROWSER_META）；这里是不知道动作时（如底部状态行）的通用说法。
+  browser: { key: 'browser', icon: Globe }
+}
+
+/** browser 工具的各个动作：每个动作有自己的动词与图标（打开网页、查看页面、点击……）。 */
+const BROWSER_META: Record<string, { key: string; icon: LucideIcon }> = {
+  open: { key: 'browserOpen', icon: Globe },
+  snapshot: { key: 'browserRead', icon: ScanText },
+  click: { key: 'browserClick', icon: MousePointerClick },
+  type: { key: 'browserType', icon: Keyboard },
+  select: { key: 'browserSelect', icon: ListFilter },
+  press: { key: 'browserPress', icon: Keyboard },
+  scroll: { key: 'browserScroll', icon: ArrowDownUp },
+  back: { key: 'browserBack', icon: ArrowLeft },
+  forward: { key: 'browserForward', icon: ArrowRight },
+  reload: { key: 'browserReload', icon: RotateCw },
+  wait: { key: 'browserWait', icon: Hourglass },
+  screenshot: { key: 'browserShot', icon: Camera },
+  evaluate: { key: 'browserEval', icon: Code },
+  tabs: { key: 'browserTabs', icon: AppWindow },
+  switch_tab: { key: 'browserSwitchTab', icon: AppWindow },
+  close_tab: { key: 'browserCloseTab', icon: AppWindow },
+  // 把窗口弹给用户看：对用户来说就是「打开网页」（结果说明里是网页标题）
+  show: { key: 'browserOpen', icon: Globe },
+  dialog: { key: 'browserDialog', icon: MessageSquare }
+}
+
+/** handoff（请用户在网页上亲自操作）按原因区分：等你登录 / 完成验证 / 上传文件 / 确认 / 操作。 */
+const HANDOFF_META: Record<string, { key: string; icon: LucideIcon }> = {
+  login: { key: 'browserHandoffLogin', icon: KeyRound },
+  captcha: { key: 'browserHandoffCaptcha', icon: ShieldCheck },
+  upload: { key: 'browserHandoffUpload', icon: Upload },
+  confirm: { key: 'browserHandoffConfirm', icon: CircleCheckBig },
+  other: { key: 'browserHandoffOther', icon: Hand }
+}
+
+/** 工具的文案键与图标：browser 按 args.action 细分，其余按工具名；未知工具（如 MCP 工具）为 undefined。 */
+function toolMeta(name: string, args?: unknown): { key: string; icon: LucideIcon } | undefined {
+  if (name === 'browser') {
+    const a = args as { action?: unknown; reason?: unknown } | null | undefined
+    if (a?.action === 'handoff') return HANDOFF_META[typeof a.reason === 'string' ? a.reason : ''] ?? HANDOFF_META.other
+    if (typeof a?.action === 'string' && BROWSER_META[a.action]) return BROWSER_META[a.action]
+  }
+  return TOOL_META[name]
+}
+
+/**
+ * browser 各动作在工具行上显示的对象：打开的网址、输入的文字、按键、等待的文字、脚本。
+ * 切换 / 关闭标签不显示标签编号（p1 之类是内部编号，对用户没有意义）：结果说明里是网页标题。
+ */
+function browserObject(args: unknown): { text: string; full: string } | null {
+  const a = (args ?? {}) as Record<string, unknown>
+  const pick = (v: unknown): string => (typeof v === 'string' ? v.trim() : '')
+  let text = ''
+  switch (a.action) {
+    case 'open':
+      text = pick(a.url)
+      break
+    case 'type':
+    case 'wait':
+      text = pick(a.text)
+      break
+    case 'press':
+      text = pick(a.key)
+      break
+    case 'evaluate':
+      text = pick(a.script)
+      break
+  }
+  return text ? { text: text.replace(/\s+/g, ' '), full: text } : null
 }
 
 /**
@@ -85,13 +179,18 @@ function shortPath(p: string): string {
 }
 
 /**
- * 工具行的「对象」：优先 command（run_command），再 pattern（grep/glob——搜的是什么比在哪搜更有信息量，
- * 搜索范围挂悬停），再 path，再 url（web_fetch），再记忆正文 / id。full 为原值（挂悬停），text 为展示值——
+ * 工具行的「对象」：技能为技能名；其余优先 command（run_command），再 pattern（grep/glob——搜的是什么比在哪搜
+ * 更有信息量，搜索范围挂悬停），再 path，再 url（web_fetch），再记忆正文 / id。full 为原值（挂悬停），text 为展示值——
  * 只有 path 缩成「父目录/文件名」，命令、正则、URL 原样展示，超长时由 CSS 单行省略号截断尾部。
  * 未知工具（如 MCP 工具）显示工具名：动词「已调用」本身说明不了调了什么。
  */
 function flowObject(name: string, args: unknown): { text: string; full: string } | null {
   if (!TOOL_META[name]) return { text: name, full: name }
+  if (name === 'browser') return browserObject(args)
+  if (name === 'skill') {
+    const skill = (args as { name?: unknown } | null)?.name
+    return typeof skill === 'string' && skill.trim() ? { text: skill.trim(), full: skill.trim() } : null
+  }
   if (args && typeof args === 'object') {
     const o = args as { command?: unknown; path?: unknown; pattern?: unknown; url?: unknown }
     if (typeof o.command === 'string' && o.command.trim()) return { text: o.command, full: o.command }
@@ -437,8 +536,15 @@ export function BlockView({
     )
   }
 
-  // 思考 / 工具调用 / 子智能体 / 已完成清单通常由 groupBlocks 归进时间轴；单独交到这里时画成只有一个节点的时间轴。
-  if (block.kind === 'thinking' || block.kind === 'tool' || block.kind === 'subagent' || block.kind === 'todolist') {
+  // 思考 / 工具调用 / 子智能体 / 已完成清单 / 插入的消息通常由 groupBlocks 归进时间轴；单独交到这里时画成只有
+  // 一个节点的时间轴。
+  if (
+    block.kind === 'thinking' ||
+    block.kind === 'tool' ||
+    block.kind === 'subagent' ||
+    block.kind === 'todolist' ||
+    block.kind === 'insert'
+  ) {
     return <Timeline steps={[{ block, index: 0 }]} liveBlock={thinkingDone ? undefined : block} />
   }
 
@@ -474,12 +580,16 @@ export function BlockView({
       empty: 'chat.notice.empty',
       refused: 'chat.notice.refused',
       restored: 'chat.notice.restored',
-      aborted: 'chat.notice.aborted'
+      aborted: 'chat.notice.aborted',
+      step_limit: 'chat.notice.stepLimit',
+      repeated: 'chat.notice.repeated'
     }
+    // 文案里的 {n}：阈值与主进程判定共用 shared/limits.ts。
+    const n = block.code === 'repeated' ? REPEAT_STOP : TASK_MAX_STEPS
     return (
       <div className="msg__notice">
         <Info size={14} />
-        <span>{t(NOTICE_KEY[block.code])}</span>
+        <span>{t(NOTICE_KEY[block.code]).replace('{n}', String(n))}</span>
       </div>
     )
   }
@@ -1132,12 +1242,15 @@ const QUIET_SUMMARIES = new Set([
   '已创建 MCP 服务'
 ])
 
+/** 成功摘要只是复述对象的工具：技能的「已加载技能「名称」」与行上的「已加载技能 名称」重复，不写。 */
+const QUIET_TOOLS = new Set(['skill'])
+
 /** 子智能体被用户亲手停下的结局摘要（后台「已停止」/ 前台「已中止」）：不当作出错展示。 */
 const STOPPED_SUMMARIES = new Set(['已停止', '已中止'])
 
-/** 工具的动词键（chat.flow.{done|doing|base}.<键>），与 TOOL_META 同名；未知工具（如 MCP 工具）为 unknown。 */
-function verbKey(name: string): string {
-  return TOOL_META[name]?.key ?? 'unknown'
+/** 工具的动词键（chat.flow.{done|doing|base}.<键>），见 toolMeta；未知工具（如 MCP 工具）为 unknown。 */
+function verbKey(name: string, args?: unknown): string {
+  return toolMeta(name, args)?.key ?? 'unknown'
 }
 
 type ToolStep = { name: string; args: unknown; status: ToolStatus; summary?: string }
@@ -1166,7 +1279,7 @@ function stepTitle(step: ToolStep, t: (key: string) => string): string | undefin
 function stepIcon(step: ToolStep, size: number): React.JSX.Element {
   if (step.status === 'running') return <Loader2 size={size} className="spin" />
   if (isFailed(step.status)) return <XCircle size={size} />
-  const Icon = TOOL_META[step.name]?.icon ?? Wrench
+  const Icon = toolMeta(step.name, step.args)?.icon ?? Wrench
   return <Icon size={size} />
 }
 
@@ -1179,7 +1292,7 @@ function stepIcon(step: ToolStep, size: number): React.JSX.Element {
  */
 export function ToolText({ step }: { step: ToolStep }): React.JSX.Element {
   const { t } = useI18n()
-  const key = verbKey(step.name)
+  const key = verbKey(step.name, step.args)
   const obj = flowObject(step.name, step.args)
   const reason = failReason(step, t)
   let verb: React.JSX.Element
@@ -1191,7 +1304,7 @@ export function ToolText({ step }: { step: ToolStep }): React.JSX.Element {
     tail = <span className="tl__extra">{reason}</span>
   } else {
     verb = <span className="tl__verb">{t(`chat.flow.done.${key}`)}</span>
-    if (step.summary && !QUIET_SUMMARIES.has(step.summary))
+    if (step.summary && !QUIET_SUMMARIES.has(step.summary) && !QUIET_TOOLS.has(step.name))
       tail = <span className="tl__extra">{step.summary}</span>
   }
   return (
@@ -1210,15 +1323,23 @@ export function ToolText({ step }: { step: ToolStep }): React.JSX.Element {
  */
 function TimelineTool({ step }: { step: ToolStep }): React.JSX.Element {
   const { t } = useI18n()
+  const { skills } = useExtensions()
   const [open, setOpen] = useState(false)
   const state = step.status === 'running' ? ' is-run' : isFailed(step.status) ? ' is-err' : ''
   const command = step.name === 'run_command' ? flowObject(step.name, step.args)?.full : undefined
+  let title = stepTitle(step, t)
+  // 技能行里只写技能名：悬停另起一行附上技能说明（按名称或文件夹名匹配，同主进程 skill 工具）。
+  if (step.name === 'skill' && !isFailed(step.status)) {
+    const wanted = flowObject(step.name, step.args)?.full.toLowerCase()
+    const desc = skills.find((s) => s.name.toLowerCase() === wanted || s.id.toLowerCase() === wanted)?.desc.trim()
+    if (title && desc) title = `${title}\n${desc}`
+  }
   if (!command)
     return (
       <li className={`tl__item${state}`}>
         <span className="tl__node">{stepIcon(step, 14)}</span>
         <div className="tl__main">
-          <div className="tl__line" title={stepTitle(step, t)}>
+          <div className="tl__line" title={title}>
             <ToolText step={step} />
           </div>
         </div>
@@ -1408,6 +1529,27 @@ function TimelineMount({ block }: { block: Extract<ChatBlock, { kind: 'mount' }>
   )
 }
 
+/**
+ * 时间轴上回合进行中插入的消息：节点是用户自己的小头像，正文用用户气泡的底色，与工具步骤区分开，一眼看出是「我说的」。
+ * 正文完整显示（可换行），不像工具步骤那样截成一行。
+ */
+function TimelineInsert({ text }: { text: string }): React.JSX.Element {
+  const { t } = useI18n()
+  const profile = useProfile()
+  return (
+    <li className="tl__item tl__item--insert">
+      <span className="tl__node">
+        <span className="tl__me" title={t('chat.insert.node')}>
+          <PersonaFace seed={USER_AVATAR_SEED} spec={profile.avatar} image={profile.avatarImage} />
+        </span>
+      </span>
+      <div className="tl__main">
+        <div className="tl__insert">{text}</div>
+      </div>
+    </li>
+  )
+}
+
 /** 时间轴的一步（index 为其在原块序列中的下标）。 */
 type TimelineStep = { block: ChatBlock; index: number }
 
@@ -1446,6 +1588,7 @@ export function Timeline({
         if (b.kind === 'plan') return <TimelinePlan key={b.key} block={b} />
         if (b.kind === 'mount') return <TimelineMount key={b.key} block={b} />
         if (b.kind === 'todolist') return <TimelineTodo key={b.id} block={b} />
+        if (b.kind === 'insert') return <TimelineInsert key={`i${index}`} text={b.text} />
         return null
       })}
       {capped && (
@@ -1482,6 +1625,7 @@ function isTimelineStep(b: ChatBlock): boolean {
     case 'thinking':
     case 'subagent':
     case 'todolist':
+    case 'insert':
       return true
     case 'ask':
       return b.answers !== undefined

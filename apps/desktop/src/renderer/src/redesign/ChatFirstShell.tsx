@@ -12,6 +12,9 @@ import { createPortal } from 'react-dom'
 import {
   AlarmClock,
   AlertTriangle,
+  Archive,
+  ArchiveRestore,
+  ArrowLeft,
   ArrowDownToLine,
   ArrowUpFromLine,
   ArrowUpToLine,
@@ -30,6 +33,7 @@ import {
   FileArchive,
   FileCode2,
   Folder,
+  FolderMinus,
   FolderOpen,
   FolderPlus,
   ArrowRightLeft,
@@ -37,10 +41,12 @@ import {
   GitCommitHorizontal,
   GitMerge,
   Github,
+  Globe,
   Image as ImageIcon,
   Info,
   Lightbulb,
   ListChecks,
+  ListFilter,
   Lock,
   LogOut,
   MessageCircle,
@@ -91,6 +97,9 @@ import { TaskModelSelect, TaskPersonaSelect } from '../features/chat/TaskPickers
 import { taskErrorKey } from '../features/chat/TaskConfirmCard'
 import { TodoCapsule } from '../features/chat/Todos'
 import { BackgroundCapsule } from '../features/chat/BackgroundTasks'
+import { BrowserCapsule } from '../features/browser/BrowserCapsule'
+import { useDockOrder } from '../features/chat/dockOrder'
+import { useBrowserState } from '../features/browser/shared'
 import { ModelSetupCard } from '../features/chat/ModelSetupCard'
 import { Markdown } from '../features/chat/Markdown'
 import {
@@ -141,6 +150,7 @@ import {
   type AvatarSpec
 } from '../components/humation'
 import { useTheme } from '../theme/ThemeContext'
+import { readChatFontSize, saveChatFontSize, type ChatFontSize } from '../theme/chatFontSize'
 import {
   BlockView,
   CompactionNotice,
@@ -331,7 +341,7 @@ type RailTab = 'chats' | 'roster' | 'tasks' | 'bots'
 
 export function ChatFirstShell(): React.JSX.Element {
   const {
-    sessions,
+    sessions: storedSessions,
     currentSessionId,
     messages,
     streaming,
@@ -343,6 +353,7 @@ export function ChatFirstShell(): React.JSX.Element {
     selectSession,
     deleteSession,
     renameSession,
+    setArchived,
     deleteSessions,
     deleteTurns,
     currentBinding,
@@ -350,22 +361,28 @@ export function ChatFirstShell(): React.JSX.Element {
     mountFocus,
     respondAsk,
     respondPlan,
-    respondMount
+    respondMount,
+    onInsertsReturned
   } = useChat()
   const { personas, remove, reorderPersonas } = useExtensions()
   const { tasks } = useTasks()
   const { t, locale } = useI18n()
   const dialog = useDialog()
+  const toast = useToast()
+
+  // 回合被停止或出错时还没送达的插入消息：放回所属会话的输入框（正在看就直接放进去，否则进那个会话的草稿）。
+  useEffect(() => onInsertsReturned(restoreToComposer), [onInsertsReturned])
 
   const [railTab, setRailTab] = useState<RailTab>('chats')
-  // 图标栏「对话」按钮的红点：其他对话有新消息或待你处理时亮起（与头像红点同口径）。
-  const chatAlert = useMemo(
-    () =>
-      Object.entries(sessionStates).some(
-        ([id, st]) => id !== currentSessionId && (st.unread || st.attention)
-      ),
-    [sessionStates, currentSessionId]
-  )
+  // 图标栏「对话」按钮的红点：其他对话有新消息或待你处理时亮起（与头像红点同口径）。只认列表里看得到的对话：
+  // 删除正在跑的对话时回合被中止，随后的 done 仍会给它记一条未读；已归档的不再提醒（含仍待确认的名片）。
+  // 不过滤就成了点开找不到的红点。
+  const chatAlert = useMemo(() => {
+    const visible = new Set(storedSessions.filter((s) => !s.archived).map((s) => s.id))
+    return Object.entries(sessionStates).some(
+      ([id, st]) => id !== currentSessionId && visible.has(id) && (st.unread || st.attention)
+    )
+  }, [sessionStates, currentSessionId, storedSessions])
   // 左侧对话面板宽（可拖动）：存的是用户意图值，渲染时按窗口宽再夹取——窗口缩小时自动收窄、放大后复原。
   const viewport = useViewport()
   const trafficLights = useTrafficLights()
@@ -482,13 +499,24 @@ export function ChatFirstShell(): React.JSX.Element {
   )
   const defaultPersonaId = defaultPersona?.id
 
+  // 对话归属的角色：未绑定、或绑定的角色已不存在（如手动删了角色文件）一律算默认角色，与主进程执行时一致
+  // （见 personas.ts resolvePersonaId）。列表头像、筛选、搜索、资料卡都读这里；只改显示，不改对话里存的绑定。
+  const sessions = useMemo(() => {
+    if (!defaultPersonaId) return storedSessions
+    const ids = new Set(personas.map((p) => p.id))
+    const known = (s: SessionMeta): boolean => !!s.personaId && ids.has(s.personaId)
+    return storedSessions.every(known)
+      ? storedSessions
+      : storedSessions.map((s) => (known(s) ? s : { ...s, personaId: defaultPersonaId }))
+  }, [storedSessions, personas, defaultPersonaId])
+
   // 说明（去掉了旧的「自动绑定通用」effect）：从前只要当前对话未绑定且为空，就自动落一条绑定到默认身份
   // 的空会话——这会在「删空左侧所有对话」后立刻重建一条，导致永远无法真正清空、也进不了「快速开启」空态。
   // 现在改为：空对话由用户显式动作（点头像 / ＋开始对话 / 通过对话添加）才创建并落盘（见 startWith）；
   // 左侧无任何对话时，中列改渲染 QuickStart（列出全部角色，点头像直接开聊）。
 
-  /** 当值身份（当前对话绑定的 persona）。 */
-  const owner = personas.find((p) => p.id === currentBinding.personaId)
+  /** 当值身份（当前对话绑定的 persona；未绑定或已不存在时为默认角色，同上）。 */
+  const owner = personas.find((p) => p.id === currentBinding.personaId) ?? defaultPersona
 
   // 左侧列表数据源：把「草稿会话」（尚未落库的空对话）并到已落库会话之前——与角色开启新对话时，该对话
   // 立即出现在聊天列表（内容可为空）。草稿 id 必不在 sessions 中（见 store.draftSession），无需去重；
@@ -497,6 +525,8 @@ export function ChatFirstShell(): React.JSX.Element {
     () => (draftSession ? [draftSession, ...sessions] : sessions),
     [draftSession, sessions]
   )
+  // 列表里一条对话都没有（已归档的不算）、右侧也没开着已归档对话 → 右侧显示快速开启页。
+  const noThreads = !railSessions.some((s) => !s.archived || s.id === currentSessionId)
 
   // 打开某对话 → 切到「消息」tab（右侧内容随 railTab 切换）。不清 viewPersonaId：让「角色」tab 记住
   // 自己上次查看的角色，两个 tab 的右侧彼此独立。
@@ -639,6 +669,23 @@ export function ChatFirstShell(): React.JSX.Element {
       if (next !== null) renameSession(id, next)
     })()
   }
+  // 右键归档：从列表移走，提示条带「撤销」。归档的是当前对话时右侧随之打开列表第一条（见 store.setArchived），
+  // 撤销则把它重新打开。名字经 clipName 限长，随语言拼装。
+  const archiveThread = (id: string, title: string): void => {
+    const wasCurrent = id === currentSessionId
+    setArchived(id, true)
+    const name = clipName(title || t('chat.untitled'))
+    toast.show({
+      message: locale === 'en' ? `Archived “${name}”` : `已归档「${name}」`,
+      action: {
+        label: t('cf.undo'),
+        onClick: () => {
+          setArchived(id, false)
+          if (wasCurrent) openThread(id)
+        }
+      }
+    })
+  }
   // 按「轮」删除当前对话的选中轮次（同步删上下文）：先弹居中破坏性确认，确认后走 store.deleteTurns。
   // 返回是否已删——Conversation 据此退出选择态并清空选择（未确认则保持选择态供继续调整）。
   const deleteTurnsWithConfirm = async (indices: number[]): Promise<boolean> => {
@@ -771,6 +818,8 @@ export function ChatFirstShell(): React.JSX.Element {
               onAddPersonaByChat={addPersonaByChat}
               onNewChatFromThread={newChatFromThread}
               onRenameThread={renameThread}
+              onArchiveThread={archiveThread}
+              onUnarchiveThread={(id) => setArchived(id, false)}
               onDeleteThread={deleteThread}
               onDeletePersona={deletePersona}
               onReorderPersonas={reorderPersonas}
@@ -795,7 +844,7 @@ export function ChatFirstShell(): React.JSX.Element {
               ) : (
                 <RosterEmpty />
               )
-            ) : railSessions.length === 0 ? (
+            ) : noThreads ? (
               <QuickStart personas={personas} onStart={startWith} />
             ) : (
               <Conversation
@@ -815,6 +864,8 @@ export function ChatFirstShell(): React.JSX.Element {
                 onOpenProposal={openProposal}
                 onOpenAutotask={openAutotask}
                 onDeleteTurns={deleteTurnsWithConfirm}
+                archived={!!railSessions.find((s) => s.id === currentSessionId)?.archived}
+                onUnarchive={() => setArchived(currentSessionId, false)}
                 attention={sessionStates[currentSessionId]?.attention ?? false}
                 prefill={composerPrefill}
                 onPrefill={(text) => setComposerPrefill({ text, nonce: Date.now() })}
@@ -938,10 +989,31 @@ function IconRail({
 
 /** 列表行右键菜单：光标处（视口坐标）+ 目标（对话或角色）。 */
 type RowMenu =
-  | { x: number; y: number; kind: 'thread'; id: string; title: string }
+  | { x: number; y: number; kind: 'thread'; id: string; title: string; archived: boolean }
   | { x: number; y: number; kind: 'persona'; id: string; name: string }
 
 /* ============================ 左栏：列表列（对话 / 角色） ============================ */
+/** 对话列表的一项筛选条件：角色 id，或挂载文件夹路径（NO_FOLDER = 未挂载文件夹）。 */
+interface ConvFilter {
+  kind: 'role' | 'folder'
+  value: string
+}
+const NO_FOLDER = ''
+const folderKeyOf = (s: SessionMeta): string => s.focusRoot || NO_FOLDER
+// 同一类里选了多个是「任一」，角色与文件夹之间是「同时满足」；没选即不限。
+const passRoles = (s: SessionMeta, roles: string[]): boolean =>
+  !roles.length || roles.includes(s.personaId ?? '')
+const passFolders = (s: SessionMeta, folders: string[]): boolean =>
+  !folders.length || folders.includes(folderKeyOf(s))
+/**
+ * 列表搜索词（消息 / 角色 tab 各一份）与对话筛选：切换时不清空，由用户手动清。放在模块级，切到定时任务 /
+ * 机器人（Rail 卸载）再回来仍在；不跨重启。
+ */
+const railSearchMemo: { query: Record<'chats' | 'roster', string>; filters: ConvFilter[] } = {
+  query: { chats: '', roster: '' },
+  filters: []
+}
+
 function Rail({
   tab,
   sessions,
@@ -956,6 +1028,8 @@ function Rail({
   onAddPersonaByChat,
   onNewChatFromThread,
   onRenameThread,
+  onArchiveThread,
+  onUnarchiveThread,
   onDeleteThread,
   onDeletePersona,
   onReorderPersonas,
@@ -980,6 +1054,9 @@ function Rail({
   onNewChatFromThread: (id: string) => void
   /** 重命名对话（弹框输入新标题）；title 为当前标题。 */
   onRenameThread: (id: string, title: string) => void
+  /** 归档（从列表移走，提示条可撤销）/ 移回对话列表。 */
+  onArchiveThread: (id: string, title: string) => void
+  onUnarchiveThread: (id: string) => void
   onDeleteThread: (id: string, title: string) => void
   onDeletePersona: (id: string, name: string) => void
   onReorderPersonas: (ids: string[]) => void
@@ -993,36 +1070,170 @@ function Rail({
   /** 焦点离开列表里的输入框（且没落在列表内别处）：浮出时据此决定收回。 */
   onInputBlur: () => void
 }): React.JSX.Element {
-  const { t } = useI18n()
+  const { t, locale } = useI18n()
   // 右键菜单态（对话/角色行共用一个，同一时刻至多一个）。
   const [menu, setMenu] = useState<RowMenu | null>(null)
-  // 搜索词（对话/角色 tab 共用一个输入框，切 tab 时清空，见下方 effect）。
-  const [query, setQuery] = useState('')
+  // 搜索词：对话 / 角色 tab 共用一个输入框，但各记各的（检索对象不同，残留词会误导），切 tab 不清空。
+  const [queries, setQueries] = useState(railSearchMemo.query)
+  const query = queries[tab]
+  const setQuery = (v: string): void => setQueries((qs) => (qs[tab] === v ? qs : { ...qs, [tab]: v }))
+  // 对话筛选（只在消息 tab）：按选中先后排列，空输入框按退格撤掉最后一项。与消息 tab 的搜索词同进退——
+  // 浮出列表收回、从列表新建对话时一并清空。
+  const [filters, setFilters] = useState<ConvFilter[]>(railSearchMemo.filters)
+  const [filterOpen, setFilterOpen] = useState(false)
+  // 已归档对话：从「新建对话」浮层底部进入，在列表这一栏里列出，顶部「←」返回。已归档的不进列表、搜索与筛选。
+  const [archiveView, setArchiveView] = useState(false)
+  // 右键归档的次数：每归档一次加一，NewChatMenu 据此在 + 右上角短暂亮一枚归档角标，提示去这里找回。
+  const [archiveHint, setArchiveHint] = useState(0)
+  // 各对话在内置浏览器里开着几个网页（对话行上打地球徽标）；整栏订阅一次，不让每行各自监听
+  const browserState = useBrowserState()
+  const browserPages = useMemo(() => {
+    const n: Record<string, number> = {}
+    for (const tab of browserState?.tabs ?? []) n[tab.sessionId] = (n[tab.sessionId] ?? 0) + 1
+    return n
+  }, [browserState?.tabs])
+  const liveSessions = useMemo(() => sessions.filter((s) => !s.archived), [sessions])
+  const archivedSessions = useMemo(
+    () => sessions.filter((s) => s.archived).sort((a, b) => b.updatedAt - a.updatedAt),
+    [sessions]
+  )
+  // 最后一个已归档对话被移回或删除：入口随之隐藏，自动回到对话列表。
+  useEffect(() => {
+    if (archiveView && archivedSessions.length === 0) setArchiveView(false)
+  }, [archiveView, archivedSessions.length])
+  useEffect(() => {
+    railSearchMemo.query = queries
+    railSearchMemo.filters = filters
+  }, [queries, filters])
   // 花名册拖拽态：dragId=正被拖动的角色；dropTarget=当前悬停的落点行与半区（驱动放置指示线）。
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<{ id: string; edge: 'before' | 'after' } | null>(
     null
   )
-  // 切换 tab 时清空搜索词：两个 tab 检索对象不同（对话标题 vs 角色名），残留词会误导。
+  const clearFilters = (): void => {
+    setFilters((fs) => (fs.length ? [] : fs))
+    setFilterOpen(false)
+  }
+  // 切 tab 只收起筛选面板（面板只属于消息 tab），搜索词与筛选都保留。
   useEffect(() => {
-    setQuery('')
+    setFilterOpen(false)
   }, [tab])
   const asideRef = useRef<HTMLElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
   // 收起后浮出列表收回时：连带关掉在它里面打开的右键菜单（否则菜单留在隐藏的列表里，下次浮出时它的全屏
-  // 透明背板跟着回来，第一下点击被背板吃掉）；清空搜索词（浮出列表是临时的，下次浮出不该还是筛过的样子）；
-  // 焦点若还在列表里（如搜索框）也移走，免得接着打字打进看不见的框。
+  // 透明背板跟着回来，第一下点击被背板吃掉）；清空搜索词与筛选、退出已归档对话（浮出列表是临时的，下次浮出
+  // 不该还是筛过的样子）；焦点若还在列表里（如搜索框）也移走，免得接着打字打进看不见的框。
   useEffect(() => {
     if (!collapsed || peek) return
     setMenu(null)
     setQuery('')
+    clearFilters()
+    setArchiveView(false)
     const el = document.activeElement
     if (el instanceof HTMLElement && asideRef.current?.contains(el)) el.blur()
   }, [collapsed, peek])
+  // 删掉的角色从筛选里剔除（否则列表一直是空的，面板里又找不到它来取消）。
+  useEffect(() => {
+    setFilters((fs) => {
+      const next = fs.filter((f) => f.kind !== 'role' || personas.some((p) => p.id === f.value))
+      return next.length === fs.length ? fs : next
+    })
+  }, [personas])
+  // 筛选条件变了，列表回到顶部看结果。
+  useEffect(() => {
+    listRef.current?.scrollTo({ top: 0 })
+  }, [filters])
+  // 筛选面板：点面板、筛选按钮、已选标签以外的地方（含输入框，点它就是要打字）或按 Esc 收起。
+  // 不用全屏背板：点对话行时收起面板的同时照常打开对话。
+  useEffect(() => {
+    if (!filterOpen) return
+    const onDown = (e: MouseEvent): void => {
+      const inside =
+        e.target instanceof Element &&
+        e.target.closest('.cf-filter, .cf-search__filter')
+      if (!inside) setFilterOpen(false)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setFilterOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [filterOpen])
+  const roleIds = useMemo(() => filters.filter((f) => f.kind === 'role').map((f) => f.value), [filters])
+  const folderKeys = useMemo(
+    () => filters.filter((f) => f.kind === 'folder').map((f) => f.value),
+    [filters]
+  )
+  const toggleFilter = (kind: ConvFilter['kind'], value: string): void =>
+    setFilters((fs) =>
+      fs.some((f) => f.kind === kind && f.value === value)
+        ? fs.filter((f) => !(f.kind === kind && f.value === value))
+        : [...fs, { kind, value }]
+    )
+  // 从列表新建对话：清空搜索与筛选，保证新对话出现在列表里。
+  const startFresh = (fn: () => void): void => {
+    setQuery('')
+    clearFilters()
+    fn()
+  }
+  // 筛选面板的选项（只在打开时算）：有对话的角色按花名册顺序，挂过的文件夹按最近使用；已选的即便没有对话了
+  // 也列出来，好取消。数字是在另一类条件下的对话数，为 0 置灰（仍可点）。
+  const filterOptions = useMemo(() => {
+    if (!filterOpen) return null
+    const roles = personas
+      .filter((p) => roleIds.includes(p.id) || liveSessions.some((s) => s.personaId === p.id))
+      .map((p) => ({
+        persona: p,
+        n: liveSessions.filter((s) => s.personaId === p.id && passFolders(s, folderKeys)).length
+      }))
+    const paths: string[] = []
+    for (const s of [...liveSessions].sort((a, b) => b.updatedAt - a.updatedAt))
+      if (s.focusRoot && !paths.includes(s.focusRoot)) paths.push(s.focusRoot)
+    for (const k of folderKeys) if (k !== NO_FOLDER && !paths.includes(k)) paths.push(k)
+    const names = paths.map(basename)
+    const count = (key: string): number =>
+      liveSessions.filter((s) => folderKeyOf(s) === key && passRoles(s, roleIds)).length
+    const folders = paths.map((path, i) => ({
+      key: path,
+      name: names[i],
+      // 同名文件夹附上级目录名区分。
+      hint:
+        names.filter((n) => n === names[i]).length > 1
+          ? basename(path.replace(/[\\/]+$/, '').replace(/[\\/][^\\/]*$/, ''))
+          : '',
+      n: count(path)
+    }))
+    // 从没挂过文件夹就不出文件夹一栏（只剩「未挂载」一项，筛了等于没筛）。
+    const none = count(NO_FOLDER)
+    if (paths.length && (none || folderKeys.includes(NO_FOLDER)))
+      folders.push({ key: NO_FOLDER, name: t('cf.filterNoFolder'), hint: '', n: none })
+    return { roles, folders }
+  }, [filterOpen, personas, liveSessions, roleIds, folderKeys, t])
+  // 已选条件的说明（搜索框里只写总数，选了什么挂在悬停与读屏上）：「角色：…」「文件夹：…」各一行。
+  const pickedRoles = roleIds
+    .map((id) => personas.find((p) => p.id === id))
+    .filter((p): p is Persona => !!p)
+  const sep = locale === 'en' ? ', ' : '、'
+  const colon = locale === 'en' ? ': ' : '：'
+  const folderNames = folderKeys
+    .map((k) => (k === NO_FOLDER ? t('cf.filterNoFolder') : basename(k)))
+    .join(sep)
+  const roleNames = pickedRoles.map((p) => p.name).join(sep)
+  const filterLines = [
+    pickedRoles.length ? `${t('cf.filterRoles')}${colon}${roleNames}` : '',
+    folderKeys.length ? `${t('cf.filterFolders')}${colon}${folderNames}` : ''
+  ].filter(Boolean)
   // 归一化后的检索词（去空白 + 小写）；空则视为不过滤。
   const q = query.trim().toLowerCase()
-  // 消息列表按最近更新降序，再按检索词过滤（标题 + 所属角色名 + 挂载的文件夹名，均大小写不敏感）。
+  // 消息列表按最近更新降序，先按筛选条件，再按检索词过滤（标题 + 所属角色名 + 挂载的文件夹名，均大小写不敏感）。
   const ordered = useMemo(() => {
-    const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt)
+    const sorted = [...liveSessions]
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .filter((s) => passRoles(s, roleIds) && passFolders(s, folderKeys))
     if (!q) return sorted
     return sorted.filter((s) => {
       const owner = personas.find((p) => p.id === s.personaId)
@@ -1032,7 +1243,7 @@ function Rail({
         (s.focusRoot ? basename(s.focusRoot).toLowerCase().includes(q) : false)
       )
     })
-  }, [sessions, personas, q])
+  }, [liveSessions, personas, q, roleIds, folderKeys])
   // 角色列表按检索词过滤（角色名 + 简介，均大小写不敏感）；空词返回全部。
   const shownPersonas = useMemo(() => {
     if (!q) return personas
@@ -1057,6 +1268,29 @@ function Rail({
     const ids = personas.map((p) => p.id)
     onReorderPersonas([id, ...ids.filter((x) => x !== id)])
   }
+  // 对话行（对话列表与已归档对话共用）：右键菜单记下是否已归档，菜单项随之不同。
+  const threadRow = (s: SessionMeta): React.JSX.Element => (
+    <ThreadRow
+      key={s.id}
+      session={s}
+      owner={personas.find((p) => p.id === s.personaId)}
+      state={sessionStates[s.id]}
+      browserPages={browserPages[s.id] ?? 0}
+      active={s.id === currentSessionId}
+      onClick={() => onOpenThread(s.id)}
+      onContext={(e) => {
+        e.preventDefault()
+        setMenu({
+          x: e.clientX,
+          y: e.clientY,
+          kind: 'thread',
+          id: s.id,
+          title: s.title || '',
+          archived: !!s.archived
+        })
+      }}
+    />
+  )
   return (
     <aside
       ref={asideRef}
@@ -1069,66 +1303,168 @@ function Rail({
         if (e.target instanceof HTMLInputElement && !(to instanceof Node && e.currentTarget.contains(to))) onInputBlur()
       }}
     >
-      {/* 顶部：搜索占满整行；消息 tab 并排「新建对话」入口（悬停出角色列表），角色 tab 并排「添加角色」入口（悬停/点击出二选一弹层）。 */}
+      {/* 顶部：搜索占满整行；消息 tab 并排「新建对话」入口（悬停出角色列表），角色 tab 并排「添加角色」入口（悬停/点击出二选一弹层）。
+          消息 tab 的搜索框最左是筛选按钮（代替放大镜）；选了条件后换成已选的角色头像（堆叠）与文件夹（多个时标数字），
+          点它们同样打开筛选面板。 */}
       <div className="cf-rail__top">
-        <div className="cf-search">
-          <Search className="cf-search__icon" size={14} />
-          <input
-            className="cf-search__input"
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={tab === 'chats' ? t('cf.searchChats') : t('cf.searchRoster')}
-            aria-label={t('cf.search')}
-          />
-          {query && (
+        {tab === 'chats' && archiveView ? (
+          // 已归档对话：顶行换成「← 已归档对话 N」，返回即回到对话列表（搜索词与筛选原样保留）。
+          <>
             <button
-              className="cf-search__clear"
-              title={t('common.close')}
-              aria-label={t('common.close')}
-              onClick={() => setQuery('')}
+              className="cf-rail__back"
+              title={t('cf.backToChats')}
+              aria-label={t('cf.backToChats')}
+              onClick={() => setArchiveView(false)}
             >
-              <X size={13} />
+              <ArrowLeft size={16} />
             </button>
+            <span className="cf-rail__title">{t('cf.archivedChats')}</span>
+            <span className="cf-rail__count">{archivedSessions.length}</span>
+          </>
+        ) : (
+          <>
+          <div className={`cf-search${tab === 'chats' ? ' cf-search--filter' : ''}`}>
+            {tab !== 'chats' ? (
+              <Search className="cf-search__icon" size={14} />
+            ) : (
+              // 选了条件仍是同一个按钮：原位加底色、图标后接已选总数，图标不换不挪，选择前后不跳。
+              <button
+                className={`cf-search__filter${filters.length ? ' is-active' : ''}`}
+                title={filters.length ? filterLines.join('\n') : t('cf.filter')}
+                aria-label={
+                  filters.length ? filterLines.join(locale === 'en' ? '; ' : '；') : t('cf.filter')
+                }
+                aria-haspopup="menu"
+                aria-expanded={filterOpen}
+                onClick={() => setFilterOpen((o) => !o)}
+              >
+                <ListFilter size={15} />
+                {filters.length > 0 && filters.length}
+              </button>
+            )}
+            <input
+              className="cf-search__input"
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={
+                tab === 'chats' ? t(filters.length ? 'cf.search' : 'cf.searchChats') : t('cf.searchRoster')
+              }
+              aria-label={t('cf.search')}
+            />
+            {(query || filters.length > 0) && (
+              <button
+                className="cf-search__clear"
+                title={filters.length ? t('cf.clearSearch') : t('common.close')}
+                aria-label={filters.length ? t('cf.clearSearch') : t('common.close')}
+                onClick={() => {
+                  setQuery('')
+                  clearFilters()
+                }}
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          {tab === 'chats' && (
+            <NewChatMenu
+              personas={personas}
+              archivedCount={archivedSessions.length}
+              archiveHint={archiveHint}
+              onStart={(id) => startFresh(() => onStartPersona(id))}
+              onOpenArchive={() => {
+                setFilterOpen(false)
+                setArchiveView(true)
+              }}
+            />
           )}
-        </div>
-        {tab === 'chats' && <NewChatMenu personas={personas} onStart={onStartPersona} />}
-        {tab === 'roster' && (
-          <AddMenu
-            manualLabel={t('cf.addPersona')}
-            chatLabel={t('cf.addByChat')}
-            onManual={onAddPersona}
-            onByChat={onAddPersonaByChat}
-          />
+          {tab === 'roster' && (
+            <AddMenu
+              manualLabel={t('cf.addPersona')}
+              chatLabel={t('cf.addByChat')}
+              onManual={onAddPersona}
+              onByChat={onAddPersonaByChat}
+            />
+          )}
+          </>
+        )}
+        {/* 筛选面板：外观同统一下拉框的浮层，角色与文件夹两栏，点选即时生效、面板不收起。选中项铺浅主题色底（同对话列表的当前行），不用行尾对勾。 */}
+        {tab === 'chats' && !archiveView && filterOptions && (
+          <div className="select-menu cf-filter" role="menu" aria-label={t('cf.filter')}>
+            <div className="select-menu__group">{t('cf.filterRoles')}</div>
+            {filterOptions.roles.map(({ persona: p, n }) => {
+              const on = roleIds.includes(p.id)
+              return (
+                <button
+                  key={p.id}
+                  className={`select-menu__opt cf-filter__opt${on ? ' is-on' : ''}${!n && !on ? ' is-dim' : ''}`}
+                  role="menuitemcheckbox"
+                  aria-checked={on}
+                  // 不抢输入框的焦点（浮出列表靠它判断是否在打字）。
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => toggleFilter('role', p.id)}
+                >
+                  <span className="select-ava">
+                    <PersonaFace seed={p.id} spec={parseAvatarSpec(p.avatar)} image={p.avatarImage} />
+                  </span>
+                  <span className="select-menu__main">
+                    <span className="select-menu__name">{p.name}</span>
+                  </span>
+                  <span className="cf-filter__count">{n}</span>
+                </button>
+              )
+            })}
+            {filterOptions.folders.length > 0 && (
+              <>
+                <div className="select-menu__sep" />
+                <div className="select-menu__group">{t('cf.filterFolders')}</div>
+                {filterOptions.folders.map(({ key, name, hint, n }) => {
+                  const on = folderKeys.includes(key)
+                  return (
+                    <button
+                      key={key || '\0'}
+                      className={`select-menu__opt cf-filter__opt${on ? ' is-on' : ''}${!n && !on ? ' is-dim' : ''}`}
+                      role="menuitemcheckbox"
+                      aria-checked={on}
+                      title={key || undefined}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => toggleFilter('folder', key)}
+                    >
+                      <span className="cf-filter__icon">
+                        {key === NO_FOLDER ? <FolderMinus size={15} /> : <Folder size={15} />}
+                      </span>
+                      <span className="select-menu__main">
+                        <span className="select-menu__name">
+                          {name}
+                          {hint && <span className="cf-filter__hint"> · {hint}</span>}
+                        </span>
+                      </span>
+                      <span className="cf-filter__count">{n}</span>
+                    </button>
+                  )
+                })}
+              </>
+            )}
+          </div>
         )}
       </div>
 
       {/* 角色 tab：角色为空只会是还没加载完（默认角色 Deva 删不掉），先留空，不落到「未找到匹配项」。 */}
-      <div className="cf-list">
-        {tab === 'chats' ? (
+      <div className="cf-list" ref={listRef}>
+        {tab === 'chats' && archiveView ? (
+          archivedSessions.map(threadRow)
+        ) : tab === 'chats' ? (
           ordered.length === 0 ? (
-            <div className="cf-empty">{q ? t('cf.searchNoResults') : t('chat.noSessions')}</div>
+            <div className="cf-empty">
+              {q || filters.length ? t('cf.searchNoResults') : t('chat.noSessions')}
+              {filters.length > 0 && (
+                <button className="cf-empty__action" onClick={clearFilters}>
+                  {t('cf.filterClear')}
+                </button>
+              )}
+            </div>
           ) : (
-            ordered.map((s) => (
-              <ThreadRow
-                key={s.id}
-                session={s}
-                owner={personas.find((p) => p.id === s.personaId)}
-                state={sessionStates[s.id]}
-                active={s.id === currentSessionId}
-                onClick={() => onOpenThread(s.id)}
-                onContext={(e) => {
-                  e.preventDefault()
-                  setMenu({
-                    x: e.clientX,
-                    y: e.clientY,
-                    kind: 'thread',
-                    id: s.id,
-                    title: s.title || ''
-                  })
-                }}
-              />
-            ))
+            ordered.map(threadRow)
           )
         ) : personas.length === 0 ? null : shownPersonas.length === 0 ? (
           <div className="cf-empty">{t('cf.searchNoResults')}</div>
@@ -1165,17 +1501,43 @@ function Rail({
           y={menu.y}
           onClose={() => setMenu(null)}
           items={
-            menu.kind === 'thread'
+            menu.kind === 'thread' && menu.archived
+              ? [
+                  {
+                    label: t('cf.unarchive'),
+                    icon: <ArchiveRestore size={14} />,
+                    onClick: () => onUnarchiveThread(menu.id)
+                  },
+                  {
+                    label: t('cf.deleteChat'),
+                    icon: <Trash2 size={14} />,
+                    danger: true,
+                    onClick: () => onDeleteThread(menu.id, menu.title)
+                  }
+                ]
+              : menu.kind === 'thread'
               ? [
                   {
                     label: t('cf.newChat'),
                     icon: <Plus size={14} />,
-                    onClick: () => onNewChatFromThread(menu.id)
+                    onClick: () => startFresh(() => onNewChatFromThread(menu.id))
                   },
                   {
                     label: t('cf.renameChat'),
                     icon: <Pencil size={14} />,
                     onClick: () => onRenameThread(menu.id, menu.title)
+                  },
+                  {
+                    label: t('cf.archive'),
+                    icon: <Archive size={14} />,
+                    // 进行中不能归档（灰显 + 悬停说明）：归档后它在看不见的地方跑完，红点却指向列表里找不到的对话。
+                    // 反过来已归档的对话一开始新一轮就会移回列表（主进程 emitTurnStart），故「进行中」与「已归档」互斥。
+                    disabled: sessionStates[menu.id]?.streaming === true,
+                    title: sessionStates[menu.id]?.streaming ? t('cf.archiveBusy') : undefined,
+                    onClick: () => {
+                      setArchiveHint((n) => n + 1)
+                      onArchiveThread(menu.id, menu.title)
+                    }
                   },
                   {
                     label: t('cf.deleteChat'),
@@ -1454,7 +1816,8 @@ function GitWidget({ root, streaming }: { root: string; streaming: boolean }): R
   const { t, locale } = useI18n()
   const toast = useToast()
   const dialog = useDialog()
-  const { activeModel, hasKey } = useModels()
+  const { activeModel, providers, hasKey } = useModels()
+  const { currentBinding } = useChat()
   const { available, status, busy, refresh } = useGitStatus(root)
 
   // 一轮结束（正常完成 / 中断 / 出错，streaming 由 true 落为 false）后刷新一次：
@@ -1723,14 +2086,17 @@ function GitWidget({ root, streaming }: { root: string; streaming: boolean }): R
     ]
   }
 
+  // 生成提交信息用本对话的生效模型，与发送消息同口径（store/chat.tsx send）：本对话已选 → 否则回落最近使用。
+  // 只取最近使用会在本对话绑定了别的模型时用错服务商（如对话走 http 中转、最近使用却是被拦的 https 服务商）。
+  const genModel = findActive(providers, currentBinding.model ?? null) ?? activeModel
   const commitModel: GitGenModel | null =
-    activeModel && hasKey(activeModel.provider.id)
+    genModel && hasKey(genModel.provider.id)
       ? {
-          // activeModel 恒为对话模型（选择器已按 purpose 过滤），adapter 必属 LLM 三协议之一。
-          adapter: activeModel.provider.adapter as GitGenModel['adapter'],
-          providerId: activeModel.provider.id,
-          baseURL: activeModel.provider.apiHost,
-          model: activeModel.model.id
+          // 选择器只列对话模型（已按 purpose 过滤），adapter 必属 LLM 三协议之一。
+          adapter: genModel.provider.adapter as GitGenModel['adapter'],
+          providerId: genModel.provider.id,
+          baseURL: genModel.provider.apiHost,
+          model: genModel.model.id
         }
       : null
 
@@ -1874,7 +2240,7 @@ function cleanStreamingCommit(raw: string): string {
 
 /**
  * 轻量提交框（v1 只做「暂存全部改动 + 提交」，不含逐文件 diff/staging）：
- * 顶部一行改动数量摘要；一个信息 textarea；「AI 生成」按当前模型走 generateCommitMessage（无模型/无密钥则灰掉）。
+ * 顶部一行改动数量摘要；一个信息 textarea；「AI 生成」按本对话的生效模型（同输入框所选）走 generateCommitMessage（无模型/无密钥则灰掉）。
  * 生成时文字流式填入输入框（只读），按钮变「停止生成」；中断保留已生成部分，关闭提交框也会中断。
  * 有冲突时禁止提交并提示先解决——避免把未合并状态提交进去。
  */
@@ -2114,17 +2480,61 @@ function useHoverMenu(): {
 
 /**
  * 「新建对话」入口（消息 tab 搜索行右侧）：外观与交互同 AddMenu，浮层列出花名册全部角色，
- * 点某个角色即以其开启一条全新对话（onStart → startWith）。角色多时浮层内滚动。
+ * 点某个角色即以其开启一条全新对话（onStart → startWith）。角色多时角色列表内滚动；有已归档对话时
+ * 底部隔线固定一行「已归档对话」与数量（不随列表滚走），点了在列表这一栏打开已归档对话。
  */
 function NewChatMenu({
   personas,
-  onStart
+  archivedCount,
+  archiveHint,
+  onStart,
+  onOpenArchive
 }: {
   personas: Persona[]
+  archivedCount: number
+  /** 右键归档的次数（Rail 每归档一次加一）；变化时在 + 右上角短暂亮归档角标。 */
+  archiveHint: number
   onStart: (personaId: string) => void
+  onOpenArchive: () => void
 }): React.JSX.Element {
   const { t } = useI18n()
   const { open, hoverProps, show, choose } = useHoverMenu()
+  // 归档角标：亮约 1.5 秒后淡出；连续归档重新计时并轻跳一下。鼠标停在 + / 浮层上时一直亮着（浮层底部
+  // 「已归档对话」同时标主题色），移开即熄。只认挂载后的变化——切 tab、进出已归档视图会重新挂载本组件，
+  // 不能把之前的计数当成新归档。撤销到一条已归档都不剩时也熄（浮层里已没有那一行）。
+  const [hint, setHint] = useState(false)
+  const seenHint = useRef(archiveHint)
+  const hovered = useRef(false)
+  const badgeRef = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    if (archiveHint === seenHint.current) return
+    seenHint.current = archiveHint
+    hovered.current = false
+    if (hint && !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      badgeRef.current?.animate(
+        [{ transform: 'scale(1)' }, { transform: 'scale(1.2)' }, { transform: 'scale(1)' }],
+        { duration: 220, easing: 'ease-out' }
+      )
+    }
+    setHint(true)
+    // 只随归档次数触发；hint 仅用来判断是否已经亮着
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [archiveHint])
+  useEffect(() => {
+    if (!hint) return
+    if (open) {
+      hovered.current = true
+      return
+    }
+    if (hovered.current) {
+      hovered.current = false
+      setHint(false)
+      return
+    }
+    const timer = window.setTimeout(() => setHint(false), 1500)
+    return () => window.clearTimeout(timer)
+  }, [hint, open, archiveHint])
+  const hinting = hint && archivedCount > 0
   return (
     <div className="cf-addmenu" {...hoverProps}>
       <button
@@ -2137,25 +2547,48 @@ function NewChatMenu({
       >
         <Plus size={16} />
       </button>
-      {open && personas.length > 0 && (
+      <span ref={badgeRef} className={`cf-addmenu__badge${hinting ? ' is-on' : ''}`} aria-hidden="true">
+        <Archive size={10} strokeWidth={2.6} />
+      </span>
+      {open && (personas.length > 0 || archivedCount > 0) && (
         <div className="cf-addmenu__pop cf-addmenu__pop--scroll" role="menu">
-          {personas.map((p) => (
-            <button
-              key={p.id}
-              className="cf-addmenu__item cf-addmenu__item--persona"
-              role="menuitem"
-              // 名字 / 专长过长时单行省略，悬停 title 给出全文。
-              title={p.desc ? `${p.name} · ${p.desc}` : p.name}
-              onClick={() => choose(() => onStart(p.id))}
-            >
-              <Avatar persona={p} size={28} />
-              {/* 与花名册行同构：角色名 + 专长（未填写则只显示名字）。 */}
-              <span className="cf-addmenu__main">
-                <span className="cf-addmenu__name">{p.name}</span>
-                {p.desc && <span className="cf-addmenu__desc">{p.desc}</span>}
-              </span>
-            </button>
-          ))}
+          {personas.length > 0 && (
+            <div className="cf-addmenu__list">
+              {personas.map((p) => (
+                <button
+                  key={p.id}
+                  className="cf-addmenu__item cf-addmenu__item--persona"
+                  role="menuitem"
+                  // 名字 / 专长过长时单行省略，悬停 title 给出全文。
+                  title={p.desc ? `${p.name} · ${p.desc}` : p.name}
+                  onClick={() => choose(() => onStart(p.id))}
+                >
+                  <Avatar persona={p} size={28} />
+                  {/* 与花名册行同构：角色名 + 专长（未填写则只显示名字）。 */}
+                  <span className="cf-addmenu__main">
+                    <span className="cf-addmenu__name">{p.name}</span>
+                    {p.desc && <span className="cf-addmenu__desc">{p.desc}</span>}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+          {/* 没有已归档对话时连同分隔线一起不显示。 */}
+          {archivedCount > 0 && (
+            <>
+              {personas.length > 0 && <div className="cf-addmenu__sep" />}
+              <button
+                className={`cf-addmenu__item${hinting ? ' is-hint' : ''}`}
+                role="menuitem"
+                onClick={() => choose(onOpenArchive)}
+              >
+                <Archive size={15} className="cf-addmenu__icon" />
+                <span className="cf-addmenu__label">{t('cf.archivedChats')}</span>
+                <span className="cf-addmenu__count">{archivedCount}</span>
+                <ChevronRight size={14} className="cf-addmenu__chev" />
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -2214,6 +2647,7 @@ function ThreadRow({
   session,
   owner,
   state,
+  browserPages,
   active,
   onClick,
   onContext
@@ -2221,6 +2655,8 @@ function ThreadRow({
   session: SessionMeta
   owner?: Persona
   state?: SessionLiveState
+  /** 这个对话在内置浏览器里开着几个网页（>0 时标题旁打地球徽标）。 */
+  browserPages: number
   active: boolean
   onClick: () => void
   onContext: (e: React.MouseEvent) => void
@@ -2238,39 +2674,55 @@ function ThreadRow({
       onContextMenu={onContext}
     >
       {/* 对话中（streaming）→ 头像上一道扫光指示；有新消息 / 待你处理 → 右上角红点。
-          正在查看的对话不打红点（内容就在眼前）。 */}
+          正在查看的对话不打红点（内容就在眼前），已归档的也不打（归档即不再提醒）。 */}
       <Avatar
         persona={owner}
         size={38}
         busy={state?.streaming}
-        attention={!active && state?.attention}
-        unread={!active && state?.unread}
+        attention={!active && !session.archived && state?.attention}
+        unread={!active && !session.archived && state?.unread}
       />
       <div className="cf-thread__main">
         {/* 上：对话标题与时间（主视觉，醒目显示对话内容）；下：角色名，挂了文件夹则换成文件夹名（悬停看完整路径，角色看头像）。 */}
         <div className="cf-thread__top">
           <span className="cf-thread__title">{session.title || t('chat.untitled')}</span>
-          {isTask && (
-            <span className="cf-thread__badge" title={t('cf.tabTasks')}>
-              <AlarmClock size={11} />
-            </span>
-          )}
           <span className="cf-thread__time">{rel(session.updatedAt)}</span>
         </div>
-        {/* 这个会话里有没发出的内容（且不是正在看的会话）：下行换成红色「[草稿]」+ 内容开头，提醒切回去接着写。 */}
-        {draft && !active ? (
-          <div className="cf-thread__owner">
-            <span className="cf-thread__draft">{t('cf.draftTag')}</span>
-            {draft}
-          </div>
-        ) : session.focusRoot ? (
-          <div className="cf-thread__owner cf-thread__owner--ws" title={session.focusRoot}>
-            <Folder size={11} />
-            <span className="cf-thread__wsname">{basename(session.focusRoot)}</span>
-          </div>
-        ) : (
-          <div className="cf-thread__owner">{owner?.name ?? ''}</div>
-        )}
+        {/* 下行：左边是角色名 / 文件夹名 / 草稿，右边是状态图标，与上方时间右缘对齐（右侧一列：上时间、下状态）。 */}
+        <div className="cf-thread__sub">
+          {/* 这个会话里有没发出的内容（且不是正在看的会话）：下行换成红色「[草稿]」+ 内容开头，提醒切回去接着写。 */}
+          {draft && !active ? (
+            <div className="cf-thread__owner">
+              <span className="cf-thread__draft">{t('cf.draftTag')}</span>
+              {draft}
+            </div>
+          ) : session.focusRoot ? (
+            <div className="cf-thread__owner cf-thread__owner--ws" title={session.focusRoot}>
+              <Folder size={11} />
+              <span className="cf-thread__wsname">{basename(session.focusRoot)}</span>
+            </div>
+          ) : (
+            <div className="cf-thread__owner">{owner?.name ?? ''}</div>
+          )}
+          {(isTask || browserPages > 0) && (
+            <span className="cf-thread__badges">
+              {isTask && (
+                <span className="cf-thread__badge" title={t('cf.tabTasks')}>
+                  <AlarmClock size={13} />
+                </span>
+              )}
+              {/* 开着内置浏览器的网页。地球是满圆，比闹钟显大，缩 1px 让两者观感一致 */}
+              {browserPages > 0 && (
+                <span
+                  className="cf-thread__badge"
+                  title={t('browser.threadBadge').replace('{n}', String(browserPages))}
+                >
+                  <Globe size={12} />
+                </span>
+              )}
+            </span>
+          )}
+        </div>
       </div>
     </button>
   )
@@ -2813,9 +3265,71 @@ function TaskRailRow({
 /** 任务详情运行历史默认展示的条数（最近 N 次），超出折叠在「展开全部」后。 */
 const HISTORY_PREVIEW = 5
 
+type TaskRunStatus = TaskRecord['runs'][number]['status']
+
 /**
- * 右详情面（对齐角色资料卡 .cf-profile）：展示选中任务的类型/状态、日程与运行信息、任务指令、
- * 运行历史，以及操作（编辑·暂停/恢复·立即运行·删除）。日程人读摘要经 useSchedulePreview 权威求值。
+ * 运行状态图标的圆内符号（圆框共用）：对勾 / 叉 / i（中止）/ 双箭头（追赶跳过）。
+ * 中止与对话里「已停止本轮回复」的提示同一个图标（lucide Info）、同为黄色，两处说的是同一件事。
+ */
+const RUN_ICON_MARK: Record<TaskRunStatus, React.ReactNode> = {
+  ok: <path d="m9 12 2 2 4-4" />,
+  error: (
+    <>
+      <path d="m15 9-6 6" />
+      <path d="m9 9 6 6" />
+    </>
+  ),
+  aborted: (
+    <>
+      <path d="M12 16v-4" />
+      <path d="M12 8h.01" />
+    </>
+  ),
+  skipped: (
+    <>
+      <path d="m8 9 3 3-3 3" />
+      <path d="m13 9 3 3-3 3" />
+    </>
+  )
+}
+
+/**
+ * 运行状态图标（任务详情「上次」与运行历史共用，对比稿 design/run-status-icons.html 方案 A）：同宽线框圆形，
+ * 文字徽标长短不一会把后面的摘要挤得对不齐。悬停显示状态文字，失败时连同原因。
+ */
+function RunStatusIcon({
+  status,
+  label,
+  detail
+}: {
+  status: TaskRunStatus
+  label: string
+  detail?: string
+}): React.JSX.Element {
+  const title = detail ? `${label}：${detail}` : label
+  return (
+    <span className={`cf-runicon is-${status}`} role="img" aria-label={title} title={title}>
+      <svg
+        viewBox="0 0 24 24"
+        width={14}
+        height={14}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="10" />
+        {RUN_ICON_MARK[status]}
+      </svg>
+    </span>
+  )
+}
+
+/**
+ * 右详情面（对齐角色资料卡 .cf-profile）：展示选中任务的类型/状态、日程与运行信息、运行历史，
+ * 以及操作（编辑·暂停/恢复·立即运行·删除）。任务指令不在此展示，点「编辑」查看。
+ * 日程人读摘要经 useSchedulePreview 权威求值。
  */
 function TaskDetail({
   task,
@@ -2839,22 +3353,19 @@ function TaskDetail({
   const desc = useSchedulePreview(task.schedule)
 
   const lastRun = task.runs.length > 0 ? task.runs[task.runs.length - 1] : undefined
-  const lastKey =
-    lastRun?.status === 'ok'
+  const runKey = (s: TaskRunStatus): string =>
+    s === 'ok'
       ? 'tasks.runOk'
-      : lastRun?.status === 'skipped'
+      : s === 'skipped'
         ? 'tasks.runSkipped'
-        : 'tasks.runError'
-  const runKey = (s: 'ok' | 'error' | 'skipped'): string =>
-    s === 'ok' ? 'tasks.runOk' : s === 'skipped' ? 'tasks.runSkipped' : 'tasks.runError'
+        : s === 'aborted'
+          ? 'tasks.runAborted'
+          : 'tasks.runError'
   // 运行历史按时间降序（最近在上）。
   const history = useMemo(() => [...task.runs].reverse(), [task.runs])
   // 默认只列最近 HISTORY_PREVIEW 次，超出时给「展开全部」开关（组件按 task.id 取 key，切任务即复位收起）。
   const [historyAll, setHistoryAll] = useState(false)
   const shownHistory = historyAll ? history : history.slice(0, HISTORY_PREVIEW)
-
-  // 任务指令可能很长（占位过多），做成折叠面板：标题行作开关，默认收起（不渲染指令体），点击可展开/再收起。
-  const [promptOpen, setPromptOpen] = useState(false)
 
   return (
     <main className="cf-conv">
@@ -2889,15 +3400,16 @@ function TaskDetail({
             <div className="cf-profile__row">
               <span className="cf-profile__k">{t('tasks.lastRun')}</span>
               <span className="cf-profile__v">
-                {task.lastRunAt ? (
+                {/* 时间与状态都取运行历史的最后一条（含「立即运行」）：task.lastRunAt 只在按日程触发时更新，
+                    拿它配最后一条的状态会对不上。 */}
+                {lastRun ? (
                   <>
-                    {rel(task.lastRunAt)}
-                    <span
-                      className={`cf-runbadge is-${lastRun?.status ?? 'error'}`}
-                      title={lastRun?.error || undefined}
-                    >
-                      {t(lastKey)}
-                    </span>
+                    {rel(lastRun.firedAt)}
+                    <RunStatusIcon
+                      status={lastRun.status}
+                      label={t(runKey(lastRun.status))}
+                      detail={lastRun.error}
+                    />
                   </>
                 ) : (
                   t('tasks.lastNever')
@@ -2912,19 +3424,6 @@ function TaskDetail({
               <span className="cf-profile__k">{t('tasks.fModel')}</span>
               <span className="cf-profile__v">{modelLabel}</span>
             </div>
-          </div>
-
-          <div className="cf-tdetail__section">
-            <button
-              type="button"
-              className="cf-tdetail__prompthead"
-              onClick={() => setPromptOpen((v) => !v)}
-              aria-expanded={promptOpen}
-            >
-              <ChevronRight size={14} className={`cf-tdetail__chev${promptOpen ? ' is-open' : ''}`} />
-              <span className="cf-profile__convs-label">{t('tasks.fPrompt')}</span>
-            </button>
-            {promptOpen && <div className="cf-tdetail__prompt">{task.prompt}</div>}
           </div>
 
           <div className="cf-tdetail__actions">
@@ -2955,17 +3454,17 @@ function TaskDetail({
             {history.length === 0 ? (
               <div className="cf-empty">{t('tasks.historyEmpty')}</div>
             ) : (
-              shownHistory.map((run, i) => (
-                <div key={i} className="cf-trun">
-                  <span className="cf-trun__time">{fmtAbs(run.firedAt, locale)}</span>
-                  <span className={`cf-runbadge is-${run.status}`} title={run.error || undefined}>
-                    {t(runKey(run.status))}
-                  </span>
-                  {(run.summary || run.error) && (
-                    <span className="cf-trun__msg">{run.summary || run.error}</span>
-                  )}
-                </div>
-              ))
+              <div className="cf-truns">
+                {shownHistory.map((run, i) => (
+                  <div key={i} className="cf-trun">
+                    <span className="cf-trun__time">{fmtAbs(run.firedAt, locale)}</span>
+                    <RunStatusIcon status={run.status} label={t(runKey(run.status))} detail={run.error} />
+                    {(run.summary || run.error) && (
+                      <span className="cf-trun__msg">{run.summary || run.error}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
             {history.length > HISTORY_PREVIEW && (
               <button
@@ -3223,6 +3722,8 @@ function Conversation({
   onOpenProposal,
   onOpenAutotask,
   onDeleteTurns,
+  archived,
+  onUnarchive,
   attention,
   prefill,
   onPrefill,
@@ -3247,6 +3748,9 @@ function Conversation({
   onOpenAutotask: (taskId: string) => void
   /** 按「轮」删除选中轮次（含破坏性确认）；返回是否已删（true=退出选择态并清空选择）。 */
   onDeleteTurns: (turnIndices: number[]) => Promise<boolean>
+  /** 当前对话已归档：标题栏显示「已归档」与「移回对话列表」。 */
+  archived: boolean
+  onUnarchive: () => void
   /** 当前会话有待用户处理的卡片（问答 / 计划 / 挂载请求）：此时不开回滚面板。 */
   attention: boolean
   /** 输入框预填（一次性、不发送）；null 表示无待预填。 */
@@ -3593,7 +4097,13 @@ function Conversation({
     const inner = el?.firstElementChild
     if (!el || !inner || !isTail) return
     const ro = new ResizeObserver(() => {
-      if (stickRef.current || el.scrollHeight - el.scrollTop - el.clientHeight > BOTTOM_THRESHOLD) return
+      // 贴底时可视区变矮（如输入框上方多出一排胶囊：浏览器 / 待办 / 后台任务）：立刻贴回底部。否则最新的步骤、思考
+      // 被挤到可视区下面，要等下一次内容更新才滚回来——Deva 正在执行耗时的步骤时，那一行会一直被挡着
+      if (stickRef.current) {
+        if (el.scrollHeight - el.scrollTop - el.clientHeight > 1) el.scrollTop = el.scrollHeight
+        return
+      }
+      if (el.scrollHeight - el.scrollTop - el.clientHeight > BOTTOM_THRESHOLD) return
       stickRef.current = true
       setAtBottom(true)
     })
@@ -3674,6 +4184,18 @@ function Conversation({
           {/* 顶部只显示角色名称（去掉头像与描述行）；仍可点击打开资料卡。 */}
           <div className="cf-idbtn__name">{owner?.name ?? ''}</div>
         </button>
+        {archived && (
+          <>
+            <span className="cf-conv__tag">
+              <Archive size={11} />
+              {t('cf.archivedTag')}
+            </span>
+            <button className="cf-conv__headbtn" onClick={onUnarchive}>
+              <ArchiveRestore size={13} />
+              {t('cf.unarchive')}
+            </button>
+          </>
+        )}
       </div>
 
       {/* 删除入口在聊天区右键唤起（见 onMsgsContextMenu）；选择态由右键菜单的「选择删除」开启。 */}
@@ -4247,6 +4769,61 @@ function subscribeDrafts(onChange: () => void): () => void {
   }
 }
 
+/**
+ * 正在显示的输入框（随会话切换更新）：插入的消息被撤回或退回时，正是这个会话就直接放回输入框，否则并进那个
+ * 会话的草稿（见 restoreToComposer）。
+ */
+let liveComposer: { sessionId: string; restore: (text: string) => void } | null = null
+
+/** 把文字放回某会话的输入框：排在已有内容之前，中间空一行。 */
+function restoreToComposer(sessionId: string, text: string): void {
+  if (!text.trim()) return
+  if (liveComposer?.sessionId === sessionId) {
+    liveComposer.restore(text)
+    return
+  }
+  const d = composerDrafts.get(sessionId)
+  setComposerDraft(sessionId, {
+    text: d?.text.trim() ? `${text}\n\n${d.text}` : text,
+    pending: d?.pending ?? []
+  })
+}
+
+/**
+ * 待送达的插入消息（输入框上方，与待办清单、后台任务胶囊同一排）：回合进行中插入、当前步骤还没结束的消息。
+ * 「撤回」把文字放回输入框，可以改完再插入；送达后胶囊消失，消息出现在执行步骤里。多条显示条数，送达时合并成一条。
+ */
+function InsertCapsule({ sessionId }: { sessionId: string }): React.JSX.Element | null {
+  const { t } = useI18n()
+  const { pendingInserts, withdrawInserts } = useChat()
+  const [busy, setBusy] = useState(false)
+  const order = useDockOrder(pendingInserts.length > 0, sessionId)
+  if (pendingInserts.length === 0) return null
+  const text = pendingInserts.join('  ')
+  const withdraw = (): void => {
+    setBusy(true)
+    void withdrawInserts()
+      .then((back) => restoreToComposer(sessionId, back))
+      .finally(() => setBusy(false))
+  }
+  return (
+    <div className="cf-ins" style={{ order }}>
+      {/* 消息文字最多 160px（见 .cf-dock），完整内容挂在悬停上 */}
+      <div className="cf-bg__pill cf-ins__pill" title={`${text}\n${t('cf.insert.pendingHint')}`}>
+        <Clock size={13} className="cf-ins__icon" />
+        <span className="cf-bg__label cf-ins__label">{t('cf.insert.pending')}</span>
+        <span className="cf-bg__name">{text}</span>
+        {pendingInserts.length > 1 && (
+          <span className="cf-ins__count">{t('cf.insert.count').replace('{n}', String(pendingInserts.length))}</span>
+        )}
+        <button type="button" className="cf-bg__stop" disabled={busy} onClick={withdraw}>
+          {t('cf.insert.withdraw')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /** 某会话草稿的一行摘要：正文（空白归一），只有附件时为附件名；没有草稿为 null。 */
 function useDraftPreview(id: string): string | null {
   return useSyncExternalStore(subscribeDrafts, () => {
@@ -4294,6 +4871,7 @@ function Composer({
     [allSkills, ownerId]
   )
   const toast = useToast()
+  const { insert: onInsert } = useChat()
   const [input, setInput] = useState('')
   const [pending, setPending] = useState<Picked[]>([])
   const pendingRef = useRef(pending)
@@ -4378,9 +4956,22 @@ function Composer({
   const applySlash = (c: SlashCommand): void => composer.setText(`/${c.name} `, true)
 
   const name = owner?.name ?? t('cf.assistant')
-  const placeholder = locale === 'en' ? `Message ${name}…` : `跟 ${name} 说点什么…`
+  // 回合进行中：输入框里的文字会插入当前这一轮，占位提示说明送达时机。
+  const placeholder = streaming
+    ? t('cf.insert.placeholder').replace('{name}', name)
+    : locale === 'en'
+      ? `Message ${name}…`
+      : `跟 ${name} 说点什么…`
   const supported = pending.filter((p) => p.supported)
   const canSend = Boolean(input.trim()) || supported.length > 0
+  // 回合进行中有文字：唯一的按键是「发送」（插入当前轮）。只插文字，待发附件留在输入框里随下一条消息发出。
+  const canInsert = streaming && Boolean(input.trim())
+  /** 上一次插入的时刻：插入后输入框清空、同一位置随即变成停止键，短时间内不认停止，防双击把任务停掉。 */
+  const insertedAtRef = useRef(0)
+  const stopTurn = (): void => {
+    if (Date.now() - insertedAtRef.current < 600) return
+    onStop()
+  }
   const mounted = Boolean(focusRoot)
 
   // 挂载工作区（放在输入区工具条，取代原顶部头部的入口）：仅未挂载态的 chip 调用，选了才挂载，取消则保持现状。
@@ -4558,10 +5149,28 @@ function Composer({
   const removePending = (path: string): void =>
     setPending((prev) => prev.filter((p) => p.path !== path))
 
+  // 插入当前轮：清空输入框交给主进程，当前步骤结束后送达；没插进去（原因已 toast）就把文字放回。
+  const insertNow = (): void => {
+    const text = composer.getText()
+    // /compact、/rewind 是本地指令，回合进行中用不了，也不该当成消息插进去。
+    if (!text.trim() || /^\/(compact|rewind)$/i.test(text.trim())) return
+    const sid = sessionId
+    insertedAtRef.current = Date.now()
+    composer.setText('')
+    composer.clearHistory()
+    void onInsert(text).then((ok) => {
+      if (!ok) restoreToComposer(sid, text)
+    })
+  }
+
   const submit = (): void => {
+    if (streaming) {
+      insertNow()
+      return
+    }
     const text = composer.getText()
     const atts = pending.filter((p) => p.supported)
-    if ((!text.trim() && atts.length === 0) || streaming) return
+    if (!text.trim() && atts.length === 0) return
     // /rewind 纯渲染层指令：打开回滚面板、不发消息；此刻不可用则原样留在输入框。
     if (text.trim().toLowerCase() === '/rewind' && atts.length === 0) {
       if (onRewind()) composer.setText('')
@@ -4671,6 +5280,22 @@ function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
+  // 登记为「正在显示的输入框」：撤回或退回的插入消息若属于本会话，直接放回这里（排在已有内容之前）。
+  useLayoutEffect(() => {
+    const entry = {
+      sessionId,
+      restore: (text: string): void => {
+        const cur = composer.getText()
+        composer.setText(cur.trim() ? `${text}\n\n${cur}` : text, true)
+      }
+    }
+    liveComposer = entry
+    return () => {
+      if (liveComposer === entry) liveComposer = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId])
+
   return (
     <div className="cf-composer">
       {/* 回到最新：仅当用户上滚离开底部且已有消息时浮现，锚在输入区正上方居中 */}
@@ -4723,10 +5348,16 @@ function Composer({
             <div className="cf-slash__hint">{t('cf.slash.hint')}</div>
           </div>
         )}
-        {/* 输入框上方的胶囊排：待办清单进度（有进行中的清单才出现）+ 后台任务（有后台运行的子智能体才出现）。 */}
+        {/*
+         * 输入框上方的胶囊排：待办清单、后台任务、浏览网页、插入对话，各自有内容才出现。
+         * 实际先后按出现的先后（新出现的在最右，见 useDockOrder）；这里的书写顺序只在切会话、几枚同时出现时起作用——
+         * 越常驻的越靠左，插入对话最短暂、最需要用户留意，放最后。
+         */}
         <div className="cf-dock">
           <TodoCapsule />
           <BackgroundCapsule />
+          <BrowserCapsule sessionId={sessionId} />
+          <InsertCapsule sessionId={sessionId} />
         </div>
         <div className="cf-box">
           {/* 拖拽手柄压在输入框上边框：向上拖加高输入框。 */}
@@ -4813,17 +5444,29 @@ function Composer({
             )}
             <ModelPicker />
             <EffortPicker />
-            {/* 流式输出时发送键变「停止」（点击中断本会话当前回合）：只放图标，按钮宽度不变、两态不跳动。 */}
+            {/* 回合进行中只有一枚键：输入框有文字＝「发送」（插入当前轮），空＝「停止」（只放图标，与发送同宽不跳动）。
+                有文字时不出停止，要停先清空输入框。 */}
             {streaming ? (
-              <button
-                className="cf-send is-stop"
-                type="button"
-                title={t('chat.stop')}
-                aria-label={t('chat.stop')}
-                onClick={onStop}
-              >
-                <Square size={14} fill="currentColor" />
-              </button>
+              canInsert ? (
+                <button
+                  className="cf-send"
+                  type="button"
+                  title={t('cf.insert.hint').replace('{name}', name)}
+                  onClick={insertNow}
+                >
+                  {t('cf.send')}
+                </button>
+              ) : (
+                <button
+                  className="cf-send is-stop"
+                  type="button"
+                  title={t('chat.stop')}
+                  aria-label={t('chat.stop')}
+                  onClick={stopTurn}
+                >
+                  <Square size={14} fill="currentColor" />
+                </button>
+              )
             ) : (
               <button className="cf-send" type="button" disabled={!canSend} onClick={submit}>
                 {t('cf.send')}
@@ -5517,6 +6160,13 @@ function GeneralPane(): React.JSX.Element {
     setCloseToTray(next)
     void window.deva?.config?.set?.({ closeToTray: next })
   }
+  // 文字大小：点选即生效（写 <html data-chat-fs>）并落盘，见 theme/chatFontSize.ts
+  const [chatFontSize, setChatFontSize] = useState<ChatFontSize>(readChatFontSize)
+  const pickChatFontSize = (v: string): void => {
+    const next = v as ChatFontSize
+    setChatFontSize(next)
+    saveChatFontSize(next)
+  }
   return (
     <>
       <h2 className="cf-pane__title">{t('settings.general')}</h2>
@@ -5543,6 +6193,19 @@ function GeneralPane(): React.JSX.Element {
               { v: 'system', label: t('settings.themeSystem') },
               { v: 'light', label: t('settings.themeLight') },
               { v: 'dark', label: t('settings.themeDark') }
+            ]}
+          />
+        </div>
+        <div className="cf-set__row">
+          <div className="cf-set__label">{t('settings.chatFontSize')}</div>
+          <Segmented
+            value={chatFontSize}
+            onChange={pickChatFontSize}
+            options={[
+              { v: 'sm', label: t('settings.chatFontSm') },
+              { v: 'md', label: t('settings.chatFontMd') },
+              { v: 'lg', label: t('settings.chatFontLg') },
+              { v: 'xl', label: t('settings.chatFontXl') }
             ]}
           />
         </div>
@@ -5688,7 +6351,10 @@ function ExtensionsPane({
   )
 }
 
-/** 头像堆叠：最多 max 个，超出时末位换成 +N；悬停显示全部角色名。 */
+/**
+ * 头像堆叠：最多 max 个；超出时末位照常放第 max 个头像、盖一层半透明深色再写 +N（N 含被盖住的这个）。
+ * 悬停显示全部角色名。
+ */
 function AvatarStack({
   personas,
   size = 20,
@@ -5701,6 +6367,7 @@ function AvatarStack({
   const { locale } = useI18n()
   const shown = personas.length > max ? personas.slice(0, max - 1) : personas
   const more = personas.length - shown.length
+  const veiled = more > 0 ? personas[shown.length] : null
   return (
     <span
       className="cf-avstack"
@@ -5712,7 +6379,12 @@ function AvatarStack({
           <PersonaFace seed={p.id} spec={parseAvatarSpec(p.avatar)} image={p.avatarImage} />
         </span>
       ))}
-      {more > 0 && <span className="cf-avstack__more">+{more}</span>}
+      {veiled && (
+        <span className="cf-avstack__ava">
+          <PersonaFace seed={veiled.id} spec={parseAvatarSpec(veiled.avatar)} image={veiled.avatarImage} />
+          <span className={`cf-avstack__veil${more >= 10 ? ' is-wide' : ''}`}>+{more}</span>
+        </span>
+      )}
     </span>
   )
 }

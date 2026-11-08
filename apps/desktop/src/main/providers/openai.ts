@@ -1,3 +1,4 @@
+import { describeNetError, httpFetch } from '../http'
 import { iterateSSE, STREAM_IDLE_MS } from './sse'
 import {
   httpError,
@@ -191,11 +192,12 @@ export async function* streamOpenAI(
 
   let res: Response
   try {
-    res = await fetch(url, {
+    res = await httpFetch(url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${cfg.apiKey}`
+        authorization: `Bearer ${cfg.apiKey}`,
+        ...cfg.headers
       },
       body: JSON.stringify(body),
       signal: req.signal
@@ -205,7 +207,7 @@ export async function* streamOpenAI(
       yield { type: 'done', stopReason: 'aborted' }
       return
     }
-    yield { type: 'error', error: { kind: 'network', retryable: true, message: String((e as Error)?.message ?? e) } }
+    yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
     yield { type: 'done', stopReason: 'error' }
     return
   }
@@ -352,7 +354,7 @@ export async function* streamOpenAI(
       yield { type: 'done', stopReason: 'aborted' }
       return
     }
-    yield { type: 'error', error: { kind: 'network', retryable: true, message: String((e as Error)?.message ?? e) } }
+    yield { type: 'error', error: { kind: 'network', retryable: true, message: describeNetError(e) } }
     yield { type: 'done', stopReason: 'error' }
     return
   }
