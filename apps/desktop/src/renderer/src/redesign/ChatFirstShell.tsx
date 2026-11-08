@@ -3770,6 +3770,10 @@ function Conversation({
   // 恢复跟随。ref 供滚动副作用同步读取（避免闭包过期、其变化不触发副作用重跑），state 仅驱动浮标显隐。
   const stickRef = useRef(true)
   const [atBottom, setAtBottom] = useState(true)
+  // 贴底态下「最后一次滚动事件之后」的补拉定时器：平滑滚动会被触摸惯性、滚轮余势、同帧又长高的内容打断，
+  // 只看滚动事件那一刻的距底距离会停在半路（现象：点了「回到最新」还能继续往下滑）。故滚动停下 120ms 后
+  // 再校一次位置。动画进行中每帧都会重置它，所以不会把平滑滚动顶成瞬移。
+  const settleRef = useRef(0)
 
   // 选择态（按轮删除）：selecting=是否在选择模式；selected=选中的轮下标集合（0 基，与 groupTurns 一致）。
   // 入口是标题栏的「选择」。早先由聊天区右键菜单进入，现已去掉右键菜单（复制等动作改成每条消息下面的操作行）。
@@ -4047,18 +4051,99 @@ function Conversation({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win, messages])
 
-  // 监听用户滚动：据距底距离更新「是否贴底」，离已渲染内容的边缘不远时补一段。程序化滚到底同样触发，结果仍为贴底、幂等。
+  /** 解除贴底。只由「用户主动向上看历史」触发（见下方手势监听）；程序化滚动与流式增长都不解除。 */
+  const detachBottom = (): void => {
+    if (settleRef.current) {
+      clearTimeout(settleRef.current)
+      settleRef.current = 0
+    }
+    stickRef.current = false
+    setAtBottom(false)
+  }
+  /** 贴底态下滚动停下后补拉到真正的底部（见 settleRef 说明）。 */
+  const scheduleSettle = (): void => {
+    if (settleRef.current) clearTimeout(settleRef.current)
+    settleRef.current = window.setTimeout(() => {
+      settleRef.current = 0
+      const el = scrollRef.current
+      if (!el || !stickRef.current) return
+      if (el.scrollHeight - el.scrollTop - el.clientHeight > 1) el.scrollTop = el.scrollHeight
+    }, 120)
+  }
+
+  // 监听用户滚动：贴底态下位置没到底只当是「被打断」（稍后拉回），不再就地解除贴底——平滑滚动途中每一帧
+  // 都处在离底位置，早先照距底距离判定会中途把贴底清掉，之后内容再长、动画再被打断都不会回拉，表现就是
+  // 「点「回到最新」还能继续往下滑」。脱离贴底时按距底距离更新浮标显隐；手动滚回底部（阈值内）恢复跟随。
+  // 离已渲染内容的边缘不远时补一段。
   const onScroll = (): void => {
     const el = scrollRef.current
     if (!el) return
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-    const atBot = isTail && dist <= BOTTOM_THRESHOLD
-    stickRef.current = atBot
-    setAtBottom((prev) => (prev === atBot ? prev : atBot))
+    if (stickRef.current) {
+      setAtBottom(true)
+      if (isTail && dist > 1) scheduleSettle()
+    } else {
+      const atBot = isTail && dist <= BOTTOM_THRESHOLD
+      setAtBottom((prev) => (prev === atBot ? prev : atBot))
+      // 平滑滚动的收尾、拖滚动条到底、惯性收尾都走到这里：回到底部即恢复自动跟随。
+      if (atBot) stickRef.current = true
+    }
     scheduleActive()
     if (from > 0 && el.scrollTop < LOAD_MORE_PX) loadEarlier()
     else if (!isTail && dist < LOAD_MORE_PX) loadLater()
   }
+
+  // 只有用户主动「向上看历史」才解除贴底：滚轮、触摸、键盘、拖滚动条四种输入都在这里判定。滚动事件本身
+  // 不作数（程序化滚动、流式新内容、布局变化都会产生它）。
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent): void => {
+      if (e.deltaY < -2) detachBottom()
+    }
+    let touchY = 0
+    const onTouchStart = (e: TouchEvent): void => {
+      touchY = e.touches[0]?.clientY ?? 0
+    }
+    const onTouchMove = (e: TouchEvent): void => {
+      const y = e.touches[0]?.clientY ?? 0
+      // 手指向下划 = 内容上移 = 看更早的内容（阈值挡掉点按抖动与横向滑动）。
+      if (y - touchY > 8) detachBottom()
+      touchY = y
+    }
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') detachBottom()
+      else if (e.key === 'End') {
+        stickRef.current = true
+        setAtBottom(true)
+        el.scrollTop = el.scrollHeight
+      }
+    }
+    // 拖滚动条：落点在容器右缘的滚动条上，说明用户要手动定位，立刻脱离贴底（滚动条拖动不产生 wheel/touch）。
+    // 只认鼠标/触控板：触摸端的点按（如点右侧头像）不该算数，且那时的滚动条是覆盖式的（宽度为 0）。
+    const onPointerDown = (e: PointerEvent): void => {
+      if (e.pointerType === 'touch') return
+      const bar = el.offsetWidth - el.clientWidth
+      if (bar > 0 && e.clientX >= el.getBoundingClientRect().right - bar) detachBottom()
+    }
+    el.addEventListener('wheel', onWheel, { passive: true })
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: true })
+    el.addEventListener('keydown', onKeyDown)
+    el.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      el.removeEventListener('wheel', onWheel)
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('keydown', onKeyDown)
+      el.removeEventListener('pointerdown', onPointerDown)
+      if (settleRef.current) {
+        clearTimeout(settleRef.current)
+        settleRef.current = 0
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // 内容变矮或可视区变高后已到底（如上滚后收起展开的工作过程 / 思考，页面缩短、下方再无内容）：滚动位置常常
   // 没变，不触发 onScroll，贴底态停在「未贴底」，「回到最新」一直挂着。故在尺寸变化时补判一次。只补回到底部
@@ -4084,13 +4169,16 @@ function Conversation({
   }, [isTail])
 
   // 回到最新：平滑滚到底并恢复自动跟随。正看着跳转过去的一段时，换回最后几轮直接落到底，不滚过中间。
+  // 平滑滚动途中任何一次打断（触摸惯性、滚轮余势、内容同帧长高）都由 scheduleSettle 兜住，不会停在半路。
   const jumpToLatest = (): void => {
     const el = scrollRef.current
     if (!el) return
     stickRef.current = true
     setAtBottom(true)
-    if (isTail) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    else resetToTail()
+    if (isTail) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+      scheduleSettle()
+    } else resetToTail()
   }
 
   // 发送后必看到自己的消息与回复：无论此刻是否上滚，都恢复贴底跟随。
