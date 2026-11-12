@@ -218,6 +218,40 @@ pages/host 实现（CDP 那半可以复用）。这是独立的一件事，不�
 
 ---
 
+## 发版（打 tag + 写 Release）
+
+版本号有两套，一起改：`VERSION`（仓库级）与 `apps/desktop/web-version.json`（渲染层读到"关于"页的那个）。
+两者保持同一个号（当前 1.7.7）。
+
+```bash
+cd /opt/deva-web
+# 1) 改版本号（两处都要）
+echo 1.7.8 > VERSION
+$EDITOR apps/desktop/web-version.json      # webVersion 改成 1.7.8
+
+# 2) 提交 → 重建（顺序不能反，否则"关于"页的提交号会滞后）
+git add -A && git commit -m "chore: 版本号 1.7.7 → 1.7.8"
+cd apps/desktop && node scripts/build-web.mjs && cd /opt/deva-web
+
+# 3) 推 main + 打 tag 并推送
+git push origin main
+git tag -f v1.7.8 -m "Web 改版 1.7.8（跟随上游 v0.1.x）" HEAD
+git push origin v1.7.8
+
+# 4) 写 Release（说明写给人看：这版同步了上游什么、网页端哪里不同、怎么升级）
+gh release create v1.7.8 --repo Indigo1024/deva-web \
+  --title "Web 改版 v1.7.8 — 跟随上游 Deva v0.1.x" \
+  --notes-file /tmp/release-notes.md --latest
+```
+
+Release 说明建议包含四段：**这一版是什么 / 上游同步过来的新能力 / 网页端的不同（降级说明）/ 本版校验**。
+最后一段写实测结果（typecheck、两种构建、安全用例、线上冒烟），别只写"已修复"。
+
+⚠️ 别把上游的 tag（`v0.1.x`，那是 `git fetch upstream --tags` 带进来的、指向上游提交）
+推到本仓库——只推 `v1.7.x` 这一条线。
+
+---
+
 ## 常用命令
 
 ```bash
@@ -258,8 +292,9 @@ ls -la /root/.deva/          # web-auth.json / web-secret.key / secrets.json / a
    把 `browser-unavailable.ts` 换成真实现。工作量大，但是和桌面版功能对齐的最后一块。
 2. **用低权限用户跑服务** —— 现在服务以 root 跑，agent 的终端等于 root shell。
    建一个专用用户、把 `$DEVA_HOME` 与 `/opt/deva-web` chown 过去，是最划算的一层加固。
-3. **发版与自动更新打通** —— 当前 Web 版的「检查更新」读的是本仓库的 Git 提交；
-   配上 GitHub Releases 之后，别人部署的实例才好判断"有没有新版"。
+3. **在线更新接到 Release** —— 现在「检查更新」读的是仓库分支的最新提交与 `web-version.json`，
+   tag/Release 已经打起来了（见上一节），下一步可以让它优先比对 Release 版本号，
+   别人部署的实例就能一眼看出"落后几个版本"。
 4. **多用户 / 审计日志** —— 多人共用时的前置条件，见上一节。
 5. **移动端继续打磨** —— 长文本粘贴、滚动回拉这几处已经修好；
    剩下的多是手感问题（输入框高度、键盘弹起时的布局），有具体案例再动。
