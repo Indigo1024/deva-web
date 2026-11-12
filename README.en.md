@@ -11,6 +11,8 @@ Run the [Deva](https://github.com/sqfcyily/deva) desktop client in a browser.
 > - Upstream license: MIT
 >
 > If you want the desktop app, get it from upstream. **This repository ships no Electron installers.**
+>
+> **Following upstream v0.1.14** — merge rules in [docs/WEB.md](docs/WEB.md); how to keep it alive in [MAINTAINING.md](MAINTAINING.md) (Chinese).
 
 ---
 
@@ -80,6 +82,8 @@ successful load, any later disconnect left the overlay permanently covering a pe
 | System notifications | Browser notifications / in-page toasts |
 | Thumbnails | Returns `null`; the UI falls back to a type icon |
 | Window fullscreen / macOS traffic lights | No-ops |
+| Built-in browser (the `browser` tool) | **Not available**: it needs Electron's layered `WebContentsView` + CDP, and a server process has no window layer. The tool is omitted and the composer capsule never renders — no dead entry point |
+| Dropping folders / attaching by real path | The browser cannot see local paths, so everything goes through "upload the bytes" (chunked upload for large files) |
 | electron-updater | Not applicable — upgrade by rebuilding |
 
 ### Site icon and PWA

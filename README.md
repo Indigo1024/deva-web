@@ -12,6 +12,8 @@
 
 要桌面客户端，去上游下载。这个仓库不提供任何 Electron 安装包。
 
+**当前跟随的上游版本：v0.1.14**（跟随方式与合并规则见 [docs/WEB.md](docs/WEB.md)；坏了怎么修看 [MAINTAINING.md](MAINTAINING.md)）。
+
 ## 这是什么
 
 上游 Deva 是 Electron 桌面应用，每台电脑装一份。这个改版把它改成服务器上的一个 Node 进程加浏览器界面：服务器装一次，手机、平板、其他电脑打开网址就能用。
@@ -68,6 +70,8 @@
 | 系统通知 | 浏览器通知或页面内提示 |
 | 缩略图 | 返回空，前端显示类型图标 |
 | 窗口全屏 / macOS 红绿灯 | 空实现 |
+| 内置浏览器（`browser` 工具） | **不给**：它靠 Electron 的叠窗口 + CDP，服务端没有窗口体系。工具不出现、输入框上方的胶囊也不渲染——不会留下点不开的死入口 |
+| 拖入文件夹 / 按真实路径附加文件 | 网页拿不到本地路径，一律按「上传内容」处理（大文件分片上传） |
 | electron-updater 自动更新 | 用不了，升级靠重新构建 |
 
 ### 附件
@@ -144,7 +148,10 @@ node out/web/ctl.cjs passwd
 
 ## 跟着上游更新
 
-每次上游发版，合并之后都要检查 Web 层有没有被破坏——新的 IPC 通道、`BrowserWindow` 方法、`e.sender` 用法都可能让 Web 版在运行时崩掉。检查清单在 [docs/WEB.md](docs/WEB.md)。
+每次上游发版，合并之后都要检查 Web 层有没有被破坏——新的 IPC 通道、`BrowserWindow` 方法、`e.sender` 用法都可能让 Web 版在运行时崩掉。
+
+- 合并步骤、冲突口径与检查清单：[docs/WEB.md](docs/WEB.md)
+- 平时怎么盯、坏了怎么修、后面还要做什么：[MAINTAINING.md](MAINTAINING.md)
 
 ## 许可
 

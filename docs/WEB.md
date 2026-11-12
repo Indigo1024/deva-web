@@ -14,7 +14,9 @@
 本文档只讲**本改版自己的东西**：Web 层怎么搭的、怎么部署、怎么跟随上游更新。
 上游 Deva 本身有哪些功能，属于上游的成果，请查阅[上游项目](https://github.com/sqfcyily/deva)。
 
-当前跟随的上游版本：**v0.1.12**。
+当前跟随的上游版本：**v0.1.14**。
+
+维护与排错看 [MAINTAINING.md](../MAINTAINING.md)；本文档讲的是部署与实现细节。
 
 ---
 
@@ -492,50 +494,66 @@ bash scripts/deva-update.sh --rollback  # 回滚到上一份产物
 ## 维护：合并上游新版本
 
 本仓库跟随上游发布同步（不是 GitHub 上的 fork，是独立仓库按版本合并）。合并本身是常规操作，但**必须做 Web 适配检查**。
+出问题时的排查路径见 [MAINTAINING.md](../MAINTAINING.md)。
 
 ```bash
-git fetch origin --tags
-git log --oneline HEAD..origin/main          # 看上游加了什么
-git diff --stat HEAD...origin/main
+git remote add upstream https://github.com/sqfcyily/deva   # 只需一次
+git fetch upstream --tags
+git log --oneline -20 upstream/main          # 看上游加了什么
+git diff --stat HEAD upstream/main
 
-# 1. 先提交本地改动（git 不允许在有冲突的脏文件上 merge）
-git add -A && git commit -m "wip"
+# 1. 备份分支，再合并（工作区必须是干净的）
+git branch -f backup/pre-merge-upstream-$(date +%Y%m%d-%H%M) HEAD
+git merge --no-ff upstream/main
 
-# 2. 备份分支，再合并
-git branch backup/pre-merge-$(date +%Y%m%d)
-git merge --no-ff origin/main
-
-# 3. 重新生成桥接
+# 2. 重新生成桥接（preload 变了就必须跑）
 cd apps/desktop && node scripts/gen-web-api.mjs
 
-# 4. 检查新的 IPC 通道
-git diff --name-only <老HEAD>..HEAD -- 'src/main/**' 'src/preload/**'
+# 3. 检查新的 IPC 通道
+git diff --name-only HEAD^..HEAD -- 'src/main/**' 'src/preload/**'
 ```
+
+### 合并冲突的固定口径
+
+| 冲突文件 | 怎么解 |
+| --- | --- |
+| `README.md` / `README.en.md` | **保留我们的**（改版口径）；上游那份讲的是桌面版 |
+| `docs/index.html`、`docs/screenshot*.png`、`.github/workflows/release.yml` | **不要**（本仓库不放上游官网/截图，也不发 Electron 安装包） |
+| `src/web-server/*`、`src/renderer-web/*`、`src/renderer/src/web/*` | 上游不该动这些；动了要逐个确认没把我们的适配冲掉 |
+| `ChatFirstShell.tsx` / `composer-editor.ts` / `redesign.css` | **两边都要**：消息操作行、滚动模型、移动端无损粘贴保留；上游新组件并入 |
+| 其余业务代码 | 以上游为准，只在类型/枚举上补我们的分支（如附件的 `serverPath` 模式） |
 
 ### 合并检查清单
 
 每合并一个上游版本，按这个顺序过一遍：
 
 1. **preload 新增了什么 API？** → 重跑 `gen-web-api.mjs`，确认生成的 `deva-api.gen.ts` 里有对应字段
-2. **主进程新增了什么 `ipcMain.handle`？** → 这些经过 shim 会自动注册，但要确认 web-server 调用了对应的 `registerXxxIpc()`
-3. **有新 handler 用了 `e.sender` 吗？** → `grep -rn "sender\." src/main`。用了 `sender.send` / `sender.once` 的，shim 的 `makeSender` 要能兜住
-4. **新的 `BrowserWindow` 方法调用？** → `webWindow()` 在 `bus.ts` 里，要补上同名空实现
-5. **新的 `app.getPath()` / `app.isPackaged`？** → 确认 `electron-shim.ts` 的 `app` 替身能返回合理值
-6. **新增的启动期清扫 / 定时逻辑？** → web-server 的启动流程要跟着加（例：v0.1.9 的 `sweepMedia`）
-7. **桌面专用交互（打开文件、系统通知、托盘）？** → 前端要降级成 Web 可行的行为（下载、浏览器通知、忽略）
-8. **`src/main/services/secrets.ts` 有改动吗？** → 合并后确认 `persist()` 仍是 `0600` 权限 + 同目录临时文件原子改名 + Promise 链串行化写入
-9. **跑两个 typecheck + 构建 + 真机验证**
+2. **preload 的 electron 导入行变了吗？**（如 v0.1.14 多了 `webUtils`）→ 生成脚本用正则匹配导入清单，
+   新增的 API 若要浏览器替身（如 `webUtils.getPathForFile`）就在脚本里补一个
+3. **主进程新增了什么 `ipcMain.handle`？** → 这些经过 shim 会自动注册，但要确认 web-server 调用了对应的 `registerXxxIpc()`
+4. **有新 handler 用了 `e.sender` 吗？** → `grep -rn "sender\." src/main`。用了 `sender.send` / `sender.once` 的，shim 的 `makeSender` 要能兜住
+5. **新的 `BrowserWindow` / `session` / `net` 调用？** → `webWindow()` 在 `bus.ts`、`session` 替身在 `electron-shim.ts`，要补上同名空实现
+6. **`src/web-server/browser-unavailable.ts` 缺导出了吗？** → 构建会直接报 `No matching export`；
+   照上游 `browser/index.ts` 的签名补空实现（v0.1.14 就补了 `browserHasHandoff` / `BROWSER_BRIEF` / `MemberHandoff`）
+7. **新的 `app.getPath()` / `app.isPackaged`？** → 确认 `electron-shim.ts` 的 `app` 替身能返回合理值
+8. **新增的启动期清扫 / 定时逻辑？** → web-server 的启动流程要跟着加（例：v0.1.9 的 `sweepMedia`）
+9. **桌面专用交互（打开文件、系统通知、托盘、文件夹附件）？** → 前端要降级成 Web 可行的行为（下载、浏览器通知、忽略）
+10. **`src/main/services/secrets.ts` 有改动吗？** → 合并后确认 `persist()` 仍是 `0600` 权限 + 同目录临时文件原子改名 + Promise 链串行化写入
+11. **跑两个 typecheck + 两种构建 + 安全用例 + 真机验证**
 
 ```bash
-npm run typecheck:web      # 前端
-npm run typecheck:node     # 主进程（较慢，约 4-5 分钟）
-node scripts/build-web.mjs
+npm run typecheck          # node + web
+node scripts/build-web.mjs # Web 包
+cd /opt/deva-web && pnpm build        # 桌面端（渲染层是同一份源码，要确认没编坏）
+node apps/desktop/scripts/verify-security-hardening.mjs
 systemctl restart deva-web
 ```
 
 ---
 
-## 本机已验证的适配点（v0.1.9）
+## 本机已验证的适配点
+
+**v0.1.9 起**
 
 | 上游功能 | 桌面行为 | Web 适配 |
 | --- | --- | --- |
@@ -545,6 +563,25 @@ systemctl restart deva-web
 | AI 生成提交信息（流式） | `sender.send` 推片段 | `makeSender` 定向推到发起连接 |
 | 图片/PDF 外置存储 | `sweepMedia` 清扫孤儿 | web-server 启动时同样调用 |
 | 模型详情页（上下文/输出上限） | 正常 | 无需适配（纯渲染层） |
+
+**v0.1.13 起**
+
+| 上游功能 | 桌面行为 | Web 适配 |
+| --- | --- | --- |
+| 内置浏览器（`browser` 工具 + 胶囊） | `WebContentsView` 叠窗口 + CDP + 屏幕外窗口续跑 | **屏蔽**：构建期把 `./browser` 换成 `browser-unavailable.ts`，工具不出现、胶囊不渲染 |
+| 出站请求走 Chromium 网络栈 | `session.fromPartition().fetch` | 替身把同名接口落到 Node 全局 `fetch`，`resolveProxy` 恒 `DIRECT`（不打「换线路重试」分支） |
+
+**v0.1.14 起**
+
+| 上游功能 | 桌面行为 | Web 适配 |
+| --- | --- | --- |
+| 项目成员机制（成员会话 / 派活 / 交差） | 正常 | 无需适配：纯主进程逻辑，`chat:*` 通道照常注册；成员会话说白了就是另一个对话 |
+| 成员请用户在网页上操作（browser handoff） | 弹浏览器窗口等用户操作 | 恒不触发（`browserHasHandoff()` 返回 `false`）——没有浏览器可交接 |
+| 拖入文件夹 / 按路径附加文件 | `webUtils.getPathForFile` 取真实磁盘路径 | 生成桥接时给 `webUtils` 一个浏览器替身（返回空串），调用方自动改走「交字节」那条路；网页端因此**没有**文件夹附件，别的照常 |
+| 附件图片缩略图 / 应用内看大图 | 主进程读图返回 data URL | 同一套通道（`fs:attachment-image` / `chat:attachment-image`），服务端磁盘上的图照样能取 |
+| 超长工具结果落盘 | 写 `$DEVA_HOME` 下的结果目录 | 无需适配（纯主进程） |
+| 内置 office 文本抽取（docx/xlsx/pptx） | 正常 | 无需适配（`fflate` 解包，纯 Node） |
+| 工具按需加载（`tool_search`） | 正常 | 无需适配（工具表与说明都在主进程） |
 
 ---
 
