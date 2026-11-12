@@ -381,6 +381,7 @@ const TOOL_HINTS: Record<string, string> = {
   create_mcp: '正在配置 MCP',
   todo_write: '正在更新待办清单',
   present_files: '正在交付文件',
+  tool_search: '正在查看工具用法',
   run_subagent: '正在交给子助手处理',
   send_to_subagent: '正在交给子助手处理'
 }
@@ -951,9 +952,9 @@ async function runCommand(chat: ChatAddress, name: string, arg: string, trail: T
       return true
     }
     case 'list': {
-      // 同桌面左侧列表：已归档的对话不列出。
+      // 同桌面左侧列表：已归档的对话、成员会话（只从主对话的成员头像打开）不列出。
       const all = listSessions()
-        .filter((s) => !s.archived && allows(chat.channel, s))
+        .filter((s) => !s.archived && !s.parentId && allows(chat.channel, s))
         .sort((a, b) => b.updatedAt - a.updatedAt)
       const list = all.slice(0, LIST_MAX)
       if (!list.length) {
@@ -1237,11 +1238,12 @@ async function handleAction(a: InboundAction): Promise<ActionResult> {
       if (getSession(v.sid)?.proposals?.[v.tool]) return { ok: false, message: '这张名片已经处理过了。' }
       if (v.a === 'accept') {
         // 与桌面「接受」同：建角色并启用（头像由 id 确定性生成，之后可在电脑上改）。
+        // 新角色形状随机：'auto' 由渲染层 humation.tsx 按 id 挑形状（形状清单只在渲染层，主进程不解释）。
         upsertPersona({
           name: str(raw.name) || '新角色',
           description: str(raw.description),
           prompt: typeof raw.prompt === 'string' ? raw.prompt : '',
-          avatar: '',
+          avatar: '{"shape":"auto"}',
           model: '',
           enabled: true
         })

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { EffortLevel } from '../shared/effort'
 import type { UpdateState } from '../shared/update'
 import type { DeliverableInfo } from '../shared/deliverables'
@@ -113,7 +113,8 @@ export interface ChatRenameSessionRequest {
 }
 
 /** 附件类型（与 services/attachments.ts 对齐）。 */
-export type AttachmentKind = 'image' | 'document' | 'text' | 'archive' | 'unsupported'
+/** file = 只把位置交给模型的文件（Word 等读不进消息的格式、超过体积上限的）。 */
+export type AttachmentKind = 'image' | 'document' | 'text' | 'file' | 'unsupported'
 
 /** 一次挑选返回的附件描述（不含正文/base64）。 */
 export interface PickedAttachment {
@@ -124,6 +125,27 @@ export interface PickedAttachment {
   kind: AttachmentKind
   supported: boolean
   reason?: string
+}
+
+/** 拖入 / 粘贴的条目里认出的文件夹（与 services/attachments.ts 对齐）。 */
+export interface DroppedFolder {
+  path: string
+  name: string
+}
+
+/** 拖入 / 粘贴的一项：文件夹，或带真实路径的文件（与 services/attachments.ts 对齐）。 */
+export type DroppedEntry = { folder: DroppedFolder } | { file: PickedAttachment }
+
+/** 用户消息上的附件贴片（与 services/chat.ts 对齐）：文件夹另带绝对路径。 */
+export interface AttachmentChip {
+  name: string
+  /** file = 只把位置交给模型的文件，带 path。 */
+  kind: 'image' | 'document' | 'text' | 'folder' | 'file'
+  path?: string
+  /** 文件大小（字节；文件夹没有）。 */
+  size?: number
+  /** 图片在对话记录里的位置，取缩略图 / 原图用（chat.attachmentImage）。 */
+  ref?: string
 }
 
 /** 会话元信息（左侧列表用，与 chat-store.ts 对齐）。 */
@@ -142,6 +164,53 @@ export interface ChatSessionMeta {
   effort?: EffortLevel
   /** 已归档（不在左侧对话列表里显示）；缺省 = 未归档。 */
   archived?: boolean
+  /** 项目成员名单（主对话；含已移除的，见 MemberMeta.removed）。 */
+  members?: MemberMeta[]
+  /** 成员会话所属的主对话 id（成员会话不进左侧列表，故列表里的对话恒无此字段）。 */
+  parentId?: string
+}
+
+/** 项目成员（与 services/members.ts 的 MemberRef 对齐）。 */
+export interface MemberMeta {
+  /** 成员会话 id（也是生成头像的种子）。 */
+  sessionId: string
+  name: string
+  /** created = 主智能体创建（用主对话角色的设定）；mention = 用户 @ 加入的角色。 */
+  origin: 'created' | 'mention'
+  /** 设定来源角色 id。 */
+  personaId: string
+  /** 负责的文件夹（绝对路径）；null = 没有文件夹（不跟随主对话）。以成员会话的 focusRoot 为准。 */
+  root: string | null
+  duty: string
+  addedAt: number
+  removed?: boolean
+  /** 最近一次派来的任务标题。 */
+  task?: string
+  /** 最近一次结论（截断）与结局。 */
+  last?: { text: string; at: number; status: 'done' | 'failed' | 'stopped'; task?: string }
+  /** 用户在成员会话里亲自选过模型 / 思考等级（此后不再跟随主对话）。 */
+  modelSet?: boolean
+  effortSet?: boolean
+}
+
+/** 绑定的定时任务交来的结果（与 services/handoff.ts 的 HandoffInfo 对齐）。 */
+export interface HandoffInfo {
+  /** 任务名。 */
+  title: string
+  /** 一句话摘要（居中一行上显示）。 */
+  summary: string
+  /** 全文（点开看）。 */
+  content: string
+  /** 需要主角色处理（已唤醒它）；false = 只是告知（其后那条回复以任务的身份显示）。 */
+  needsAction: boolean
+}
+
+/** 成员会话里主智能体派来的任务（工作记录里画成「X 派来的任务」）。 */
+export interface MemberTask {
+  owner: string
+  title: string
+  quote: string
+  note: string
 }
 
 /** 角色名片草稿（与 services/chat.ts 的 AgentDraft 对齐）。 */
@@ -208,9 +277,15 @@ export type DisplayMessage =
   | {
       role: 'user'
       text: string
-      attachments: { name: string; kind: 'image' | 'document' | 'text' | 'archive' }[]
+      attachments: AttachmentChip[]
       /** 后台任务通知：展示为一行系统通知而非用户气泡，text 为其标题。 */
       notify?: true
+      /** 成员交差的通知：不显示（其后主角色的回复就是交差内容），只留作一轮的起点。 */
+      quiet?: true
+      /** 成员会话里主智能体派来的任务；text 为附注。 */
+      task?: MemberTask
+      /** 绑定的定时任务交来的结果：需要处理的画成居中一行、点开看全文；只是告知的不显示（quiet）。 */
+      handoff?: HandoffInfo
     }
   /** durationMs：本轮耗时（未记录则缺省）。 */
   | { role: 'assistant'; blocks: DisplayBlock[]; durationMs?: number }
@@ -486,6 +561,8 @@ export interface TaskRun {
   status: 'ok' | 'error' | 'skipped' | 'aborted'
   summary?: string
   error?: string
+  /** 绑定任务这次交给主角色的结果（见 services/handoff.ts）；没交接则缺省。 */
+  handoff?: { summary: string; needsAction: boolean }
 }
 export interface TaskRecord {
   id: string
@@ -494,6 +571,10 @@ export interface TaskRecord {
   schedule: TaskSchedule
   auth: TaskAuthorization
   sessionId: string
+  /** 运行方式「在会话中运行」所在的会话 id（见 services/tasks-types.ts）；缺省 = 独立运行。 */
+  ownerSessionId?: string
+  /** 在哪个对话里创建的（对话里的确认名片）。 */
+  originSessionId?: string
   status: TaskStatus
   createdAt: number
   updatedAt: number
@@ -507,6 +588,10 @@ export interface TaskCreateInput {
   prompt: string
   schedule: TaskSchedule
   auth: TaskAuthorization
+  /** 在哪个对话里创建的（由主进程 resolveAutotask 填，渲染层不传）。 */
+  originSessionId?: string
+  /** 运行方式：在这个会话中运行；缺省 = 独立运行。 */
+  ownerSessionId?: string
 }
 export interface TaskUpdateInput {
   id: string
@@ -514,6 +599,8 @@ export interface TaskUpdateInput {
   prompt?: string
   schedule?: TaskSchedule
   auth?: Partial<TaskAuthorization>
+  /** 运行方式：会话 id = 在该会话中运行，null = 独立运行，缺省 = 不改。 */
+  ownerSessionId?: string | null
 }
 /** 创建结果：成功带记录，失败带稳定错误码（渲染层据此本地化）。 */
 export type CreateTaskResult =
@@ -710,7 +797,8 @@ export type ChatStreamEvent =
    * 请求挂载工作区：未挂载工作区时，模型的某次调用缺「相对路径基准」（写相对路径 / 扫描类工具
    * 省略 path），暂停等待用户一键挂载或跳过。tool=触发的工具名，path=模型给的相对路径（可为空）。
    */
-  | { type: 'mount_request'; key: string; tool: string; path: string }
+  /** member：为成员选择它负责的文件夹（create_member 的 pick_folder），不是挂载本对话的工作区。 */
+  | { type: 'mount_request'; key: string; tool: string; path: string; member?: string }
   /** 用量。input 为总提示 token（含缓存命中/写入）；cacheRead/cacheWrite 供观测缓存是否生效。 */
   | { type: 'usage'; input: number; output: number; cacheRead?: number; cacheWrite?: number }
   | { type: 'reconnecting'; attempt: number; max: number }
@@ -755,8 +843,15 @@ export type ChatStreamEvent =
   /** 回合开始（本轮首个事件）：带本轮用户消息，供渲染层把别处发起的一轮当本地回合呈现。 */
   | {
       type: 'turn_start'
-      /** notify：本轮由后台任务通知自动发起，text 为通知标题。 */
-      user: { text: string; attachments: { name: string; kind: 'image' | 'document' | 'text' | 'archive' }[]; notify?: true }
+      /** notify：本轮由后台任务通知自动发起，text 为通知标题；task：成员会话里主智能体派来的任务。 */
+      user: {
+        text: string
+        attachments: AttachmentChip[]
+        notify?: true
+        quiet?: true
+        task?: MemberTask
+        handoff?: HandoffInfo
+      }
     }
   /** 插入的消息已随本步工具结果交给模型：执行步骤里添一个节点。 */
   | { type: 'insert'; text: string }
@@ -766,6 +861,15 @@ export type ChatStreamEvent =
   | { type: 'inserts_returned'; text: string }
   /** durationMs：本轮耗时（扣除等用户处置的时间）。 */
   | { type: 'done'; stopReason: string; durationMs?: number }
+  /** 成员交差已记进主对话、以成员的身份显示（会话级，turnId 为空串）：从主进程重载该对话。 */
+  | { type: 'member_report' }
+  /** 主对话里要汇总的成员派发组的进度（会话级，turnId 为空串）：空数组 = 没有在等的组。 */
+  | { type: 'member_progress'; groups: MemberProgressGroup[] }
+
+/** 要主角色汇总的一组派发的进度：已交差的在前（按交差先后），还在做的（running）在后；sid 是成员会话 id。 */
+export type MemberProgressGroup = {
+  items: { sid: string; name: string; status: 'done' | 'failed' | 'stopped' | 'running' }[]
+}
 
 /** IM 机器人（远程通道）状态，与 services/remote/index.ts 的 BotView / ScanEvent 对齐。 */
 export type BotPlatform = 'feishu' | 'telegram'
@@ -838,10 +942,10 @@ const api = {
     /** 原生多选对话框挑选附件；返回描述（含是否受支持），base64 留在主进程 */
     pickAttachments: (): Promise<PickedAttachment[]> => ipcRenderer.invoke('fs:pick-attachments'),
     /**
-     * 登记粘贴/上传的附件。两种模式：
+     * 登记粘贴 / 上传的附件。两种模式（Web 版两种都要）：
      *  - `data`：内联字节（小文件），主进程落临时目录并授权；
      *  - `serverPath`：文件已在服务端磁盘上（大文件经 /api/upload-chunk 分片上传），只登记白名单。
-     * 两者互斥，serverPath 优先。
+     * 取不到路径的（截图等）照旧走 data。
      */
     pasteAttachment: (file: {
       name: string
@@ -849,7 +953,25 @@ const api = {
       size: number
       data?: Uint8Array | null
       serverPath?: string
-    }): Promise<PickedAttachment> => ipcRenderer.invoke('fs:paste-attachment', file)
+    }): Promise<PickedAttachment> => ipcRenderer.invoke('fs:paste-attachment', file),
+    /** 已选为附件的图片：缩略图，full 为 true 时取原图（data URI）；不是本次选中的图片或读不到为 null */
+    attachmentImage: (path: string, full = false): Promise<string | null> =>
+      ipcRenderer.invoke('fs:attachment-image', path, full),
+    /**
+     * 拖入 / 粘贴的条目：按下标返回文件夹的位置，或带真实路径的文件（已判定并授权，同选择框）；取不到路径的
+     * （截图等）为 null，由调用方照旧交字节。路径在这里从 File 对象取出、直接交主进程——页面只能递 File，
+     * 递不了路径，伪造不出「用户拖入的文件 / 文件夹」。
+     */
+    droppedEntries: (files: File[]): Promise<(DroppedEntry | null)[]> => {
+      const paths = files.map((f) => {
+        try {
+          return webUtils.getPathForFile(f)
+        } catch {
+          return ''
+        }
+      })
+      return ipcRenderer.invoke('fs:dropped-entries', paths)
+    }
   },
   /** 应用配置（~/.deva/config.json 非敏感项）：同步读（首帧防闪烁）+ 异步读/写。 */
   config: {
@@ -1013,12 +1135,21 @@ const api = {
     /** 载入某会话历史，重建展示气泡 */
     loadSession: (sessionId: string, workspaceRoot: string | null): Promise<DisplayMessage[]> =>
       ipcRenderer.invoke('chat:load-session', sessionId, workspaceRoot),
+    /** 对话记录里的图片附件（ref 见 AttachmentChip）：缩略图，full 为 true 时取原图（data URI）；对不上为 null */
+    attachmentImage: (sessionId: string, ref: string, full = false): Promise<string | null> =>
+      ipcRenderer.invoke('chat:attachment-image', sessionId, ref, full),
     /** 载入历史 + 进行中回合的 turnId（同一时刻取出，用于接上别处发起、仍在跑的一轮） */
-    attachSession: (sessionId: string): Promise<{ messages: DisplayMessage[]; turnId: string | null }> =>
+    /** 接上某会话：历史 + 进行中的回合（turnId 与开始时刻 startedAt，空闲时都为 null）。 */
+    attachSession: (
+      sessionId: string
+    ): Promise<{ messages: DisplayMessage[]; turnId: string | null; startedAt: number | null }> =>
       ipcRenderer.invoke('chat:attach-session', sessionId),
-    /** 删除某会话 */
+    /** 删除某会话（主对话连同它的成员会话一并删除） */
     deleteSession: (sessionId: string, workspaceRoot: string | null): Promise<{ ok: true }> =>
       ipcRenderer.invoke('chat:delete-session', sessionId, workspaceRoot),
+    /** 移除主对话的一个成员（不再派任务，进行中的任务中止，成员会话保留）。 */
+    removeMember: (sessionId: string, memberSessionId: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('chat:remove-member', sessionId, memberSessionId),
     /**
      * 按「轮」删除对话（同步删上下文）：turnIndices 为 0 基轮下标集合，
      * 返回删除后重建的展示气泡（供渲染层就地替换，保证展示与落盘一致、重启不变）。
@@ -1200,6 +1331,7 @@ const api = {
     remove: (id: string): Promise<{ ok: true }> => ipcRenderer.invoke('tasks:delete', id),
     setStatus: (id: string, status: TaskStatus): Promise<TaskRecord | null> =>
       ipcRenderer.invoke('tasks:set-status', id, status),
+    /** 「完成后通知本对话」开关：开 = 绑定创建它的对话，关 = 独立运行。 */
     /**
      * 立即运行（委托调度器串行队列；调度器未就绪则 ok:false）。
      * 同一任务已在运行 / 排队时不重复入队，返回 ok:true + already。
@@ -1255,7 +1387,7 @@ const api = {
     /** 系统缩略图（取不到回落文件图标）的 data URL；文件不存在等返回 null。 */
     thumbnail: (sessionId: string, toolUseId: string, index: number): Promise<string | null> =>
       ipcRenderer.invoke('deliverables:thumbnail', sessionId, toolUseId, index),
-    /** 用默认应用打开（仅成品类扩展名，见 DeliverableInfo.openable）。Web 版返回下载地址 url。 */
+    /** 用默认应用打开（仅成品类扩展名，见 DeliverableInfo.openable）。Web 版没有「默认应用」，改回下载地址 url。 */
     open: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean; url?: string }> =>
       ipcRenderer.invoke('deliverables:open', sessionId, toolUseId, index),
     /** 在系统文件管理器中显示并选中该文件。 */

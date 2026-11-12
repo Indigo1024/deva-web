@@ -36,7 +36,7 @@ interface TasksContextValue {
   runNow: (id: string) => Promise<{ ok: boolean; reason?: string; already?: 'running' | 'queued' }>
   /** 编辑任务（标题/指令/日程/人格/模型）；主进程校验日程并重算下次触发，广播回全量列表。 */
   update: (input: TaskUpdateInput) => Promise<TaskRecord | null>
-  /** 删除任务（连同其运行历史；独占会话保留，由用户在对话列表自行删除）。 */
+  /** 删除任务（连同其运行历史；绑定了对话的连任务对话一起删，独立运行的任务对话保留）。 */
   remove: (id: string) => Promise<void>
 }
 

@@ -1361,6 +1361,18 @@ button.tl__line:hover {
   /* 命令与路径要按原样显示：等宽字体的连字会把 => 画成 ⇒ */
   font-variant-ligatures: none;
 }
+/* 成员工具的对象（派给 前端 · 任务）：成员名用正文字体，前面是成员的小头像（.cf-inface），任务标题灰字 */
+.tl__obj--member {
+  font-family: inherit;
+  font-size: inherit;
+  font-variant-ligatures: normal;
+}
+.tl__who {
+  color: var(--fg);
+}
+.tl__task {
+  color: var(--fg-subtle);
+}
 .tl__extra {
   font-size: calc(12.5px * var(--cs, 1));
   color: var(--fg-subtle);
@@ -1549,9 +1561,6 @@ button.tl__line:hover {
 .tl__me {
   width: 16px;
   height: 16px;
-  border-radius: var(--radius-full);
-  overflow: hidden;
-  background: var(--bg-inset);
 }
 .tl__me > svg,
 .tl__me > img {
@@ -1852,15 +1861,20 @@ button.tl__line:hover {
 .agentcard--rejected {
   opacity: 0.7;
 }
-/* 名片头像：圆形裁剪 Humation SVG，::after 补一圈身份主题色描边环。 */
+/*
+ * 头像（components/humation.tsx 的 PersonaFace）：形状底板 + 探出构图（不做悬停 / 点击动效，深色主题也不加白描边，用户定）。对比稿 design/avatar-shapes.html。
+ * 头像 SVG overflow 可见（头部与配件越出上沿），放头像的容器一律不要再 border-radius + overflow:hidden。
+ */
+.hm-ava {
+  display: block;
+  overflow: visible;
+}
+/* 名片头像：形状与探出由头像 SVG 自己画（components/humation.tsx），这里不裁剪。 */
 .agentcard__avatar {
   position: relative;
   flex: none;
   width: 40px;
   height: 40px;
-  border-radius: var(--radius-full);
-  overflow: hidden;
-  background: var(--bg-inset, rgba(0, 0, 0, 0.04));
 }
 .agentcard__avatar > svg {
   display: block;
@@ -2199,6 +2213,13 @@ button.tl__line:hover {
 /* 分步向导：上一步靠左、下一步/提交靠右（单题仍用基类的右对齐）。 */
 .ask__actions--nav {
   justify-content: space-between;
+}
+/* 操作行左侧一组：分步向导的「上一步」与附加项（如成员的「打开对话」）；单题时把附加项推到左边。 */
+.ask__actions-start {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-right: auto;
 }
 .ask__resolved {
   display: flex;
@@ -2869,64 +2890,6 @@ button.tl__line:hover {
   transform: rotate(180deg);
 }
 
-/* 附件贴片：输入区待发行 + 用户气泡已发行 */
-.composer__attachments {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-bottom: var(--space-1);
-}
-.attach-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 220px;
-  height: 24px;
-  padding: 0 4px 0 8px;
-  border-radius: var(--radius-full);
-  border: 1px solid var(--border);
-  background: var(--bg-inset);
-  color: var(--fg-muted);
-  font-size: 12px;
-}
-.attach-chip__name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.attach-chip__x {
-  display: grid;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-  border: none;
-  background: transparent;
-  color: var(--fg-subtle);
-  border-radius: var(--radius-full);
-}
-.attach-chip__x:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
-.attach-chip.is-bad {
-  border-color: var(--danger);
-  color: var(--danger);
-}
-.attach-chip--sent {
-  padding: 0 8px;
-  background: transparent;
-}
-.msg__attachments {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  margin-bottom: var(--space-2);
-}
-.msg__attachments:last-child {
-  margin-bottom: 0;
-}
-
 /* ---------- Chat：空态 / 思考 / 错误 / 徽标 ---------- */
 .chat__empty {
   height: 100%;
@@ -3319,8 +3282,37 @@ button.tl__line:hover {
 }
 .msg__mount-actions {
   display: flex;
+  align-items: center;
   gap: var(--space-2);
   margin-top: var(--space-3);
+}
+/* 去卡头的成员选文件夹卡（主对话末尾，见 MountRequestCard bare）：问句 + 灰字说明，右侧一组按钮，同提问卡排版。 */
+.msg__mount-q {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+.msg__mount-sub {
+  margin-top: 2px;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+/* 主对话的文件夹名：同行内代码的小灰底 */
+.msg__mount-sub code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--bg-inset);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+.msg__mount-actions-end {
+  display: flex;
+  gap: var(--space-2);
+  margin-left: auto;
 }
 .permission__resolved {
   font-size: 12px;
@@ -5555,12 +5547,6 @@ button.projmenu__item:disabled {
   display: grid;
   place-items: center;
 }
-.autotaskcard__hint {
-  color: var(--fg-muted);
-  font-size: 12px;
-  line-height: 1.5;
-  margin: var(--space-1) 0 var(--space-3);
-}
 .autotaskcard__field {
   display: block;
   margin-top: var(--space-3);
@@ -5802,57 +5788,109 @@ select.autotaskcard__input {
   gap: var(--space-2);
   margin-top: var(--space-4);
 }
-/* pending 摘要态：图标 + 三行（标题 / 日程·下次·角色·模型 / 指令单行省略）+ 右侧操作。 */
-.autotaskcard--summary {
+/* ── 方案 A 骨架（design/task-card.html）：表头 + 键值行 + 底栏，三个状态共用；pending 主题色描边，created 灰底 ── */
+.autotaskcard--card {
+  padding: 0;
+  overflow: hidden;
+  border-radius: 12px;
+  font-size: 12.5px;
+}
+.autotaskcard--card.is-done {
+  border-color: var(--border);
+  background: var(--bg-elevated);
+}
+.autotaskcard__chead {
   display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-}
-.autotaskcard--summary .autotaskcard__head-icon {
-  margin-top: 2px;
-  flex-shrink: 0;
-}
-.autotaskcard__sum-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-.autotaskcard__sum-title {
-  font-weight: 600;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 0 8px 0 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
   font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 600;
 }
-.autotaskcard__sum-meta {
+.autotaskcard--card.is-done .autotaskcard__chead {
+  border-bottom-color: var(--border);
+}
+.autotaskcard__chead > svg {
+  flex: none;
   color: var(--accent);
-  font-size: 12px;
 }
-.autotaskcard__sum-prompt {
-  color: var(--fg-muted);
-  font-size: 12px;
+.autotaskcard--card.is-done .autotaskcard__chead > svg {
+  color: var(--success);
+}
+.autotaskcard__kind {
+  flex: none;
+  color: var(--fg-subtle);
+  font-weight: 500;
+}
+.autotaskcard__ctitle {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.autotaskcard__sum-side {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-  flex-shrink: 0;
-}
-.autotaskcard__sum-side .autotaskcard__actions {
-  margin-top: 0;
-}
-.autotaskcard__collapse {
+.autotaskcard__headact {
   margin-left: auto;
   font-weight: 400;
 }
-/* created / dismissed：紧凑终态行（编辑器已卸载）。 */
-.autotaskcard--created,
+/* 表头右侧的一组：编辑 / 收起，或 created 态的「查看任务」+ 绿勾 */
+.autotaskcard__headacts {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.autotaskcard__headacts .btn--ghost {
+  font-weight: 400;
+}
+.autotaskcard__ok {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: var(--success);
+}
+/* created 态表头下面的键值行到底，底部不再有按钮行：多留一点下边距 */
+.autotaskcard--card.is-done .autotaskcard__rows {
+  padding-bottom: 12px;
+}
+.autotaskcard__rows {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 14px;
+  padding: 10px 12px;
+  line-height: 1.5;
+}
+.autotaskcard__k {
+  color: var(--fg-subtle);
+}
+.autotaskcard__v {
+  min-width: 0;
+}
+.autotaskcard__v.is-clip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.autotaskcard__dim {
+  color: var(--fg-subtle);
+}
+.autotaskcard__cfoot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: 0 12px 11px;
+}
+/* 展开编辑：表单区（原名片的 padding 挪到这里） */
+.autotaskcard__form {
+  padding: 10px 12px 12px;
+}
+.autotaskcard__form .autotaskcard__field:first-child {
+  margin-top: 0;
+}
+
+/* dismissed：紧凑终态行（编辑器已卸载）。 */
 .autotaskcard--dismissed {
   display: flex;
   align-items: center;
@@ -5872,33 +5910,6 @@ select.autotaskcard__input {
 }
 .autotaskcard--dismissed .autotaskcard__icon {
   color: var(--fg-subtle);
-}
-/* 已创建（用户批准）：与其它已决卡一样淡化底框，图标与「已创建」勾转成功绿。 */
-.autotaskcard--created {
-  border-color: var(--border);
-  background: var(--bg-elevated);
-}
-.autotaskcard--created .autotaskcard__icon,
-.autotaskcard--created .autotaskcard__done-title svg {
-  color: var(--success);
-}
-.autotaskcard__done-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-.autotaskcard__done-title {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-weight: 600;
-  font-size: 13px;
-}
-.autotaskcard__done-sub {
-  color: var(--fg-muted);
-  font-size: 12px;
 }
 .autotaskcard__done-text {
   font-size: 13px;
@@ -5970,6 +5981,59 @@ select.autotaskcard__input {
   font-size: 12px;
 }
 
+/* 定时任务表单工具条里的下拉框（运行方式）：收起态做成与角色 / 模型同款的贴片（.chip） */
+.select.select--chip {
+  width: auto;
+  height: 28px;
+  gap: 5px;
+  padding: 0 8px;
+  border-color: transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 500;
+  flex-shrink: 0;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.select.select--chip:has(> .select__lead) {
+  padding-left: 6px;
+}
+.select.select--chip:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.select.select--chip.is-open,
+.select.select--chip:focus-visible {
+  border-color: transparent;
+  box-shadow: none;
+  background: var(--bg-active);
+  color: var(--fg);
+}
+.select--chip .select__label {
+  max-width: 168px;
+}
+.select--chip .select__caret {
+  width: 13px;
+  height: 13px;
+}
+.select--chip .select-icon {
+  width: 16px;
+  height: 16px;
+  background: none;
+  color: inherit;
+}
+.select--chip .select-ava {
+  width: 16px;
+  height: 16px;
+}
+/* 运行方式的浮层：固定宽度，长标题省略 */
+.select-menu.select-menu--runmode {
+  width: 300px;
+}
+
 /* 选项与收起态共用的小图形 */
 .select-dot {
   flex: none;
@@ -5991,9 +6055,6 @@ select.autotaskcard__input {
   flex: none;
   width: 26px;
   height: 26px;
-  border-radius: 50%;
-  overflow: hidden;
-  background: var(--bg-inset);
 }
 .select-ava > svg,
 .select-ava > img {

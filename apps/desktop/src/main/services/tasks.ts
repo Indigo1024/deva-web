@@ -4,7 +4,7 @@ import { join } from 'path'
 import { randomUUID } from 'crypto'
 import { getDevaHome } from './config'
 import { publishSessionsChanged } from './chat-bus'
-import { rebindSessionPersona, syncSessionBinding } from './chat-store'
+import { listSessions, rebindSessionPersona, syncSessionBinding } from './chat-store'
 import { nextRun, parseCron, isValidTimeZone, describeSchedule, parseWallIso } from './schedule'
 import {
   ERROR_PAUSE_THRESHOLD,
@@ -70,7 +70,9 @@ function normalizeRecord(t: TaskRecord): TaskRecord {
     consecutiveErrors: typeof t.consecutiveErrors === 'number' ? t.consecutiveErrors : 0,
     runs: Array.isArray(t.runs) ? t.runs : [],
     lastRunAt: typeof t.lastRunAt === 'number' ? t.lastRunAt : null,
-    nextRunAt: typeof t.nextRunAt === 'number' ? t.nextRunAt : null
+    nextRunAt: typeof t.nextRunAt === 'number' ? t.nextRunAt : null,
+    ...(typeof t.ownerSessionId === 'string' && t.ownerSessionId ? { ownerSessionId: t.ownerSessionId } : {}),
+    ...(typeof t.originSessionId === 'string' && t.originSessionId ? { originSessionId: t.originSessionId } : {})
   }
 }
 
@@ -107,6 +109,49 @@ export function listTasks(): TaskRecord[] {
 export function getTask(id: string): TaskRecord | null {
   ensureLoaded()
   return cache.get(id) ?? null
+}
+
+/** 以某会话为任务对话的任务（没有则 null）。chat.ts 据此判断一轮定时运行属于哪个任务、绑定了哪个主对话。 */
+export function findTaskBySession(sessionId: string): TaskRecord | null {
+  ensureLoaded()
+  for (const t of cache.values()) if (t.sessionId === sessionId) return t
+  return null
+}
+
+/** 绑定在某个主对话上的任务（见 TaskRecord.ownerSessionId）。 */
+export function tasksOwnedBy(ownerSessionId: string): TaskRecord[] {
+  ensureLoaded()
+  return [...cache.values()].filter((t) => t.ownerSessionId === ownerSessionId)
+}
+
+/**
+ * 「在会话中运行」能选的会话：存在的普通对话（不是成员会话、不是任务自己的对话）。不合格返回 undefined（= 独立运行）。
+ */
+function validOwner(sessionId: unknown, taskSessionId?: string): string | undefined {
+  if (typeof sessionId !== 'string' || !sessionId || sessionId.startsWith('task-') || sessionId === taskSessionId)
+    return undefined
+  const meta = listSessions().find((s) => s.id === sessionId)
+  return meta && !meta.parentId ? sessionId : undefined
+}
+
+/**
+ * 会话被删除：在它里面运行的任务改为独立运行（任务和它的对话都保留，任务对话回到左侧列表）。
+ * 返回改了几个任务。
+ */
+export function releaseTasksOwnedBy(ownerSessionId: string): number {
+  ensureLoaded()
+  let n = 0
+  for (const t of cache.values()) {
+    if (t.ownerSessionId !== ownerSessionId) continue
+    delete t.ownerSessionId
+    t.updatedAt = Date.now()
+    n++
+  }
+  if (n) {
+    persist()
+    publishSessionsChanged()
+  }
+  return n
 }
 
 /** 创建结果：成功带记录，失败带稳定错误码（渲染层据此本地化）。 */
@@ -163,6 +208,10 @@ export function createTask(input: TaskCreateInput): CreateTaskResult {
     schedule: sched,
     auth: sanitizeAuth(input.auth),
     sessionId: `task-${id}`,
+    ...(typeof input.originSessionId === 'string' && input.originSessionId
+      ? { originSessionId: input.originSessionId }
+      : {}),
+    ...(validOwner(input.ownerSessionId) ? { ownerSessionId: input.ownerSessionId } : {}),
     status: 'active',
     createdAt: now,
     updatedAt: now,
@@ -173,6 +222,8 @@ export function createTask(input: TaskCreateInput): CreateTaskResult {
   }
   cache.set(id, task)
   persist()
+  // 在会话中运行：任务对话不进左侧列表，那个会话的标题栏出现定时任务入口。
+  if (task.ownerSessionId) publishSessionsChanged()
   return { ok: true, task }
 }
 
@@ -194,6 +245,15 @@ export function updateTask(input: TaskUpdateInput): TaskRecord | null {
       })
     )
       publishSessionsChanged()
+  }
+  // 运行方式：null = 独立运行，会话 id = 在该会话中运行（不合格的会话按独立运行处理）。切换后任务对话进出左侧列表。
+  if (input.ownerSessionId !== undefined) {
+    const owner = input.ownerSessionId === null ? undefined : validOwner(input.ownerSessionId, t.sessionId)
+    if ((t.ownerSessionId ?? undefined) !== owner) {
+      if (owner) t.ownerSessionId = owner
+      else delete t.ownerSessionId
+      publishSessionsChanged()
+    }
   }
   if (input.schedule && typeof input.schedule === 'object') {
     const sched = input.schedule
@@ -218,9 +278,24 @@ export function updateTask(input: TaskUpdateInput): TaskRecord | null {
   return t
 }
 
+/**
+ * 删除任务。绑定了主对话的任务连它的任务对话一起删（绑定后任务对话不在左侧列表，留下会成为看不到的孤儿对话）；
+ * 独立运行的任务只删记录，任务对话留在对话列表里由用户自行删除。任务对话经 setTaskSessionPurger 注入的删除器删
+ * （正在跑的一轮由它中止），chat.ts 装载前退化为只删记录。
+ */
 export function deleteTask(id: string): void {
   ensureLoaded()
-  if (cache.delete(id)) persist()
+  const t = cache.get(id)
+  if (!t) return
+  cache.delete(id)
+  persist()
+  if (t.ownerSessionId) purgeSessionImpl?.(t.sessionId)
+}
+
+/** 任务对话的删除器（chat.ts purgeSession）：删绑定任务时连任务对话一起删。 */
+let purgeSessionImpl: ((sessionId: string) => void) | null = null
+export function setTaskSessionPurger(fn: ((sessionId: string) => void) | null): void {
+  purgeSessionImpl = fn
 }
 
 /**
@@ -404,8 +479,9 @@ export function registerTasksIpc(getWindow: () => BrowserWindow | null): void {
 
   ipcMain.handle('tasks:list', (): TaskRecord[] => listTasks())
   ipcMain.handle('tasks:get', (_e, id: string): TaskRecord | null => getTask(id))
+  // 管理页手动新建的任务不属于任何对话（originSessionId 只由对话里的确认名片带上，见 chat.ts resolveAutotask）。
   ipcMain.handle('tasks:create', (_e, input: TaskCreateInput): CreateTaskResult =>
-    createTask(input)
+    createTask({ ...input, originSessionId: undefined })
   )
   ipcMain.handle('tasks:update', (_e, input: TaskUpdateInput): TaskRecord | null =>
     updateTask(input)

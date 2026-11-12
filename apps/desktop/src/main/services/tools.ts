@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path'
 import ignore, { type Ignore } from 'ignore'
 import { resolveExecShell } from './exec-policy'
+import { spillLongOutput } from './tool-results'
 import { skillsDir, upsertSkill } from './skills'
 import {
   deleteMemory,
@@ -29,7 +30,9 @@ import {
   type ImageMime
 } from './image-read'
 import type { ImagePart, ListingRecord, ToolSpec } from '../providers/types'
-import { browserToolSpec, runBrowserTool } from './browser'
+import { BROWSER_BRIEF, BROWSER_GUIDE, browserToolSpec, runBrowserTool, type MemberHandoff } from './browser'
+import { deferTool } from './tool-search'
+import { OFFICE_EXT, officeText } from './office-text'
 
 /**
  * Agent 工具集。工具名遵循 ^[a-zA-Z0-9_-]{1,64}$（各家 API 均不允许点号），
@@ -38,11 +41,12 @@ import { browserToolSpec, runBrowserTool } from './browser'
  * web_fetch 是唯一的网络工具：仅 http/https、带超时与大小上限、HTML 自动转纯文本。
  */
 
-export const toolSpecs: ToolSpec[] = [
+/** 完整定义。工具表用的是下面的 toolSpecs：按需加载的几个换成一句话描述 + 参数骨架。 */
+const fullToolSpecs: ToolSpec[] = [
   {
     name: 'read_file',
     description:
-      '读取工作区内一个文本文件，返回带行号的内容（便于定位与后续精确编辑）。默认从第 1 行起最多读 2000 行，超过 2000 字符的行会被截断；可用 offset（起始行，1 起）/ limit（行数）分段读取大文件，已知目标位置时建议只读相关片段。单次返回内容过大会报错，届时请缩小范围或先用 grep 定位。path 可相对项目根或绝对。注意：用 edit_file 时 old_string 应为「去掉行号前缀」的原文。也可读取图片（png / jpg / gif / webp）：图片会随结果直接附给你查看（过大时自动缩放），offset / limit 对图片无效。',
+      '读取工作区内一个文本文件，返回带行号的内容（便于定位与后续精确编辑）。默认从第 1 行起最多读 2000 行，超过 2000 字符的行会被截断；可用 offset（起始行，1 起）/ limit（行数）分段读取大文件，已知目标位置时建议只读相关片段。单次返回内容过大会报错，届时请缩小范围或先用 grep 定位。path 可相对项目根或绝对。注意：用 edit_file 时 old_string 应为「去掉行号前缀」的原文。也可读取图片（png / jpg / gif / webp）：图片会随结果直接附给你查看（过大时自动缩放），offset / limit 对图片无效。Word / Excel / PowerPoint 文件（.docx / .xlsx / .pptx）返回从中提取的纯文字（不含格式与图片），同样带行号、可分段读取，但不能用 edit_file 修改。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -100,7 +104,7 @@ export const toolSpecs: ToolSpec[] = [
   {
     name: 'web_fetch',
     description:
-      '获取一个网页 / HTTP(S) 资源并转为可读文本：HTML 自动去标签、解码实体、保留正文；JSON / 纯文本原样返回。用于查在线文档、读网页、取 API 响应。仅支持 http/https，有超时与大小上限，超长内容会截断。内容靠 JS 渲染、要登录或要交互的网页用 browser。',
+      '获取一个网页 / HTTP(S) 资源并转为可读文本：HTML 自动去标签、解码实体、保留正文；JSON / 纯文本原样返回。用于查在线文档、读网页、取 API 响应。仅支持 http/https，有超时与大小上限；正文超过 100000 字符时完整内容存到文件，只返回开头、结尾与文件路径。内容靠 JS 渲染、要登录或要交互的网页用 browser。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -175,7 +179,7 @@ export const toolSpecs: ToolSpec[] = [
       (process.platform === 'win32'
         ? '命令在 bash 中运行（优先使用 Git Bash，请写 POSIX/bash 命令；若本机未装 Git Bash 则回落到 cmd.exe，此时请改用 Windows 命令）。'
         : '命令在 bash/sh 中运行，请写 POSIX/bash 命令。') +
-      '工作目录：已挂载工作区时为项目根，未挂载时为用户主目录（需要别处执行请在命令里用绝对路径或自行 cd）。非交互运行（已禁用分页器/凭据提示/颜色，避免卡住）；默认超时 600000ms（可用 timeout 调整，最长 1800000ms）；输出过长会被截断。命令不受任何限制、直接执行，破坏性操作（删除、覆盖、强推等）请先确认目标无误。请勿运行交互式或长驻命令（如 dev server、vim、npm init——需交互请让用户改用终端面板），否则会阻塞到超时后被强制结束。',
+      '工作目录：已挂载工作区时为项目根，未挂载时为用户主目录（需要别处执行请在命令里用绝对路径或自行 cd）。非交互运行（已禁用分页器/凭据提示/颜色，避免卡住）；默认超时 600000ms（可用 timeout 调整，最长 1800000ms）；输出超过 30000 字符时完整内容存到文件，只返回开头、结尾与文件路径。命令不受任何限制、直接执行，破坏性操作（删除、覆盖、强推等）请先确认目标无误。请勿运行交互式或长驻命令（如 dev server、vim、npm init——需交互请让用户改用终端面板），否则会阻塞到超时后被强制结束。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -366,7 +370,8 @@ export const toolSpecs: ToolSpec[] = [
       '**关键**：任务触发时会自动执行、期间不会再向用户确认。触发时所有工具默认可用，' +
       '无需你或用户挑选工具；名片里只需核对日程，并可选运行身份（人格）与模型。' +
       '你只负责把日程和意图表达清楚。不要设置 model（你无法可靠得知 providerId:modelId）。' +
-      'schedule.tz 若不确定可省略，由系统按用户本地时区填充。',
+      'schedule.tz 若不确定可省略，由系统按用户本地时区填充。' +
+      '任务创建后独立运行：结果记在任务自己的对话里，完成后系统通知用户。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -466,6 +471,26 @@ export const toolSpecs: ToolSpec[] = [
 ]
 
 /**
+ * 按需加载的工具（见 tool-search.ts）：不常用、说明又长。工具表里只有这句描述（写清做什么、什么时候用）与参数骨架，
+ * 完整定义由 tool_search 给出；没查就调用会被拦下并附上用法，故执行前模型必定看过完整定义。
+ */
+const DEFERRED: Record<string, { brief: string; guide?: string }> = {
+  browser: { brief: BROWSER_BRIEF, guide: BROWSER_GUIDE },
+  create_skill: { brief: '创建并启用一个单文件技能（Skill）。仅在用户明确想创建技能时使用。' },
+  propose_agent: { brief: '用户想通过对话创建一个角色（Agent）时，生成一张角色名片供用户确认。' },
+  create_task: {
+    brief:
+      '为用户创建定时任务（周期执行或一次性，如「每天 10 点发我热点新闻」「下午 5 点提醒我开会」）：生成一张确认名片，用户确认后才真正创建。'
+  },
+  create_mcp: { brief: '把一个 MCP 服务接入 Deva：写入配置并启用。仅在用户明确想接入某个 MCP 服务时使用。' }
+}
+
+export const toolSpecs: ToolSpec[] = fullToolSpecs.map((t) => {
+  const d = DEFERRED[t.name]
+  return d ? deferTool(t, d.brief, d.guide) : t
+})
+
+/**
  * exit_plan 工具规格。常驻主轮工具集：模型对非平凡任务先只读调研，再调用它提交计划待用户批准。
  * 该工具在 runAgentLoop 内「闸门前特判」，不走 executeTool、不授予任何能力——批准仅让循环继续执行。
  */
@@ -561,6 +586,8 @@ const READ_TOOLS = new Set([
   'web_fetch',
   'ask_user',
   'skill',
+  // 查看按需加载工具的用法：同为闸门前特判，列此仅兜底。
+  'tool_search',
   'run_subagent',
   'send_to_subagent',
   // 读记忆（主进程直读 ~/.deva 下的全局 / 项目记忆，无路径入参）；写/删记忆不在此集，落默认分支同 create_skill。
@@ -609,6 +636,16 @@ export interface ToolContext {
   canPromptUser?: boolean
   /** 当前对话的角色：browser 在浏览器窗口的标签上显示其头像。 */
   personaId?: string
+  /**
+   * 项目成员的会话：browser 请用户在网页上操作（handoff）时不弹浏览器窗口，由主对话输入框上方的通知行提醒，
+   * 提示条署成员名；开始等待时调 notify（用户没在看 Deva 时弹系统通知）。
+   */
+  memberHandoff?: MemberHandoff
+  /**
+   * 全局记忆只读（项目成员的会话）：memory_write 只能写项目私有记忆（省略 scope 即项目），memory_delete 不能删全局条目。
+   * 用户本人的通用偏好由主角色记。
+   */
+  globalMemoryReadonly?: boolean
 }
 
 export interface ToolResult {
@@ -627,6 +664,8 @@ export interface ToolResult {
 }
 
 const MAX_READ_BYTES = 2 * 1024 * 1024
+/** read_file 读 Office 文件（.docx / .xlsx / .pptx）的体积上限：文件里多是图片，文字只占一小部分。 */
+const MAX_OFFICE_BYTES = 50 * 1024 * 1024
 /**
  * read_file 文本护栏（对齐 Claude Code Read）：未给 limit 时默认最多读 2000 行；单行超 2000 字符截断；
  * 单次返回超字符上限（≈25k token）直接报错要求缩小范围——宁可让模型多调一次，也不让一次读取吞掉半个上下文窗口。
@@ -646,11 +685,14 @@ const GREP_CONCURRENCY = 16
 const WEB_FETCH_TIMEOUT_MS = 30_000
 const WEB_FETCH_MAX_BYTES = 5 * 1024 * 1024
 const WEB_TEXT_MAX = 100_000
-/** run_command 护栏：输出字符上限 / 默认与最长超时 / 捕获字节上限（防暴产出）。 */
+/**
+ * run_command 护栏：直接交给模型的输出字符上限（同 CC，超过即全文存文件、只给头尾预览，见 tool-results.ts）/
+ * 默认与最长超时 / 捕获字节上限（防暴产出：超过即停止命令）。
+ */
 const EXEC_OUTPUT_MAX = 30_000
 const EXEC_TIMEOUT_DEFAULT = 600_000
 const EXEC_TIMEOUT_MAX = 1_800_000
-const EXEC_CAPTURE_BYTES = 4 * EXEC_OUTPUT_MAX
+const EXEC_CAPTURE_BYTES = 10 * 1024 * 1024
 /** 杀树后等 stdio 关闭的宽限期；须短于退出时 settleActiveTurns 的 3s 收尾窗口。 */
 const EXEC_KILL_GRACE_MS = 2000
 /** 遍历时直接跳过、不进入的噪音目录。 */
@@ -1091,6 +1133,8 @@ interface ExecOutcome {
   spawnError?: string
   /** 已杀树但宽限期内 stdio 仍未关闭（多半有漏网子进程攥着管道），已强行收尾。 */
   lingering?: boolean
+  /** 输出超过捕获上限，已停止命令。 */
+  capped?: boolean
 }
 
 /** 非交互环境：禁分页器、禁 git 凭据提示、禁颜色码，避免命令挂起或污染输出。 */
@@ -1295,13 +1339,58 @@ function execCapture(
         timedOut,
         aborted,
         spawnError,
-        lingering
+        lingering,
+        capped
       })
     }
 
     child.on('error', (e) => finish(null, (e as Error)?.message ?? String(e)))
     child.on('close', (code) => finish(code)) // close 等 stdio EOF，比 exit 更完整
   })
+}
+
+/**
+ * read_file 的文本结果：按 offset / limit 取一段，带行号返回（超长行截断、超出单次上限报错）。
+ * extraNote：附在结尾说明里的一句（如 Office 文件「这是提取的纯文字」）。
+ */
+function numberedText(text: string, a: Record<string, unknown>, extraNote?: string): ToolResult {
+  // 行终止符统一：\r\n、孤立 \r（老式 Mac）、\n 一律视为换行，行内容不含 \r——
+  // 与 GUI 显示、grep 行号、edit_file 匹配保持一致（此前 split('\n') 会把 \r 留在行内，
+  // 显示层不可见却参与匹配，导致「所见非所匹配」）。
+  const lines = text.split(/\r\n|\r|\n/)
+  // 文件以换行结尾会在 split 后多出一个空尾元素（幽灵空行）——去掉这个由末尾终止符产生的空行。
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
+  const total = lines.length
+  const start = Math.min(Math.max(1, toInt(a.offset) ?? 1), total)
+  const lim = toInt(a.limit)
+  const end = Math.min(start - 1 + (lim && lim > 0 ? lim : READ_DEFAULT_LINES), total)
+  let clipped = 0
+  const numbered = lines
+    .slice(start - 1, end)
+    .map((ln, i) => {
+      if (ln.length > READ_LINE_CHARS_MAX) {
+        clipped++
+        ln = `${ln.slice(0, READ_LINE_CHARS_MAX)}…（本行共 ${ln.length} 字符，已截断）`
+      }
+      return `${String(start + i).padStart(6, ' ')}\t${ln}`
+    })
+    .join('\n')
+  if (numbered.length > READ_OUTPUT_MAX)
+    return {
+      content: `（第 ${start}–${end} 行共约 ${numbered.length} 字符，超过单次读取上限 ${READ_OUTPUT_MAX} 字符，未返回；请用 offset/limit 缩小范围，或用 grep 定位所需内容）`,
+      summary: '读取范围过大',
+      isError: true
+    }
+  const notes: string[] = []
+  if (end < total)
+    notes.push(`仅显示第 ${start}–${end} 行（共 ${total} 行）；如需后续内容，用 offset=${end + 1} 继续读取。`)
+  if (clipped) notes.push(`有 ${clipped} 行超过 ${READ_LINE_CHARS_MAX} 字符，已截断显示。`)
+  if (extraNote) notes.push(extraNote)
+  const ranged = start > 1 || end < total
+  return {
+    content: (numbered || '（空文件）') + (notes.length ? `\n\n（${notes.join('')}）` : ''),
+    summary: ranged ? `第 ${start}–${end}/${total} 行` : `${total} 行`
+  }
 }
 
 /** read_file 的图片分支：整形（必要时缩放）后作为图片块返回，content 只留一句文字说明。 */
@@ -1358,7 +1447,29 @@ export async function executeTool(
     if (name === 'read_file') {
       const abs = resolvePath(ctx.workspaceRoot, a.path)
       const stat = await fs.stat(abs)
-      const imageExt = IMAGE_EXT.has(extname(abs).toLowerCase())
+      const ext = extname(abs).toLowerCase()
+      // Word / Excel / PowerPoint：解压取文字，同文本一样带行号返回（附件按路径交给模型时靠它读）。
+      if (OFFICE_EXT.has(ext)) {
+        if (stat.size > MAX_OFFICE_BYTES)
+          return {
+            content: `（文件超过 ${formatBytes(MAX_OFFICE_BYTES)}，未加载）`,
+            summary: '文件过大',
+            isError: true
+          }
+        const text = officeText(await fs.readFile(abs), ext)
+        if (text === null)
+          return {
+            content: '（无法解析这个文件：可能已加密、已损坏，或其实是旧版格式）',
+            summary: '无法解析',
+            isError: true
+          }
+        return numberedText(
+          text,
+          a,
+          `以上是从 ${ext.slice(1).toUpperCase()} 文件中提取的纯文字（不含格式与图片），不能用 edit_file 修改原文件。`
+        )
+      }
+      const imageExt = IMAGE_EXT.has(ext)
       if (imageExt && stat.size > MAX_IMAGE_SOURCE_BYTES)
         return {
           content: `（图片超过 ${formatBytes(MAX_IMAGE_SOURCE_BYTES)}，未加载）`,
@@ -1380,42 +1491,7 @@ export async function executeTool(
       if (looksBinary(buf))
         return { content: '（疑似二进制文件，未加载）', summary: '二进制', isError: true }
       if (buf.length === 0) return { content: '（空文件）', summary: '0 行' }
-      // 行终止符统一：\r\n、孤立 \r（老式 Mac）、\n 一律视为换行，行内容不含 \r——
-      // 与 GUI 显示、grep 行号、edit_file 匹配保持一致（此前 split('\n') 会把 \r 留在行内，
-      // 显示层不可见却参与匹配，导致「所见非所匹配」）。
-      const lines = buf.toString('utf8').split(/\r\n|\r|\n/)
-      // 文件以换行结尾会在 split 后多出一个空尾元素（幽灵空行）——去掉这个由末尾终止符产生的空行。
-      if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
-      const total = lines.length
-      const start = Math.min(Math.max(1, toInt(a.offset) ?? 1), total)
-      const lim = toInt(a.limit)
-      const end = Math.min(start - 1 + (lim && lim > 0 ? lim : READ_DEFAULT_LINES), total)
-      let clipped = 0
-      const numbered = lines
-        .slice(start - 1, end)
-        .map((ln, i) => {
-          if (ln.length > READ_LINE_CHARS_MAX) {
-            clipped++
-            ln = `${ln.slice(0, READ_LINE_CHARS_MAX)}…（本行共 ${ln.length} 字符，已截断）`
-          }
-          return `${String(start + i).padStart(6, ' ')}\t${ln}`
-        })
-        .join('\n')
-      if (numbered.length > READ_OUTPUT_MAX)
-        return {
-          content: `（第 ${start}–${end} 行共约 ${numbered.length} 字符，超过单次读取上限 ${READ_OUTPUT_MAX} 字符，未返回；请用 offset/limit 缩小范围，或用 grep 定位所需内容）`,
-          summary: '读取范围过大',
-          isError: true
-        }
-      const notes: string[] = []
-      if (end < total)
-        notes.push(`仅显示第 ${start}–${end} 行（共 ${total} 行）；如需后续内容，用 offset=${end + 1} 继续读取。`)
-      if (clipped) notes.push(`有 ${clipped} 行超过 ${READ_LINE_CHARS_MAX} 字符，已截断显示。`)
-      const ranged = start > 1 || end < total
-      return {
-        content: (numbered || '（空文件）') + (notes.length ? `\n\n（${notes.join('')}）` : ''),
-        summary: ranged ? `第 ${start}–${end}/${total} 行` : `${total} 行`
-      }
+      return numberedText(buf.toString('utf8'), a)
     }
 
     if (name === 'present_files') {
@@ -1644,11 +1720,6 @@ export async function executeTool(
         } else {
           text = raw
         }
-        let cut = false
-        if (text.length > WEB_TEXT_MAX) {
-          text = text.slice(0, WEB_TEXT_MAX)
-          cut = true
-        }
         const header = [
           `URL: ${res.url || url}`,
           title ? `标题: ${title}` : null,
@@ -1657,8 +1728,9 @@ export async function executeTool(
           .filter(Boolean)
           .join('\n')
         const body = text.trim() || '（无可读文本内容）'
+        // 正文过长：全文存文件，模型拿开头结尾预览与路径（同 run_command）；页面头信息恒在前。
         return {
-          content: `${header}\n\n${body}${cut ? `\n\n…（内容超过 ${WEB_TEXT_MAX} 字符，已截断）` : ''}`,
+          content: `${header}\n\n${spillLongOutput(body, WEB_TEXT_MAX, ctx.sessionId, 'web')}`,
           summary: title ? title.slice(0, 40) : `${body.length} 字符`
         }
       } catch (e) {
@@ -1790,15 +1862,16 @@ export async function executeTool(
         EXEC_TIMEOUT_MAX
       )
       const r = await execCapture(command, cwd, timeoutMs, ctx.signal)
-      // 先截断输出，再追加恒显状态行（截断藏不住成败信号）。
-      let body = r.out
-      if (body.length > EXEC_OUTPUT_MAX)
-        body = body.slice(0, EXEC_OUTPUT_MAX) + `\n…（输出超过 ${EXEC_OUTPUT_MAX} 字符，已截断）`
+      // 输出过长：全文存文件，模型只拿开头和结尾（报错与汇总多在结尾）。恒显状态行追加在后，不会被省略。
+      const body = spillLongOutput(r.out, EXEC_OUTPUT_MAX, ctx.sessionId, 'command')
       let status: string
       let summary: string
       if (r.spawnError) {
         status = `（无法执行：${r.spawnError}）`
         summary = '无法执行'
+      } else if (r.capped) {
+        status = `（输出超过 ${EXEC_CAPTURE_BYTES / 1024 / 1024}MB，已停止命令）`
+        summary = '输出过多'
       } else if (r.aborted) {
         status = '（已中止）'
         summary = '已中止'
@@ -1810,7 +1883,7 @@ export async function executeTool(
         summary = `退出码 ${r.code}`
       }
       if (r.lingering) status += '（有子进程未能确认结束，可能仍在后台运行）'
-      const isError = Boolean(r.spawnError) || r.aborted || r.timedOut || r.code !== 0
+      const isError = Boolean(r.spawnError) || r.capped || r.aborted || r.timedOut || r.code !== 0
       // 未挂载工作区时命令在用户主目录执行，失败多半只是「不在项目里」（典型：git 报 not a git
       // repository）。回灌一行可操作提示，免得模型误判成项目本身有问题。命令文本里的相对路径无法
       // 可靠判定（故 needsWorkspaceMount 不拦 run_command），改用这种「失败才提示」的事后自愈。
@@ -1871,7 +1944,14 @@ export async function executeTool(
       // 显式给了 scope 就按它；省略时新增默认全局，带 id 更新则按 id 前缀定位（同 memory_delete），
       // 免得模型更新 p_ 条目时漏写 scope 被默认成 global 而误报不符。
       const explicit = a.scope === 'project' || a.scope === 'global' ? a.scope : undefined
-      const kind = explicit ?? (id ? scopeKindOfId(id) : 'global')
+      const kind = explicit ?? (id ? scopeKindOfId(id) : ctx.globalMemoryReadonly ? 'project' : 'global')
+      if (kind === 'global' && ctx.globalMemoryReadonly)
+        return {
+          content:
+            '你是项目成员，全局记忆（用户本人的通用偏好）对你只读，由主角色来记；你只能写当前文件夹的项目私有记忆（scope="project"）。',
+          summary: '未写入',
+          isError: true
+        }
       if (kind === 'project' && !ctx.workspaceRoot)
         return {
           content: id
@@ -1903,6 +1983,12 @@ export async function executeTool(
       const id = typeof a.id === 'string' ? a.id.trim() : ''
       if (!id) return { content: '缺少要删除的记忆 id', summary: '参数无效', isError: true }
       const kind = scopeKindOfId(id)
+      if (kind === 'global' && ctx.globalMemoryReadonly)
+        return {
+          content: `${id} 是全局记忆，对项目成员只读，不能删除；需要删除请告诉用户由主角色处理。`,
+          summary: '未删除',
+          isError: true
+        }
       if (kind === 'project' && !ctx.workspaceRoot)
         return { content: `${id} 是项目私有记忆，但当前未挂载工作区，无法定位`, summary: '未找到', isError: true }
       const scope: MemoryScope =

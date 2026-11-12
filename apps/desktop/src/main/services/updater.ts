@@ -1,34 +1,38 @@
 /**
  * 检查更新（设置 → 关于 →「检查更新」）。只在用户点按钮时检查，不在后台自动检查。
  *
- * 检查：读 GitHub 的 releases/latest（预发布版这个接口本就不返回），和本机版本比较。
+ * 检查：查 GitHub 上最新的正式版（预发布版不算），和本机版本比较。来源见 latestRelease：先问 API，不行再读网页。
  * 有新版时按安装方式分两种（见 shared/update.ts 的 UpdateMode）：
  *  - Windows 上用 exe 装的：electron-updater 读 Release 里的 latest.yml，应用内下载（校验 sha512），
  *    点「重启并安装」后静默覆盖安装并自动重开；下好了没点，下次退出时也会装上；
  *  - Windows 便携版（zip 解压运行的）：在浏览器里打开新版 zip 的直链，用户解压替换；
  *  - 其他情形（mac 包没正式签名做不了自动安装、开发模式）：在浏览器里打开对应安装包的直链。
  *
- * 网络都走 Chromium 网络栈（net.fetch，electron-updater 内部用 net.request），自动使用系统代理。
+ * 网络都走 Chromium 网络栈：查 API 用 httpFetch（同模型请求，先直连，直连不通才走系统代理）；读网页、下载
+ * （net.fetch / net.request，electron-updater 内部也用 net.request）走系统代理。
  */
 import { app, ipcMain, net, shell, type BrowserWindow } from 'electron'
 import { autoUpdater, type AppUpdater } from 'electron-updater'
 import type { UpdateMode, UpdateRelease, UpdateState } from '../../shared/update'
+import { httpFetch } from '../http'
 import { settleActiveTurns } from './chat'
 import { installedByNsis, isPortable } from './portable'
 
 const LATEST_API = 'https://api.github.com/repos/sqfcyily/deva/releases/latest'
-
-interface GithubAsset {
-  name: string
-  browser_download_url: string
-  /** uploaded = 已传完；open = 还在上传 */
-  state?: string
-}
+const RELEASES = 'https://github.com/sqfcyily/deva/releases'
+const TIMEOUT_MS = 15_000
 
 interface GithubRelease {
   tag_name: string
-  html_url: string
-  assets?: GithubAsset[]
+  /** state：uploaded = 已传完；open = 还在上传 */
+  assets?: { name: string; state?: string }[]
+}
+
+/** 最新正式版。 */
+interface LatestRelease {
+  tag: string
+  /** 这个文件是否已传完、可以下载。 */
+  hasFile: (name: string) => Promise<boolean>
 }
 
 let getWindow: () => BrowserWindow | null = () => null
@@ -48,15 +52,23 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
 }
 
-/** 比较 x.y.z，忽略「-」之后的预发布后缀。 */
+/**
+ * 比较 x.y.z[-pre]。x.y.z 相同时正式版比预发布版新（0.5.0 > 0.5.0-beta.1），
+ * 装了预发布版的用户才能收到同号正式版的更新；都是预发布版时按后缀比较（beta.2 > beta.1）。
+ */
 function compareVersions(a: string, b: string): number {
-  const pa = a.split('-')[0].split('.').map(Number)
-  const pb = b.split('-')[0].split('.').map(Number)
+  const [ca, preA = ''] = a.split(/-(.*)/)
+  const [cb, preB = ''] = b.split(/-(.*)/)
+  const pa = ca.split('.').map(Number)
+  const pb = cb.split('.').map(Number)
   for (let i = 0; i < 3; i++) {
     const d = (pa[i] || 0) - (pb[i] || 0)
     if (d !== 0) return Math.sign(d)
   }
-  return 0
+  if (preA === preB) return 0
+  if (!preA) return 1
+  if (!preB) return -1
+  return Math.sign(preA.localeCompare(preB, 'en', { numeric: true }))
 }
 
 /**
@@ -101,19 +113,84 @@ function installerName(version: string): string | null {
   return null
 }
 
+/**
+ * 先问 API：一次请求连文件列表一起拿到，平时又快又稳。但未登录时每个 IP 每小时只有 60 次，代理的出口 IP 多人共用，
+ * 额度常被用光而返回 403（issue #39），所以 API 走 httpFetch 先直连、用自己的 IP。API 还是不行时改读网页（不占这个额度，
+ * electron-updater 的 GitHub 源也这么读），不过网页的 releases/latest 有时十几秒才回、甚至 504，只作后备。
+ * 两边都不行时报网页那边的错。
+ */
+async function latestRelease(): Promise<LatestRelease> {
+  try {
+    return await latestFromApi()
+  } catch (e) {
+    console.warn('[updater] GitHub API unavailable, falling back to the web page:', errorText(e))
+    return await latestFromWeb()
+  }
+}
+
+async function latestFromApi(): Promise<LatestRelease> {
+  const res = await httpFetch(LATEST_API, {
+    headers: { accept: 'application/vnd.github+json' },
+    signal: AbortSignal.timeout(TIMEOUT_MS)
+  })
+  if (!res.ok) throw new Error(`GitHub HTTP ${res.status}`)
+  const data = (await res.json()) as GithubRelease
+  const uploaded = new Set((data.assets ?? []).filter((a) => a.state !== 'open').map((a) => a.name))
+  return { tag: data.tag_name, hasFile: async (name) => uploaded.has(name) }
+}
+
+/** 网页地址带 Accept: application/json 时跳转到最新正式版，并返回含 tag_name 的 JSON（没有文件列表）。 */
+async function latestFromWeb(): Promise<LatestRelease> {
+  const res = await net.fetch(`${RELEASES}/latest`, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(TIMEOUT_MS)
+  })
+  if (!res.ok) throw new Error(`GitHub HTTP ${res.status}`)
+  const tag = ((await res.json()) as { tag_name?: unknown }).tag_name
+  if (typeof tag !== 'string' || !tag) throw new Error('GitHub: tag_name missing')
+  return { tag, hasFile: (name) => assetReady(tag, name) }
+}
+
+/**
+ * 该版本的 Release 里这个文件是否已传完、可以下载。只问 github.com：有文件时回 302 跳到下载服务器（不跟过去），
+ * 没有或还在上传时回 404。
+ */
+function assetReady(tag: string, name: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const req = net.request({
+      method: 'HEAD',
+      url: `${RELEASES}/download/${tag}/${encodeURIComponent(name)}`,
+      redirect: 'manual'
+    })
+    const timer = setTimeout(() => {
+      req.abort()
+      reject(new Error('GitHub: request timed out'))
+    }, TIMEOUT_MS)
+    // 先到的结果为准；不调 followRedirect，请求随即取消，之后的 error 事件落到已定的 Promise 上不起作用
+    const settle = (fn: () => void): void => {
+      clearTimeout(timer)
+      fn()
+    }
+    req.on('redirect', () => settle(() => resolve(true)))
+    req.on('response', (res) => {
+      const code = res.statusCode
+      settle(() =>
+        code === 404 ? resolve(false) : code < 300 ? resolve(true) : reject(new Error(`GitHub HTTP ${code}`))
+      )
+    })
+    req.on('error', (e) => settle(() => reject(e)))
+    req.end()
+  })
+}
+
 async function check(): Promise<void> {
   // 正在下载 / 已下好时不重查，免得把进度或「重启并安装」冲掉
   if (state.phase === 'checking' || state.phase === 'downloading' || state.phase === 'downloaded')
     return
   setState({ phase: 'checking' })
   try {
-    const res = await net.fetch(LATEST_API, {
-      headers: { accept: 'application/vnd.github+json' },
-      signal: AbortSignal.timeout(15_000)
-    })
-    if (!res.ok) throw new Error(`GitHub HTTP ${res.status}`)
-    const data = (await res.json()) as GithubRelease
-    const version = data.tag_name.replace(/^v/, '')
+    const { tag, hasFile } = await latestRelease()
+    const version = tag.replace(/^v/, '')
     if (compareVersions(version, app.getVersion()) <= 0) {
       found = null
       setState({ phase: 'latest' })
@@ -122,20 +199,19 @@ async function check(): Promise<void> {
     const mode: UpdateMode = canAutoInstall() ? 'auto' : isPortable() ? 'portable' : 'manual'
     // 发版时常是先在网页上发布 Release、CI 几分钟后才把安装包传上来：本机要用的文件传完之前不算有新版，
     // 免得用户点了下载却下不到（Windows 自动更新还要 latest.yml）
-    const uploaded = (data.assets ?? []).filter((a) => a.state !== 'open')
     const name = installerName(version)
-    const installer = name ? uploaded.find((a) => a.name === name) : undefined
     const ready =
       name === null ||
-      (installer !== undefined && (mode !== 'auto' || uploaded.some((a) => a.name === 'latest.yml')))
+      (await Promise.all([hasFile(name), mode === 'auto' ? hasFile('latest.yml') : true])).every(Boolean)
     if (!ready) {
       found = null
       setState({ phase: 'latest' })
       return
     }
-    const release = { version, pageUrl: data.html_url }
-    found = { release, mode, installerUrl: installer?.browser_download_url ?? null }
-    setState({ phase: 'available', release, mode, file: installer?.name ?? null })
+    const release = { version, pageUrl: `${RELEASES}/tag/${tag}` }
+    const installerUrl = name ? `${RELEASES}/download/${tag}/${encodeURIComponent(name)}` : null
+    found = { release, mode, installerUrl }
+    setState({ phase: 'available', release, mode, file: name })
   } catch (e) {
     setState({ phase: 'error', stage: 'check', message: errorText(e) })
   }
@@ -145,6 +221,9 @@ function getUpdater(): AppUpdater {
   if (updater) return updater
   updater = autoUpdater
   updater.autoDownload = false
+  // 当前是预发布版时 electron-updater 默认打开它、改读 feed 里最新的一个（可能又是预发布版），
+  // 和 check() 读的 releases/latest（只有正式版）对不上；固定只升正式版
+  updater.allowPrerelease = false
   // 下好了没点「重启并安装」：下次退出时静默装上（不自动重开）
   updater.autoInstallOnAppQuit = true
   updater.on('download-progress', (p) => {

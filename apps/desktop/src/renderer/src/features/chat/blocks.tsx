@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   Square,
   Sparkles,
@@ -52,6 +52,14 @@ import {
   Hand,
   MessageSquare,
   CircleCheckBig,
+  UserPlus,
+  Send,
+  CalendarClock,
+  CircleStop,
+  MessagesSquare,
+  Forward,
+  UsersRound,
+  BookOpen,
   type LucideIcon
 } from 'lucide-react'
 import { useI18n } from '../../i18n/i18n'
@@ -59,7 +67,7 @@ import { REPEAT_STOP, TASK_MAX_STEPS } from '../../../../shared/limits'
 import { useExtensions } from '../../store/extensions'
 import type { ChatBlock, ChatMessage, StreamStatus, ToolStatus } from '../../store/chat'
 import { CopyButton, Markdown } from './Markdown'
-import { HumationFace, PersonaFace, USER_AVATAR_SEED } from '../../components/humation'
+import { AUTO_SHAPE, HumationFace, PersonaFace, USER_AVATAR_SEED } from '../../components/humation'
 import { useProfile } from '../../store/profile'
 import { TaskConfirmCard } from './TaskConfirmCard'
 import { DeliverablesCard } from './DeliverablesCard'
@@ -95,8 +103,17 @@ const TOOL_META: Record<string, { key: string; icon: LucideIcon }> = {
   present_files: { key: 'presentFiles', icon: Package },
   // 拼图与输入框「/」联想、角色资料卡里的技能图标一致。
   skill: { key: 'skill', icon: Puzzle },
+  // 查看按需加载工具的用法（主进程 tool-search.ts）；没查就调用、被拦下的那次也画成这一步。
+  tool_search: { key: 'toolSearch', icon: BookOpen },
   // 内置浏览器：时间轴上按动作区分（见 BROWSER_META）；这里是不知道动作时（如底部状态行）的通用说法。
-  browser: { key: 'browser', icon: Globe }
+  browser: { key: 'browser', icon: Globe },
+  // 项目成员（见 services/members.ts）：主智能体添加成员 / 派任务 / 中止，成员查看主对话、把结论交给主对话处理。
+  create_member: { key: 'createMember', icon: UserPlus },
+  member_send: { key: 'memberSend', icon: Send },
+  member_stop: { key: 'memberStop', icon: CircleStop },
+  member_status: { key: 'memberStatus', icon: UsersRound },
+  read_main: { key: 'readMain', icon: MessagesSquare },
+  report_to_main: { key: 'reportToMain', icon: Forward }
 }
 
 /** browser 工具的各个动作：每个动作有自己的动词与图标（打开网页、查看页面、点击……）。 */
@@ -184,12 +201,74 @@ function shortPath(p: string): string {
  * 只有 path 缩成「父目录/文件名」，命令、正则、URL 原样展示，超长时由 CSS 单行省略号截断尾部。
  * 未知工具（如 MCP 工具）显示工具名：动词「已调用」本身说明不了调了什么。
  */
-function flowObject(name: string, args: unknown): { text: string; full: string } | null {
+const MEMBER_TOOLS = new Set(['create_member', 'member_send', 'member_stop', 'member_status'])
+
+/** 成员工具的对象：成员名（派任务另带任务标题）。不是成员工具、或没写成员（查看全部成员的状态）时为 null。 */
+function memberObject(name: string, args: unknown): { who: string; task: string } | null {
+  if (!MEMBER_TOOLS.has(name)) return null
+  const a = (args ?? {}) as { name?: unknown; member?: unknown; task?: unknown }
+  const who = String((name === 'create_member' ? a.name : a.member) ?? '').trim()
+  if (!who) return null
+  const task = name === 'member_send' && typeof a.task === 'string' ? a.task.trim() : ''
+  return { who, task }
+}
+
+/**
+ * 成员名前的小头像（派任务、建成员等步骤）：由对话外壳按名字提供（主对话的成员名单，含已移除的）。没提供（成员对话、
+ * 后台任务面板等）或认不出这个名字时返回 null，只写名字。
+ */
+export const MemberFaceContext = createContext<((name: string) => React.ReactNode) | null>(null)
+
+/**
+ * 本对话里在会话中运行的定时任务（主角色的 member_send / member_status 也能点到它们，见主进程 askTask）：
+ * has = 这个名字是不是定时任务；only = 只有定时任务、没有成员。查看状态的步骤据此写「已查看定时任务」而不是「成员状态」。
+ */
+export const TaskNamesContext = createContext<{ has: (name: string) => boolean; only: boolean } | null>(null)
+
+/** 这一步是不是在查看定时任务（member_status 点名定时任务，或不点名而本对话只有定时任务）。 */
+function useTaskStatusStep(step: { name: string; args: unknown }): boolean {
+  const tasks = useContext(TaskNamesContext)
+  if (step.name !== 'member_status' || !tasks) return false
+  const member = memberObject(step.name, step.args)
+  return member ? tasks.has(member.who) : tasks.only
+}
+
+/** tool_search 查的是哪些工具：写工具的显示名（不认识的写原名）。不在 TOOL_META 里的名片类工具另有文案键。 */
+const USAGE_NAME_KEY: Record<string, string> = { create_task: 'createTask', propose_agent: 'proposeAgent' }
+
+function usageObject(args: unknown, t?: (key: string) => string): { text: string; full: string } | null {
+  const raw = (args as { names?: unknown } | null)?.names
+  const names = (Array.isArray(raw) ? raw : [raw]).filter((n): n is string => typeof n === 'string' && n.trim() !== '')
+  if (!names.length) return null
+  const key = (n: string): string | undefined => TOOL_META[n]?.key ?? USAGE_NAME_KEY[n]
+  const text = names.map((n) => (t && key(n) ? t(`chat.tool.${key(n)}`) : n)).join('、')
+  return { text, full: text }
+}
+
+function flowObject(
+  name: string,
+  args: unknown,
+  t?: (key: string) => string
+): { text: string; full: string } | null {
   if (!TOOL_META[name]) return { text: name, full: name }
   if (name === 'browser') return browserObject(args)
+  if (name === 'tool_search') return usageObject(args, t)
   if (name === 'skill') {
     const skill = (args as { name?: unknown } | null)?.name
     return typeof skill === 'string' && skill.trim() ? { text: skill.trim(), full: skill.trim() } : null
+  }
+  // 成员工具：对象写成员名（派任务另带任务标题）；查看主对话没有对象。
+  const member = memberObject(name, args)
+  if (member) {
+    const text = member.task ? `${member.who} · ${member.task}` : member.who
+    return { text, full: text }
+  }
+  if (MEMBER_TOOLS.has(name)) return null
+  if (name === 'read_main') return null
+  // 交给主对话处理：对象写要主对话做的事。
+  if (name === 'report_to_main') {
+    const reason = (args as { reason?: unknown } | null)?.reason
+    return typeof reason === 'string' && reason.trim() ? { text: reason.trim(), full: reason.trim() } : null
   }
   if (args && typeof args === 'object') {
     const o = args as { command?: unknown; path?: unknown; pattern?: unknown; url?: unknown }
@@ -216,7 +295,8 @@ export type Activity =
   | { kind: 'subagent'; agent: string }
   | { kind: 'ask' }
   | { kind: 'plan' }
-  | { kind: 'mount' }
+  /** member：等的是为成员选文件夹（不是挂载本对话的工作区）。 */
+  | { kind: 'mount'; member?: string }
 
 /**
  * 从最后一条助手消息的块序列推断"此刻在干什么"：
@@ -226,7 +306,8 @@ export function deriveActivity(messages: ChatMessage[]): Activity {
   const last = messages[messages.length - 1]
   if (!last || last.role !== 'assistant') return { kind: 'thinking' }
   const blocks = last.blocks
-  if (blocks.some((b) => b.kind === 'mount' && !b.decided)) return { kind: 'mount' }
+  const mountReq = blocks.find((b) => b.kind === 'mount' && !b.decided)
+  if (mountReq?.kind === 'mount') return { kind: 'mount', ...(mountReq.member !== undefined ? { member: mountReq.member } : {}) }
   if (blocks.some((b) => b.kind === 'plan' && !b.decided)) return { kind: 'plan' }
   if (blocks.some((b) => b.kind === 'ask' && b.answers === undefined)) return { kind: 'ask' }
   for (let i = blocks.length - 1; i >= 0; i--) {
@@ -310,7 +391,11 @@ export function StatusIndicator({
     return (
       <div className="chat__status is-waiting" role="status" aria-live="polite">
         <FolderOpen size={14} />
-        <span>{t('chat.work.awaitingMount')}</span>
+        <span>
+          {activity.member !== undefined
+            ? t('chat.work.awaitingMemberFolder').split('{name}').join(activity.member)
+            : t('chat.work.awaitingMount')}
+        </span>
       </div>
     )
   }
@@ -511,7 +596,10 @@ export function BlockView({
   onPlan,
   onMountReq,
   onOpenProposal,
-  onOpenAutotask
+  onOpenAutotask,
+  bare,
+  extra,
+  hint
 }: {
   block: ChatBlock
   thinkingDone: boolean
@@ -524,6 +612,15 @@ export function BlockView({
   onOpenProposal?: (block: Extract<ChatBlock, { kind: 'agentcard' }>) => void
   /** created 态定时任务名片「打开任务会话」（缺省 → 不显跳转）。 */
   onOpenAutotask?: (taskId: string) => void
+  /**
+   * 待处理的提问 / 计划 / 挂载卡不画卡头：主对话末尾成员在等你处理时，卡片上方的胶囊已经写明谁在等什么
+   * （见 ChatFirstShell MemberAsks）。已处理的卡不受影响。
+   */
+  bare?: boolean
+  /** 待处理的提问 / 计划 / 挂载卡操作行里附加的一项（成员的「打开对话」），排在左侧按钮之后。 */
+  extra?: React.ReactNode
+  /** bare 时选文件夹卡问句下面的一行说明（「不限」是什么意思，由调用方按场景给）。 */
+  hint?: React.ReactNode
 }): React.JSX.Element | null {
   const { t } = useI18n()
 
@@ -557,15 +654,15 @@ export function BlockView({
   }
 
   if (block.kind === 'ask') {
-    return <AskCard block={block} onAsk={onAsk} />
+    return <AskCard block={block} onAsk={onAsk} bare={bare} extra={extra} />
   }
 
   if (block.kind === 'plan') {
-    return <PlanReviewCard block={block} onPlan={onPlan} />
+    return <PlanReviewCard block={block} onPlan={onPlan} bare={bare} extra={extra} />
   }
 
   if (block.kind === 'mount') {
-    return <MountRequestCard block={block} onMountReq={onMountReq} />
+    return <MountRequestCard block={block} onMountReq={onMountReq} bare={bare} extra={extra} hint={hint} />
   }
 
   // 步骤边界标记：只服务于重连时丢残缺尾部的判定，不渲染。
@@ -611,10 +708,17 @@ export function BlockView({
  */
 function MountRequestCard({
   block,
-  onMountReq
+  onMountReq,
+  bare,
+  extra,
+  hint
 }: {
   block: Extract<ChatBlock, { kind: 'mount' }>
   onMountReq?: (key: string, path: string | null) => void
+  /** 见 BlockView 同名参数。 */
+  bare?: boolean
+  extra?: React.ReactNode
+  hint?: React.ReactNode
 }): React.JSX.Element {
   const { t } = useI18n()
   const decided = block.decided
@@ -624,23 +728,89 @@ function MountRequestCard({
       if (r && onMountReq) onMountReq(block.key, r.path)
     })()
   }
+  // 为成员选择文件夹（create_member 的 pick_folder）：同一张卡，换成成员的文案，「不限」= 不指定。
+  const member = block.member
+  if (member !== undefined) {
+    const name = (s: string): string => s.split('{name}').join(member)
+    // 主对话末尾成员在等你选文件夹（对比稿 design/member-mount-card.html 方案 A）：排版同提问卡——加粗问句、
+    // 一行灰字说明「不限」，左边附加项（打开对话），右边「不限」与主按钮「选择文件夹…」。
+    if (bare && !decided)
+      return (
+        <div className="msg__mount">
+          <div className="msg__mount-q">{name(t('chat.mount.memberAsk'))}</div>
+          {hint && <div className="msg__mount-sub">{hint}</div>}
+          {onMountReq && (
+            <div className="msg__mount-actions">
+              {extra}
+              <div className="msg__mount-actions-end">
+                <button type="button" className="btn btn--sm" onClick={() => onMountReq(block.key, null)}>
+                  {t('chat.mount.memberSkip')}
+                </button>
+                <button type="button" className="btn btn--sm btn--primary" onClick={pick}>
+                  <FolderOpen size={14} />
+                  {t('chat.mount.memberPick')}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )
+    return (
+      <div className={`msg__mount${decided ? ' is-decided' : ''}${decided === 'mounted' ? ' is-ok' : ''}`}>
+        {!(bare && !decided) && (
+          <div className="msg__mount-head">
+            <FolderOpen size={14} />
+            <span className="msg__mount-title">{name(t('chat.mount.memberTitle'))}</span>
+            {decided && (
+              <span className={decided === 'mounted' ? 'msg__mount-badge msg__mount-badge--ok' : 'msg__mount-badge'}>
+                {decided === 'mounted' ? t('chat.mount.memberPicked') : t('chat.mount.memberSkipped')}
+              </span>
+            )}
+          </div>
+        )}
+        <div className="msg__mount-body">
+          {decided === 'mounted' ? (
+            <span>
+              {t('chat.mount.memberDone')} <code>{block.root}</code>
+            </span>
+          ) : (
+            <span>{t('chat.mount.memberHint')}</span>
+          )}
+        </div>
+        {!decided && onMountReq && (
+          <div className="msg__mount-actions">
+            <button type="button" className="btn btn--sm btn--primary" onClick={pick}>
+              <FolderOpen size={14} />
+              {t('chat.mount.memberPick')}
+            </button>
+            <button type="button" className="btn btn--sm" onClick={() => onMountReq(block.key, null)}>
+              {t('chat.mount.memberSkip')}
+            </button>
+            {extra}
+          </div>
+        )}
+      </div>
+    )
+  }
   return (
     <div
       className={`msg__mount${decided ? ' is-decided' : ''}${decided === 'mounted' ? ' is-ok' : ''}`}
     >
-      <div className="msg__mount-head">
-        <FolderOpen size={14} />
-        <span className="msg__mount-title">{t('chat.mount.cardTitle')}</span>
-        {decided && (
-          <span
-            className={
-              decided === 'mounted' ? 'msg__mount-badge msg__mount-badge--ok' : 'msg__mount-badge'
-            }
-          >
-            {decided === 'mounted' ? t('chat.mount.mounted') : t('chat.mount.skipped')}
-          </span>
-        )}
-      </div>
+      {!(bare && !decided) && (
+        <div className="msg__mount-head">
+          <FolderOpen size={14} />
+          <span className="msg__mount-title">{t('chat.mount.cardTitle')}</span>
+          {decided && (
+            <span
+              className={
+                decided === 'mounted' ? 'msg__mount-badge msg__mount-badge--ok' : 'msg__mount-badge'
+              }
+            >
+              {decided === 'mounted' ? t('chat.mount.mounted') : t('chat.mount.skipped')}
+            </span>
+          )}
+        </div>
+      )}
       <div className="msg__mount-body">
         {decided === 'mounted' ? (
           <span>
@@ -671,6 +841,7 @@ function MountRequestCard({
           >
             {t('chat.mount.skip')}
           </button>
+          {extra}
         </div>
       )}
     </div>
@@ -688,10 +859,15 @@ function MountRequestCard({
  */
 function PlanReviewCard({
   block,
-  onPlan
+  onPlan,
+  bare,
+  extra
 }: {
   block: Extract<ChatBlock, { kind: 'plan' }>
   onPlan?: (key: string, decision: 'approve' | 'keep' | 'ignore', feedback?: string) => void
+  /** 见 BlockView 同名参数。 */
+  bare?: boolean
+  extra?: React.ReactNode
 }): React.JSX.Element {
   const { t } = useI18n()
   const decided = block.decided
@@ -708,46 +884,48 @@ function PlanReviewCard({
     <div
       className={`msg__plan${decided ? ' is-decided' : ''}${decided === 'approve' ? ' is-ok' : ''}`}
     >
-      <div
-        className={decided ? 'msg__plan-head is-toggle' : 'msg__plan-head'}
-        role={decided ? 'button' : undefined}
-        tabIndex={decided ? 0 : undefined}
-        aria-expanded={decided ? open : undefined}
-        title={decided ? (open ? t('chat.plan.collapse') : t('chat.plan.expand')) : undefined}
-        onClick={decided ? () => setOpen((v) => !v) : undefined}
-        onKeyDown={
-          decided
-            ? (e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  setOpen((v) => !v)
+      {!(bare && !decided) && (
+        <div
+          className={decided ? 'msg__plan-head is-toggle' : 'msg__plan-head'}
+          role={decided ? 'button' : undefined}
+          tabIndex={decided ? 0 : undefined}
+          aria-expanded={decided ? open : undefined}
+          title={decided ? (open ? t('chat.plan.collapse') : t('chat.plan.expand')) : undefined}
+          onClick={decided ? () => setOpen((v) => !v) : undefined}
+          onKeyDown={
+            decided
+              ? (e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setOpen((v) => !v)
+                  }
                 }
+              : undefined
+          }
+        >
+          {decided && (
+            <ChevronRight size={14} className={open ? 'msg__plan-caret is-open' : 'msg__plan-caret'} />
+          )}
+          <ClipboardList size={14} className="msg__plan-icon" />
+          <span className="msg__plan-title">{t('chat.plan.cardTitle')}</span>
+          {decided && !open && summary && <span className="msg__plan-summary">{summary}</span>}
+          {decided && (
+            <span
+              className={
+                decided === 'approve' ? 'msg__plan-badge msg__plan-badge--approved' : 'msg__plan-badge'
               }
-            : undefined
-        }
-      >
-        {decided && (
-          <ChevronRight size={14} className={open ? 'msg__plan-caret is-open' : 'msg__plan-caret'} />
-        )}
-        <ClipboardList size={14} className="msg__plan-icon" />
-        <span className="msg__plan-title">{t('chat.plan.cardTitle')}</span>
-        {decided && !open && summary && <span className="msg__plan-summary">{summary}</span>}
-        {decided && (
-          <span
-            className={
-              decided === 'approve' ? 'msg__plan-badge msg__plan-badge--approved' : 'msg__plan-badge'
-            }
-          >
-            {decided === 'approve'
-              ? t('chat.plan.approved')
-              : decided === 'keep'
-                ? t('chat.plan.kept')
-                : decided === 'ignore'
-                  ? t('chat.plan.ignored')
-                  : t('chat.plan.cancelled')}
-          </span>
-        )}
-      </div>
+            >
+              {decided === 'approve'
+                ? t('chat.plan.approved')
+                : decided === 'keep'
+                  ? t('chat.plan.kept')
+                  : decided === 'ignore'
+                    ? t('chat.plan.ignored')
+                    : t('chat.plan.cancelled')}
+            </span>
+          )}
+        </div>
+      )}
       {showBody && (
         <div className="msg__plan-body">
           <Markdown text={block.plan} />
@@ -798,6 +976,7 @@ function PlanReviewCard({
           <button type="button" className="btn btn--sm" onClick={() => setRefining(true)}>
             {t('chat.plan.keep')}
           </button>
+          {extra}
           <div className="msg__plan-actions-end">
             <button type="button" className="btn btn--sm" onClick={() => onPlan(block.key, 'ignore')}>
               {t('chat.plan.ignore')}
@@ -854,10 +1033,15 @@ function draftToAnswer(d: AskDraft): string {
  */
 function AskCard({
   block,
-  onAsk
+  onAsk,
+  bare,
+  extra
 }: {
   block: Extract<ChatBlock, { kind: 'ask' }>
   onAsk: (key: string, answers: string[]) => void
+  /** 见 BlockView 同名参数。 */
+  bare?: boolean
+  extra?: React.ReactNode
 }): React.JSX.Element {
   const { t } = useI18n()
   const { questions } = block
@@ -1115,7 +1299,7 @@ function AskCard({
             {multiQ && givenAnswers.length > 0 && ` ${givenAnswers.length}/${questions.length}`}
           </span>
         </div>
-      ) : (
+      ) : bare ? null : (
         <div className="ask__head">
           <span className="ask__head-icon">
             <MessageCircleQuestion size={15} />
@@ -1172,14 +1356,17 @@ function AskCard({
           </div>
           {/* 标准向导底部导航：左「上一步」固定；右侧非末题为「下一步」、末题变「提交」。 */}
           <div className="ask__actions ask__actions--nav">
-            <button
-              type="button"
-              className="btn btn--sm"
-              onClick={() => goStep(step - 1)}
-              disabled={step === 0}
-            >
-              {t('chat.ask.prev')}
-            </button>
+            <span className="ask__actions-start">
+              <button
+                type="button"
+                className="btn btn--sm"
+                onClick={() => goStep(step - 1)}
+                disabled={step === 0}
+              >
+                {t('chat.ask.prev')}
+              </button>
+              {extra}
+            </span>
             {step < last ? (
               <button
                 type="button"
@@ -1211,6 +1398,7 @@ function AskCard({
             {renderBody(0)}
           </div>
           <div className="ask__actions">
+            {extra && <span className="ask__actions-start">{extra}</span>}
             <button
               type="button"
               className="btn btn--primary btn--sm"
@@ -1243,7 +1431,16 @@ const QUIET_SUMMARIES = new Set([
 ])
 
 /** 成功摘要只是复述对象的工具：技能的「已加载技能「名称」」与行上的「已加载技能 名称」重复，不写。 */
-const QUIET_TOOLS = new Set(['skill'])
+const QUIET_TOOLS = new Set([
+  'skill',
+  'tool_search',
+  'create_member',
+  'member_send',
+  'member_stop',
+  'member_status',
+  'read_main',
+  'report_to_main'
+])
 
 /** 子智能体被用户亲手停下的结局摘要（后台「已停止」/ 前台「已中止」）：不当作出错展示。 */
 const STOPPED_SUMMARIES = new Set(['已停止', '已中止'])
@@ -1269,17 +1466,17 @@ function failReason(step: ToolStep, t: (key: string) => string): string | null {
 
 /** 行上的悬停提示：完整对象（命令 / 路径），失败时另起一行附上原因。 */
 function stepTitle(step: ToolStep, t: (key: string) => string): string | undefined {
-  const full = flowObject(step.name, step.args)?.full
+  const full = flowObject(step.name, step.args, t)?.full
   const reason = failReason(step, t)
   if (!reason) return full
   return full ? `${full}\n${reason}` : reason
 }
 
 /** 节点图标：执行中转圈、失败打叉，其余按工具类型（未知工具为扳手）。 */
-function stepIcon(step: ToolStep, size: number): React.JSX.Element {
+function stepIcon(step: ToolStep, size: number, taskStatus = false): React.JSX.Element {
   if (step.status === 'running') return <Loader2 size={size} className="spin" />
   if (isFailed(step.status)) return <XCircle size={size} />
-  const Icon = toolMeta(step.name, step.args)?.icon ?? Wrench
+  const Icon = taskStatus ? CalendarClock : (toolMeta(step.name, step.args)?.icon ?? Wrench)
   return <Icon size={size} />
 }
 
@@ -1292,8 +1489,10 @@ function stepIcon(step: ToolStep, size: number): React.JSX.Element {
  */
 export function ToolText({ step }: { step: ToolStep }): React.JSX.Element {
   const { t } = useI18n()
-  const key = verbKey(step.name, step.args)
-  const obj = flowObject(step.name, step.args)
+  const faceOf = useContext(MemberFaceContext)
+  const key = useTaskStatusStep(step) ? 'taskStatus' : verbKey(step.name, step.args)
+  const obj = flowObject(step.name, step.args, t)
+  const member = memberObject(step.name, step.args)
   const reason = failReason(step, t)
   let verb: React.JSX.Element
   let tail: React.JSX.Element | null = null
@@ -1310,7 +1509,16 @@ export function ToolText({ step }: { step: ToolStep }): React.JSX.Element {
   return (
     <span className="tl__text tl__text--tool">
       {verb}
-      {obj && <code className="tl__obj">{obj.text}</code>}
+      {/* 成员名不是代码：正文字体，前面带成员的小头像，任务标题灰字跟在后面。 */}
+      {member ? (
+        <span className="tl__obj tl__obj--member">
+          {faceOf?.(member.who)}
+          <span className="tl__who">{member.who}</span>
+          {member.task && <span className="tl__task"> · {member.task}</span>}
+        </span>
+      ) : (
+        obj && <code className="tl__obj">{obj.text}</code>
+      )}
       {tail}
     </span>
   )
@@ -1325,6 +1533,8 @@ function TimelineTool({ step }: { step: ToolStep }): React.JSX.Element {
   const { t } = useI18n()
   const { skills } = useExtensions()
   const [open, setOpen] = useState(false)
+  // 查看定时任务：节点用日历钟（同任务入口），不用成员的人形图标。
+  const taskStatus = useTaskStatusStep(step)
   const state = step.status === 'running' ? ' is-run' : isFailed(step.status) ? ' is-err' : ''
   const command = step.name === 'run_command' ? flowObject(step.name, step.args)?.full : undefined
   let title = stepTitle(step, t)
@@ -1337,7 +1547,7 @@ function TimelineTool({ step }: { step: ToolStep }): React.JSX.Element {
   if (!command)
     return (
       <li className={`tl__item${state}`}>
-        <span className="tl__node">{stepIcon(step, 14)}</span>
+        <span className="tl__node">{stepIcon(step, 14, taskStatus)}</span>
         <div className="tl__main">
           <div className="tl__line" title={title}>
             <ToolText step={step} />
@@ -1512,6 +1722,12 @@ function TimelineTodo({ block }: { block: Extract<ChatBlock, { kind: 'todolist' 
 function TimelineMount({ block }: { block: Extract<ChatBlock, { kind: 'mount' }> }): React.JSX.Element {
   const { t } = useI18n()
   const mounted = block.decided === 'mounted'
+  const verb =
+    block.member !== undefined
+      ? t(mounted ? 'chat.flow.mount.memberPicked' : 'chat.flow.mount.memberSkipped')
+          .split('{name}')
+          .join(block.member)
+      : t(mounted ? 'chat.flow.mount.mounted' : 'chat.flow.mount.skipped')
   return (
     <li className="tl__item">
       <span className="tl__node">
@@ -1520,7 +1736,7 @@ function TimelineMount({ block }: { block: Extract<ChatBlock, { kind: 'mount' }>
       <div className="tl__main">
         <div className="tl__line" title={mounted ? block.root : undefined}>
           <span className="tl__text">
-            <span className="tl__verb">{t(mounted ? 'chat.flow.mount.mounted' : 'chat.flow.mount.skipped')}</span>
+            <span className="tl__verb">{verb}</span>
             {mounted && block.root && <code className="tl__obj">{block.root}</code>}
           </span>
         </div>
@@ -1540,7 +1756,7 @@ function TimelineInsert({ text }: { text: string }): React.JSX.Element {
     <li className="tl__item tl__item--insert">
       <span className="tl__node">
         <span className="tl__me" title={t('chat.insert.node')}>
-          <PersonaFace seed={USER_AVATAR_SEED} spec={profile.avatar} image={profile.avatarImage} />
+          <PersonaFace seed={USER_AVATAR_SEED} spec={profile.avatar} image={profile.avatarImage} compact />
         </span>
       </span>
       <div className="tl__main">
@@ -1781,7 +1997,7 @@ function thoughtOnly(blocks: ChatBlock[]): string | null {
 }
 
 /** 秒数 →「1 分 12 秒」/「1m 12s」：高位为 0 的单位省略，秒恒显示。 */
-function formatDuration(sec: number, t: (key: string) => string): string {
+export function formatDuration(sec: number, t: (key: string) => string): string {
   const h = Math.floor(sec / 3600)
   const m = Math.floor((sec % 3600) / 60)
   const s = sec % 60
@@ -2029,8 +2245,8 @@ function AgentCard({
       }
     >
       <span className="agentcard__avatar">
-        {/* 提案中的智能体尚无 id：以名字为 seed 确定性生成头像（用户接受后可在编辑器改）。 */}
-        <HumationFace seed={name} title={name} />
+        {/* 提案中的智能体尚无 id：以名字为 seed 确定性生成头像（用户接受后可在编辑器改）；新角色形状随机，与接受后的编辑器一致。 */}
+        <HumationFace seed={name} spec={{ shape: AUTO_SHAPE }} title={name} />
       </span>
       <span className="agentcard__body">
         <span className="agentcard__title">{t('chat.agentcard.title')}</span>

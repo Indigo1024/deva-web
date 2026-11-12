@@ -1,6 +1,6 @@
 /**
- * 清单随消息下发（对标 Claude Code 的 skill_listing / deferred_tools_delta 附件）：技能清单、记忆条目，
- * 以及复杂工具首次用到时的详细用法（toolGuidePart）。
+ * 清单随消息下发（对标 Claude Code 的 skill_listing / deferred_tools_delta 附件）：技能清单、记忆条目、
+ * 成员名单，以及按需加载工具的用法已告知到哪些（guidesAnnounced，见 tool-search.ts）。
  *
  * 提示缓存按前缀字节匹配，渲染顺序是 tools → system → messages：这类会变的清单若写在工具描述或系统提示词里，
  * 装一个技能、记一条记忆，下一轮整段历史都得重新写缓存。故工具描述与系统提示词只写固定说明，清单改为
@@ -24,6 +24,7 @@ import {
   listMemories,
   type MemoryEntry
 } from './memory'
+import { NO_FOLDER } from './members'
 
 /** 内容摘要：内容变了即视为更新，需重新告知。 */
 function digestOf(content: string): string {
@@ -81,24 +82,28 @@ function diffListing<T>(
 }
 
 /**
- * 请求模型前调用：build 据历史算出清单块（无差异给 null），附到历史末条——它是这次请求才首次发出的那条
- * user 消息（用户提问 / 工具结果），附上去不碰已缓存的前缀。已告知过则 build 给 null，故重连重发时调用多少次都一样。
+ * 请求模型前调用：build 据历史算出清单块（可给多块，按序附上；无差异给 null），附到历史末条——它是这次请求才
+ * 首次发出的那条 user 消息（用户提问 / 工具结果），附上去不碰已缓存的前缀。已告知过则 build 给 null，故重连重发时
+ * 调用多少次都一样。
  * 末条是带标记的字符串消息（压缩摘要 / 自愈引导 / 后台通知）时不附：它们靠字符串前缀识别，改成块数组就
  * 认不出了——留给下一条消息（多为下一步的工具结果）。
  */
-export function attachListing(history: Message[], build: (history: Message[]) => TextPart | null): void {
+export function attachListing(
+  history: Message[],
+  build: (history: Message[]) => TextPart | null | (TextPart | null)[]
+): void {
   const i = history.length - 1
   const last = history[i]
   if (!last || last.role !== 'user') return
   if (isCompactionSummary(last) || isAutoNudge(last) || isTaskNotification(last)) return
-  const part = build(history)
-  if (!part) return
+  const parts = [build(history)].flat().filter((p): p is TextPart => p !== null)
+  if (!parts.length) return
   let content: ContentPart[]
-  if (typeof last.content === 'string') content = [part, { type: 'text', text: last.content }]
+  if (typeof last.content === 'string') content = [...parts, { type: 'text', text: last.content }]
   // 工具结果消息：协议要求 tool_result 块在前，文字跟在后面（同后台任务通知）。
-  else if (last.content.some((p) => p.type === 'tool_result')) content = [...last.content, part]
+  else if (last.content.some((p) => p.type === 'tool_result')) content = [...last.content, ...parts]
   // 用户提问：放最前，提问正文仍是最后一个 text 块（展示层只取它作气泡正文）。
-  else content = [part, ...last.content]
+  else content = [...parts, ...last.content]
   // 换新对象而不就地改：fork 的历史与主对话共享消息对象，按不可变对待。
   history[i] = { ...last, content }
 }
@@ -194,32 +199,80 @@ export function memoryDeletedRecord(id: string): ListingRecord {
   return { kind: 'memory', listed: [], removed: [id] }
 }
 
-// ── 工具详细用法 ──────────────────────────────────────────────────────────────
+// ── 工具用法 ──────────────────────────────────────────────────────────────────
 
 /**
- * 复杂工具的详细用法，首次用到时随该步结果附上一次（同技能：平时只有描述，用时才加载正文）。
- * 工具描述只留决定「用不用、选哪个动作」所需的内容，其余放这里：工具表不变，提示缓存前缀不受影响。
- * 已告知状态同样从历史折叠：压缩 / 删轮抹掉后，下次再用到时自动补发；用法文案改了（摘要变）也会重发。
- * 只在末条消息带着该工具本步的结果时给出，否则返回 null。
+ * 按需加载工具（见 tool-search.ts）的用法哪些已在上下文里：tool_search 的结果、未查就调用被拦下时附上的用法、
+ * 加载技能时附上的用法都挂着记录。只看键不看摘要：用法文案改了不逼模型重查，查到的总是当前版本。
  */
-export function toolGuidePart(history: Message[], tool: string, guide: string): TextPart | null {
-  const last = history[history.length - 1]
-  if (!last || last.role !== 'user' || typeof last.content === 'string') return null
-  const ids = new Set<string>()
-  for (const p of last.content) if (p.type === 'tool_result') ids.add(p.toolUseId)
-  if (!ids.size) return null
-  // 本步结果对应的调用在紧挨着的上一条助手消息里
-  const prev = history[history.length - 2]
-  const used =
-    prev?.role === 'assistant' &&
-    typeof prev.content !== 'string' &&
-    prev.content.some((p) => p.type === 'tool_use' && p.name === tool && ids.has(p.id))
-  if (!used) return null
-  const digest = digestOf(guide)
-  if (announced(history, 'guide').get(tool) === digest) return null
-  return {
-    type: 'text',
-    text: `${guide}\n（以上是 ${tool} 工具的详细用法，由系统在你首次用到它时自动附带，不是用户发来的消息。）`,
-    listing: { kind: 'guide', listed: [{ key: tool, digest }] }
+export function guidesAnnounced(history: Message[]): Set<string> {
+  return new Set(announced(history, 'guide').keys())
+}
+
+/** 给出了这些工具用法的记录（挂在 tool_result 上）。 */
+export function guideRecord(entries: { key: string; text: string }[]): ListingRecord {
+  return { kind: 'guide', listed: entries.map((e) => ({ key: e.key, digest: digestOf(e.text) })) }
+}
+
+// ── 成员名单 ──────────────────────────────────────────────────────────────────
+
+/** 名单里的一项：名字、负责的文件夹（界面写法）、职责、来源。 */
+export interface MemberListingItem {
+  name: string
+  folder: string
+  duty: string
+  /** 被 @ 加入的角色：记下角色名，名单里注明。 */
+  fromRole?: string
+  /** 在本对话中运行的定时任务（不是成员，但同样可以 member_send / member_status）：人读的日程。duty 是指令开头。 */
+  schedule?: string
+}
+
+function memberLine(m: MemberListingItem): string {
+  if (m.schedule) return `- ${m.name}［定时任务：${m.schedule}］：${m.duty || '（未写指令）'}`
+  const where = m.folder === NO_FOLDER ? '（未指定文件夹）' : `（负责 ${m.folder}）`
+  const role = m.fromRole ? `［协助者：用户 @ 请来的角色「${m.fromRole}」］` : ''
+  return `- ${m.name}${where}${role}：${m.duty || '（未写职责）'}`
+}
+
+/** 名单一项的内容摘要原文。定时任务才拼上日程——成员照旧，已告知的成员不会因此被重发一遍。 */
+function memberContent(m: MemberListingItem): string {
+  return `${m.folder}|${m.duty}|${m.fromRole ?? ''}${m.schedule ? `|${m.schedule}` : ''}`
+}
+
+/** 名单里出现定时任务时附的说明：它们不是成员，能做什么、不能做什么。 */
+const TASK_LISTING_NOTE =
+  '标「定时任务」的不是成员，是在本对话中运行的定时任务：它按时自动运行，把结果以自己的身份发到本对话（较长的在你的上下文里只留标题）。' +
+  '用户追问它发来的内容时，用 member_send 转给它，由它在自己的对话里回答；需要它最近一次发来的全文（如转给别的成员）时用 member_status。' +
+  '不要给它派与它的任务无关的工作。'
+
+/**
+ * 本对话的项目成员名单（见 members.ts）与历史里已告知的差异；一致则返回 null。
+ * 名单只记名字、文件夹、职责——成员忙闲随时在变，不进名单（派任务时工具结果会说明）。
+ */
+export function memberListingPart(history: Message[], members: MemberListingItem[]): TextPart | null {
+  const d = diffListing(history, 'members', members, (m) => m.name, memberContent)
+  if (!d) return null
+  const lines: string[] = []
+  if (d.initial) {
+    lines.push(
+      '【成员名单】本对话现有以下成员。你为分工建的成员：与它们负责范围相关的工作（读代码、排查、验证、修改、跑构建）一律用 member_send 交给对应成员，不要自己动手；标「协助者」的是用户 @ 请来帮忙的，只把属于它专长或用户点名的事交给它，你自己的工作照常做：',
+      ...d.listed.map(memberLine)
+    )
+  } else {
+    lines.push('【成员名单更新】')
+    if (d.listed.length)
+      lines.push(
+        '以下成员新加入或信息有更新（分工成员负责范围相关的工作交给它们；协助者只接它专长或用户点名的事）：',
+        ...d.listed.map(memberLine)
+      )
+    if (d.removed.length) lines.push(`以下成员已移除，不要再派任务给他们：${d.removed.join('、')}`)
   }
+  if (d.listed.some((m) => m.schedule)) lines.push(TASK_LISTING_NOTE)
+  lines.push('（以上由系统自动附带，不是用户发来的消息；成员再有增减时会另行告知，以最近的告知为准。）')
+  return { type: 'text', text: lines.join('\n'), listing: d.record }
+}
+
+/** create_member / @ 加入成功：结果里已写明该成员，记为已告知（挂在 tool_result 或提示块上）。 */
+export function memberAddedRecord(m: MemberListingItem): ListingRecord {
+  return { kind: 'members', listed: [{ key: m.name, digest: digestOf(memberContent(m)) }] }
 }
