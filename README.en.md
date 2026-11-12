@@ -84,6 +84,7 @@ successful load, any later disconnect left the overlay permanently covering a pe
 | Window fullscreen / macOS traffic lights | No-ops |
 | Built-in browser (the `browser` tool) | **Not available**: it needs Electron's layered `WebContentsView` + CDP, and a server process has no window layer. The tool is omitted and the composer capsule never renders — no dead entry point |
 | Dropping folders / attaching by real path | The browser cannot see local paths, so everything goes through "upload the bytes" (chunked upload for large files) |
+| Outbound proxy for the server | Requests go out through Node's `fetch` and always **connect directly** — `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are ignored. To route the server through a proxy you must configure it separately (Node 24+ `NODE_USE_ENV_PROXY=1`); setting the variables alone does nothing |
 | electron-updater | Not applicable — upgrade by rebuilding |
 
 ### Site icon and PWA

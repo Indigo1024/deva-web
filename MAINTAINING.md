@@ -178,6 +178,18 @@ cat apps/desktop/out/web/build-info.json     # 提交号 == git rev-parse --shor
 env -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u all_proxy
 ```
 
+**反过来，服务进程本身不吃代理**：网页版出站请求由 Node 的 `fetch` 发出，一律直连，`HTTP_PROXY`/`HTTPS_PROXY`
+设了也没用（实测：不设 `NODE_USE_ENV_PROXY` 时出口 IP 是本机自己的，设成 `1` 才走环境变量里那个代理）。
+真要让服务端走代理，得在 systemd 单元里开 Node 的代理支持（Node 24+）：
+
+```ini
+Environment=NODE_USE_ENV_PROXY=1
+```
+
+`describeNetError` 在 Node 侧照样给得出人话（`ECONNREFUSED` → 「连接被拒绝：该地址和端口上没有服务在监听」、
+`ENOTFOUND` → 「域名解析失败」、`UND_ERR_CONNECT_TIMEOUT` → 「连接超时」），所以「模型连不上」这类报错
+先去界面看这句话，比翻日志快。
+
 ### preload 改了就必须重跑 gen-web-api
 
 `src/renderer/src/web/deva-api.gen.ts` 是从 `src/preload/index.ts` 机械生成的（175+ 个通道），
@@ -185,8 +197,10 @@ env -u HTTP_PROXY -u http_proxy -u HTTPS_PROXY -u https_proxy -u ALL_PROXY -u al
 
 ### 不要用界面里的「检查更新」升级
 
-它拉的是**上游桌面版**的发布，不是我们的改版；本地提交领先远端时它还会把线上切回旧构建。
-升级只走本文的 git 流程。
+它查的是**本改版仓库** `Indigo1024/deva-web` 的 `main` 分支最新提交，跟本地 HEAD 比。坑在**本地提交领先远端时**：
+它会判成「有新版本」，点下去会把线上切回**远端那个旧提交**的构建。所以提交完尽快推，推之前别点它
+（推完远端 == 本地，它才会报「已是最新」）。它自己的安装阶段是在 `.deva-update-build/` 里另起一套构建
+（依赖有变化才 `pnpm install`），跟本文这条 git 流程不是一回事，出问题不好查。升级就走本文的流程。
 
 ### 改渲染层要两种构建都过
 

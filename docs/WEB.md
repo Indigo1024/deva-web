@@ -569,7 +569,7 @@ systemctl restart deva-web
 | 上游功能 | 桌面行为 | Web 适配 |
 | --- | --- | --- |
 | 内置浏览器（`browser` 工具 + 胶囊） | `WebContentsView` 叠窗口 + CDP + 屏幕外窗口续跑 | **屏蔽**：构建期把 `./browser` 换成 `browser-unavailable.ts`，工具不出现、胶囊不渲染 |
-| 出站请求走 Chromium 网络栈 | `session.fromPartition().fetch` | 替身把同名接口落到 Node 全局 `fetch`，`resolveProxy` 恒 `DIRECT`（不打「换线路重试」分支） |
+| 出站请求走 Chromium 网络栈 | `session.fromPartition().fetch` | 替身把同名接口落到 Node 全局 `fetch`，`resolveProxy` 恒 `DIRECT`（不打「换线路重试」分支）→ **网页版出站一律直连，不读 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`**；`describeNetError` 在 Node 侧照样出人话（实测 `ECONNREFUSED`→「连接被拒绝：该地址和端口上没有服务在监听」、`ENOTFOUND`→「域名解析失败」、`UND_ERR_CONNECT_TIMEOUT`→「连接超时」） |
 
 **v0.1.14 起**
 
