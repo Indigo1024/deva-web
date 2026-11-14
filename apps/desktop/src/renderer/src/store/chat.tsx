@@ -26,6 +26,17 @@ import { useToast } from '../components/ToastProvider'
 import { useModels, findActive, hasUsableModel } from './models'
 import { useWorkspace } from './workspace'
 import { formatTokens } from '../../../shared/context'
+import { normalizeAgentDraft, normalizeAutotaskDraft, type AgentDraft, type AutotaskDraft } from '../../../shared/drafts'
+import type {
+  AskOption,
+  AskQuestion,
+  ChatStreamEvent as StreamEvent,
+  DisplayMessage,
+  HandoffInfo
+} from '../../../shared/chat-protocol'
+
+/** 交互卡与交接的协议类型：与主进程共用 shared/chat-protocol.ts。 */
+export type { AskOption, AskQuestion, HandoffInfo }
 
 /**
  * 会话状态（渲染层）。
@@ -55,21 +66,6 @@ export interface AttachChip {
   file?: string
 }
 
-/** ask_user 候选项（与 preload/主进程对齐）。 */
-export interface AskOption {
-  label: string
-  description?: string
-}
-
-/** ask_user 单个问题：题干 + 候选项 + 是否多选 + 是否必答（与 preload/主进程对齐）。 */
-export interface AskQuestion {
-  question: string
-  options: AskOption[]
-  multi: boolean
-  /** false=可跳过（允许空答）；缺省/true=必答。 */
-  required?: boolean
-}
-
 /** 折叠 Task 卡内的子工具项（子智能体内部的一次工具调用，收纳进卡内不占主流）。 */
 export interface SubagentChild {
   id: string
@@ -79,32 +75,8 @@ export interface SubagentChild {
   summary?: string
 }
 
-/** 角色名片草稿（与 preload/主进程 AgentDraft 对齐）：propose_agent 参数归一化后的形状。 */
-export interface AgentDraft {
-  name: string
-  desc: string
-  model: string
-  prompt: string
-}
-
-/**
- * 定时任务确认名片草稿（与 preload/主进程 AutotaskDraft 对齐）：create_task 参数归一化后的形状。
- * schedule 扁平化为恒有 at/cron/tz 字符串（不适用者为空串），便于编辑器双向绑定；tz 空 = 创建时按本地时区补。
- * 授权信封（人格/模型）不在草稿里——由用户在名片编辑并授权，此草稿只承载模型的建议部分。
- */
-export interface AutotaskDraft {
-  title: string
-  prompt: string
-  schedule: { kind: 'once' | 'recurring'; at: string; cron: string; tz: string }
-}
-
-/** 绑定的定时任务交来的结果（与 preload/主进程 HandoffInfo 对齐）。 */
-export interface HandoffInfo {
-  title: string
-  summary: string
-  content: string
-  needsAction: boolean
-}
+/** 名片草稿（角色 / 定时任务）：与主进程共用 shared/drafts.ts。 */
+export type { AgentDraft, AutotaskDraft } from '../../../shared/drafts'
 
 export type ChatBlock =
   | { kind: 'text'; text: string }
@@ -151,7 +123,7 @@ export type ChatBlock =
       task?: string
       /** 续聊卡：send_to_subagent 给已派出的子智能体发的消息（标题前加「继续」）。 */
       continued?: boolean
-      /** 后台运行（run_in_background）：派发它的那轮不等它，卡片独自运行到结束，运行中可单独停止。 */
+      /** 后台运行（默认；主进程在展示参数里标 background）：派发它的那轮不等它，卡片独自运行到结束，运行中可单独停止。 */
       background?: boolean
       status: ToolStatus
       /** 结论摘要（壳结果 summary，如「子智能体「X」已完成」）。 */
@@ -225,10 +197,13 @@ export type ChatBlock =
    */
   | {
       kind: 'notice'
-      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted' | 'step_limit' | 'repeated'
+      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted' | 'step_limit' | 'repeated' | 'degenerate'
     }
-  /** 较早历史已压缩为摘要（只来自主进程重建）：一行提示，摘要正文默认折叠、点开才显示。 */
-  | { kind: 'compaction'; summary: string }
+  /**
+   * 压缩提示（只来自主进程重建），摘要正文默认折叠、点开才显示。steps 有值 = 一轮进行中压缩，是执行步骤里的
+   * 一个节点（「此前 N 步已压缩为摘要」，不计入步数）；否则是两轮之间自成一条的分隔提示（first = 前面没有消息）。
+   */
+  | { kind: 'compaction'; summary: string; steps?: number; first?: boolean }
   /**
    * 回合进行中插入、已交给模型的消息：执行步骤里的一个节点，排在它送达时的两步之间（不计入步数）。
    * 送达前的消息不在这里，显示在输入框上方的胶囊里（见 pendingInserts）。
@@ -255,7 +230,7 @@ export interface ChatMessage {
   task?: MemberTask
   /**
    * 绑定的定时任务交来的结果：需要处理的画成居中一行「任务名 摘要」、点开看全文；只是告知的不显示这一行（quiet），
-   * 其后那条回复以任务的身份显示（见 ChatFirstShell reportOf）。
+   * 其后那条回复以任务的身份显示（见 redesign/Conversation.tsx reportOf）。
    */
   handoff?: HandoffInfo
   /** 助手消息：本轮耗时（毫秒，主进程计时、扣除等用户处置的时间），工作过程折叠条据此显示「已处理 X」。 */
@@ -318,129 +293,6 @@ export interface SessionLiveState {
   /** 正在进行的这一轮从何时开始（streaming 时才有）：成员卡片显示「正在做 · 38 秒」。 */
   startedAt?: number
 }
-
-/** 与 preload/主进程 DisplayMessage 结构一致（渲染层结构化复述）。 */
-type DisplayBlock =
-  | { kind: 'text'; text: string }
-  | { kind: 'tool'; id: string; name: string; args: unknown; status: 'ok' | 'error' | 'running'; summary?: string }
-  | {
-      kind: 'notice'
-      code: 'truncated' | 'empty' | 'refused' | 'restored' | 'aborted' | 'step_limit' | 'repeated'
-    }
-  | { kind: 'compaction'; summary: string }
-  | { kind: 'error'; message: string }
-  | { kind: 'agentcard'; id: string; draft: AgentDraft; status: 'pending' | 'accepted' | 'rejected' }
-  | {
-      kind: 'autotaskcard'
-      id: string
-      draft: AutotaskDraft
-      status: 'pending' | 'created' | 'dismissed'
-      taskId?: string
-    }
-  | { kind: 'ask'; id: string; questions: AskQuestion[]; answers?: string[] | null }
-  | {
-      kind: 'plan'
-      id: string
-      plan: string
-      decision: 'approve' | 'keep' | 'ignore' | 'cancelled'
-      feedback?: string
-    }
-  | { kind: 'todolist'; id: string; title: string; items: TodoItem[] }
-  | { kind: 'insert'; text: string }
-type DisplayMessage =
-  | {
-      role: 'user'
-      text: string
-      attachments: AttachChip[]
-      notify?: true
-      quiet?: true
-      task?: MemberTask
-      handoff?: HandoffInfo
-    }
-  | { role: 'assistant'; blocks: DisplayBlock[]; durationMs?: number }
-
-/** 与 preload/主进程 ChatStreamEvent 结构一致（按既定模式在渲染层复述线缆类型）。 */
-type StreamEvent =
-  | { type: 'text_delta'; text: string }
-  | { type: 'thinking_delta'; text: string }
-  | {
-      type: 'tool_call'
-      id: string
-      name: string
-      args: unknown
-      depth?: number
-      agent?: string
-      parent?: string
-      bg?: true
-    }
-  | {
-      type: 'tool_result'
-      id: string
-      name: string
-      summary: string
-      isError: boolean
-      depth?: number
-      agent?: string
-      parent?: string
-      bg?: true
-    }
-  | { type: 'ask_user'; key: string; questions: AskQuestion[] }
-  | { type: 'plan_review'; key: string; plan: string }
-  | { type: 'todos'; state: TodoState }
-  | { type: 'todo_done'; id: string; title: string; items: TodoItem[] }
-  | { type: 'mount_request'; key: string; tool: string; path: string; member?: string }
-  | { type: 'member_report' }
-  | { type: 'member_progress'; groups: MemberProgressGroup[] }
-  | { type: 'usage'; input: number; output: number; cacheRead?: number; cacheWrite?: number }
-  | { type: 'reconnecting'; attempt: number; max: number }
-  | {
-      type: 'auto_retry'
-      reason: 'truncated' | 'empty' | 'context' | 'output_limit' | 'effort'
-      attempt: number
-      max: number
-      /** context：报错里解析出的真实窗口；output_limit：用户所设上限被拒后降到的值（见主进程 chat.ts）。 */
-      limit?: number
-    }
-  | { type: 'stream_reset' }
-  | { type: 'error'; kind: string; message: string }
-  | {
-      type: 'compacted'
-      scope: 'auto' | 'manual'
-      status: 'compacted' | 'none' | 'failed'
-      message?: string
-    }
-  | { type: 'compacting'; active: boolean }
-  | {
-      type: 'interaction_resolved'
-      key: string
-      kind: 'ask' | 'plan' | 'mount'
-      answers?: string[] | null
-      decision?: 'approve' | 'keep' | 'ignore' | null
-      feedback?: string
-      path?: string | null
-    }
-  | {
-      type: 'card_resolved'
-      card: 'agent' | 'autotask'
-      toolUseId: string
-      status: 'accepted' | 'rejected' | 'created' | 'dismissed'
-      taskId?: string
-    }
-  | {
-      type: 'turn_start'
-      user: {
-        text: string
-        attachments: AttachChip[]
-        notify?: true
-        quiet?: true
-        task?: MemberTask
-        handoff?: HandoffInfo
-      }
-    }
-  | { type: 'insert'; text: string }
-  | { type: 'inserts'; pending: string[] }
-  | { type: 'inserts_returned'; text: string }
-  | { type: 'done'; stopReason: string; durationMs?: number }
 
 /**
  * 接上一轮正等用户处理的回合（attachSession）：历史里重建出的提问卡没有答复（key 是调用 id，答了也没人接）、
@@ -529,9 +381,10 @@ interface ChatContextValue {
    * 按「轮」删除当前会话的部分对话（同步删除模型上下文）。turnIndices 为 0 基轮下标集合
    * （轮 = 一条真实用户消息起，直到下一条用户消息前的全部气泡；压缩摘要等前言不计入轮）。
    * 删除后以主进程重建的历史就地替换该会话消息，保证展示与落盘一致、重启不变。
-   * 空集、或该会话正流式生成时为无操作（避免改写正被 Agent 循环原地改写的 messages）。
+   * 空集为无操作；该会话正在进行 / 压缩 / 回滚时不删（避免改写正被 Agent 循环原地改写的 messages）。
+   * 返回是否已删。
    */
-  deleteTurns: (turnIndices: number[]) => Promise<void>
+  deleteTurns: (turnIndices: number[]) => Promise<boolean>
   /**
    * 检查点回滚当前会话：回到第 turn 轮开始之前（mode 见 RewindMode，force = 勾选覆盖的冲突文件）。
    * 成功后以主进程重建的历史就地替换消息。该会话正流式生成时直接回 busy，不发请求。
@@ -632,7 +485,59 @@ interface ChatContextValue {
   onInsertsReturned: (cb: (sessionId: string, text: string) => void) => () => void
 }
 
-const ChatContext = createContext<ChatContextValue | null>(null)
+/*
+ * 按变化频率拆成三份下发，使用方按需订阅：
+ *  - actions：操作函数，引用恒定（内部转调最新一次渲染的实现），可放心传给 memo 组件、写进依赖数组；
+ *  - state：对话列表、各会话活动态、当前绑定、交互卡、清单等，流式输出期间不变；
+ *  - stream：当前对话的消息与流式状态，每帧都可能变。只有对话流本身需要订阅它。
+ */
+type ChatActionKey = {
+  [K in keyof ChatContextValue]: ChatContextValue[K] extends (...args: never[]) => unknown ? K : never
+}[keyof ChatContextValue]
+export type ChatActions = Pick<ChatContextValue, ChatActionKey>
+export type ChatState = Omit<ChatContextValue, ChatActionKey | 'messages' | 'streamStatus'>
+export type ChatStream = Pick<ChatContextValue, 'messages' | 'streaming' | 'streamStatus'>
+
+/** 全部操作函数名。写成 Record 是为了与 ChatContextValue 同步：漏一个、多一个都编译不过。 */
+const ACTION_KEYS: Record<ChatActionKey, true> = {
+  send: true,
+  stop: true,
+  newSession: true,
+  selectSession: true,
+  deleteSession: true,
+  renameSession: true,
+  setArchived: true,
+  deleteSessions: true,
+  deleteTurns: true,
+  rewindApply: true,
+  rewindUndo: true,
+  mountFocus: true,
+  setSessionModel: true,
+  setSessionEffort: true,
+  respondAsk: true,
+  respondPlan: true,
+  respondMount: true,
+  resolveProposal: true,
+  resolveAutotask: true,
+  cancelTodoList: true,
+  stopSubagent: true,
+  removeMember: true,
+  insert: true,
+  withdrawInserts: true,
+  onInsertsReturned: true
+}
+
+/** 引用恒定的操作函数：每次调用转给 ref 里最新一次渲染的实现。 */
+function bindActions(ref: { readonly current: ChatContextValue }): ChatActions {
+  const out: Partial<Record<ChatActionKey, unknown>> = {}
+  for (const k of Object.keys(ACTION_KEYS) as ChatActionKey[])
+    out[k] = (...args: unknown[]) => (ref.current[k] as (...a: unknown[]) => unknown)(...args)
+  return out as ChatActions
+}
+
+const ChatActionsContext = createContext<ChatActions | null>(null)
+const ChatStateContext = createContext<ChatState | null>(null)
+const ChatStreamContext = createContext<ChatStream | null>(null)
 
 /** 各会话「插入消息被退回」的订阅者（见 onInsertsReturned）。 */
 const insertReturnListeners = new Set<(sessionId: string, text: string) => void>()
@@ -652,7 +557,15 @@ const NO_PROGRESS: MemberProgressGroup[] = []
 export interface RecoveryStatus {
   attempt: number
   max: number
-  reason?: 'reconnect' | 'truncated' | 'empty' | 'context' | 'output_limit' | 'effort'
+  reason?:
+    | 'reconnect'
+    | 'truncated'
+    | 'empty'
+    | 'context'
+    | 'output_limit'
+    | 'effort'
+    | 'repetition'
+    | 'output_fit'
 }
 
 const IDLE_STATUS: StreamStatus = { elapsedSec: 0, reconnecting: null, compacting: false }
@@ -681,7 +594,13 @@ function displayToMessages(dms: DisplayMessage[]): ChatMessage[] {
     const blocks: ChatBlock[] = dm.blocks.map((b) => {
       if (b.kind === 'text') return { kind: 'text', text: b.text }
       if (b.kind === 'notice') return { kind: 'notice', code: b.code }
-      if (b.kind === 'compaction') return { kind: 'compaction', summary: b.summary }
+      if (b.kind === 'compaction')
+        return {
+          kind: 'compaction',
+          summary: b.summary,
+          ...(b.steps !== undefined ? { steps: b.steps } : {}),
+          ...(b.first ? { first: true } : {})
+        }
       // 历史回填：请求失败红框（原样复原错误文案）。
       if (b.kind === 'error') return { kind: 'error', message: b.message }
       // 历史回填：角色名片按持久化终态复原（pending/accepted/rejected）。
@@ -750,7 +669,8 @@ function isSubagentCall(name: string): boolean {
 
 /**
  * 调用参数 → 子智能体 Task 卡（实时与历史回填共用）。续聊卡的任务正文取 message 并标 continued；
- * 它的 agent / description 由主进程从子智能体记录补进参数（见 chat.ts 的 withSubagentMeta）。
+ * 它的 agent / description 由主进程从子智能体记录补进参数（见 chat-display.ts 的 withSubagentMeta）。
+ * 是否后台运行同样由主进程补进参数（background，见 chat-display.ts 的 subagentDisplayArgs）：模型的原参数看不出来。
  */
 function subagentBlock(
   id: string,
@@ -764,7 +684,7 @@ function subagentBlock(
     prompt?: unknown
     message?: unknown
     description?: unknown
-    run_in_background?: unknown
+    background?: unknown
   }
   const continued = name === 'send_to_subagent'
   const task = continued ? a.message : a.prompt
@@ -775,7 +695,7 @@ function subagentBlock(
     desc: typeof a.description === 'string' ? a.description.trim() || undefined : undefined,
     task: typeof task === 'string' ? task : undefined,
     ...(continued ? { continued: true } : {}),
-    ...(a.run_in_background === true ? { background: true } : {}),
+    ...(a.background === true ? { background: true } : {}),
     status,
     summary,
     children: []
@@ -793,39 +713,6 @@ function reduceBackground(
   const cardId = ev.depth && ev.depth > 0 ? ev.parent : ev.id
   if (!blocks.some((b) => b.kind === 'subagent' && b.id === cardId)) return blocks
   return reduceBlocks(blocks, ev)
-}
-
-/** 归一化 propose_agent 原始参数为角色草稿（实时路径；与主进程 normalizeAgentDraft 对齐）。 */
-function normalizeAgentDraft(input: unknown): AgentDraft {
-  const a = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
-  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
-  return {
-    name: str(a.name).trim(),
-    desc: str(a.description).trim(),
-    model: '',
-    prompt: str(a.prompt)
-  }
-}
-
-/** 归一化 create_task 原始参数为定时任务草稿（实时路径；与主进程 normalizeAutotaskDraft 对齐）。 */
-function normalizeAutotaskDraft(input: unknown): AutotaskDraft {
-  const a = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
-  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
-  const sched = (a.schedule && typeof a.schedule === 'object' ? a.schedule : {}) as Record<
-    string,
-    unknown
-  >
-  const schedKind = sched.kind === 'once' ? 'once' : 'recurring'
-  return {
-    title: str(a.title).trim(),
-    prompt: str(a.prompt),
-    schedule: {
-      kind: schedKind,
-      at: str(sched.at).trim(),
-      cron: str(sched.cron).trim(),
-      tz: str(sched.tz).trim()
-    }
-  }
 }
 
 /** 把一个流事件并入助手消息的块序列（纯函数，返回新数组）。 */
@@ -994,6 +881,7 @@ function hasVisibleAnswer(blocks: ChatBlock[]): boolean {
  * - aborted（用户主动停止）：标一条「已中止」——中止前的半截内容会随历史保留，得看得出是被打断的；
  * - step_limit（定时任务达到步数上限）：标一条「已达到步数上限」——任务可能没做完；
  * - repeated（同一工具同参数同结果连续出现到上限，被停下）：标一条说明；
+ * - degenerate（回复陷入逐字复读，重试后仍如此，被停下）：标一条说明；
  * - error（已另有红色错误块）不重复提示。
  * 与主进程 recordTurnNotice / runScheduledTurn 同一套规则，故重开对话后所见一致。
  * 无需补提示时返回原数组引用（updateLastAssistant 据引用相等短路，不触发无谓重渲染）。
@@ -1002,6 +890,7 @@ function appendTerminalNotice(blocks: ChatBlock[], stopReason: string): ChatBloc
   if (stopReason === 'aborted') return [...blocks, { kind: 'notice', code: 'aborted' }]
   if (stopReason === 'step_limit') return [...blocks, { kind: 'notice', code: 'step_limit' }]
   if (stopReason === 'repeated') return [...blocks, { kind: 'notice', code: 'repeated' }]
+  if (stopReason === 'degenerate') return [...blocks, { kind: 'notice', code: 'degenerate' }]
   if (stopReason === 'max_tokens') return [...blocks, { kind: 'notice', code: 'truncated' }]
   if (stopReason === 'refusal')
     return hasVisibleAnswer(blocks) ? blocks : [...blocks, { kind: 'notice', code: 'refused' }]
@@ -1127,6 +1016,23 @@ function hasAttention(messages: ChatMessage[]): boolean {
       (b.kind === 'mount' && !b.decided) ||
       ((b.kind === 'agentcard' || b.kind === 'autotaskcard') && b.status === 'pending')
   )
+}
+
+/** 两份会话活动态摘要内容是否相同（键集合与每条的各字段）。 */
+function sameSessionStates(a: Record<string, SessionLiveState>, b: Record<string, SessionLiveState>): boolean {
+  const ka = Object.keys(a)
+  if (ka.length !== Object.keys(b).length) return false
+  return ka.every((k) => {
+    const x = a[k]
+    const y = b[k]
+    return (
+      !!y &&
+      x.streaming === y.streaming &&
+      x.attention === y.attention &&
+      x.unread === y.unread &&
+      x.startedAt === y.startedAt
+    )
+  })
 }
 
 export function ChatProvider({ children }: { children: ReactNode }): React.JSX.Element {
@@ -1437,7 +1343,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
   useEffect(() => {
     // 本回合内压缩成功过的会话（done 时消费）。
     const compactedSids = new Set<string>()
-    // 本回合 /compact 无需压缩或压缩失败的会话（done 时消费：结果已走 toast，撤掉为它预留的空助手位）。
+    // 本回合 /compact 已有结果的会话（成功 / 无需压缩 / 失败；done 时消费：结果已走 toast，撤掉为它预留的空助手位）。
     const compactDropSids = new Set<string>()
     // 从主进程重载某会话并整份替换其 runtime 消息（后台回合完成 / 本轮压缩过后的权威回填）。
     const reloadIntoRuntime = (sid: string): void => {
@@ -1461,9 +1367,42 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       })()
     }
 
+    // 正文 / 思考增量按帧合并：每个 token 一条事件，逐条 setState 会让整棵组件树每个 token 重渲染一次。
+    // 同一会话的增量先排队，下一帧一次并入；窗口在后台时 rAF 不跑，另有 250ms 计时兜底（后台计时器
+    // 会被降频，但总会跑）。该会话的其它事件到达时先把排着的并入，保证事件先后顺序不变。
+    const pendingDeltas = new Map<string, StreamEvent[]>()
+    let deltaFrame = 0
+    let deltaTimer: ReturnType<typeof setTimeout> | null = null
+    const flushDeltas = (sid: string): void => {
+      const evs = pendingDeltas.get(sid)
+      if (!evs) return
+      pendingDeltas.delete(sid)
+      patchRuntime(sid, (r) => {
+        const messages = updateLastAssistant(r.messages, (blocks) => evs.reduce(reduceBlocks, blocks))
+        if (messages === r.messages && r.reconnecting === null) return r
+        return { ...r, messages, reconnecting: null }
+      })
+    }
+    const flushAllDeltas = (): void => {
+      if (deltaFrame) cancelAnimationFrame(deltaFrame)
+      if (deltaTimer) clearTimeout(deltaTimer)
+      deltaFrame = 0
+      deltaTimer = null
+      for (const sid of [...pendingDeltas.keys()]) flushDeltas(sid)
+    }
+    const queueDelta = (sid: string, ev: StreamEvent): void => {
+      const q = pendingDeltas.get(sid)
+      if (q) q.push(ev)
+      else pendingDeltas.set(sid, [ev])
+      if (!deltaFrame) deltaFrame = requestAnimationFrame(flushAllDeltas)
+      if (!deltaTimer) deltaTimer = setTimeout(flushAllDeltas, 250)
+    }
+
     const unsub = window.deva.chat.onEvent((payload) => {
       const sid = payload.sessionId
       const ev = payload.event as StreamEvent
+      const isDelta = ev.type === 'text_delta' || ev.type === 'thinking_delta'
+      if (!isDelta) flushDeltas(sid)
 
       // 本渲染层是否正为该会话流式一轮 = 建过「用户气泡 + 空助手位」脚手架：本层 send/compact 发起的，
       // 或别处发起、经 turn_start / attachSession 接上的。只有这样的会话才能把流事件正确拼进气泡；
@@ -1559,9 +1498,16 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         return
       }
 
-      // 本回合压缩成功（自动或 /compact）：主进程历史已改写为「摘要 + 近期轮」，本层气泡却仍是全量，
-      // 两边的轮下标因此错开被压掉的轮数，回滚 / 删轮会落到错的轮上。先记下，done 时以主进程为准重载。
-      if (ev.type === 'compacted' && ev.status === 'compacted') compactedSids.add(sid)
+      // 本回合压缩成功（自动或 /compact）：主进程在对话记录里插了一条摘要（消息一条没删），轮下标不变，但压缩
+      // 提示要画出来，图片附件按消息下标定位的 ref 也在插入点之后整体后移一位。先记下，done 时以主进程为准重载。
+      // 手动 /compact 另弹 toast：边界在保留部分之前，常在可视区以上，看不到提示；并撤掉预留的空助手位。
+      if (ev.type === 'compacted' && ev.status === 'compacted') {
+        compactedSids.add(sid)
+        if (ev.scope === 'manual' && localStreaming) {
+          compactDropSids.add(sid)
+          toast.show({ message: tRef.current('chat.notice.compactDone') })
+        }
+      }
 
       // 无可压（只有手动会发 none）/ 压缩失败（自动或手动）：弹 toast 知会，不进对话流——这两条
       // 主进程都不落盘，做成气泡重启即消失，前后不一致；且历史都没动，不值得占一轮对话位。
@@ -1592,7 +1538,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
           return next
         })
         // 不在查看的会话完成了一轮（本层发起后切走的 / 定时任务等后台回合）→ 记未读。
-        // compactDrop（/compact 无可压或失败）没有新内容，不算。
+        // compactDrop（/compact）没有新内容，不算。
         if (sessionIdRef.current !== sid && !compactDrop)
           setUnread((prev) => (prev.has(sid) ? prev : new Set(prev).add(sid)))
         if (localStreaming) {
@@ -1603,7 +1549,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
             turnId: null,
             reconnecting: null,
             compacting: false,
-            // /compact 无需压缩 / 失败：撤掉预留的空助手位（结果已 toast，不补空回合提示）。否则先收敛仍未决的
+            // /compact：撤掉预留的空助手位（结果已 toast，不补空回合提示）。否则先收敛仍未决的
             // 交互卡（用户中断时最常见），再据终止原因补「中断说明」：截断/空回合给出可见提示，正常回合原样短路。
             messages: compactDrop
               ? dropEmptyAssistantTail(r.messages)
@@ -1614,7 +1560,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
                   ev.durationMs
                 )
           }))
-          // 与重开同形：早期气泡当场收成一个摘要气泡。主进程在发 done 后同步补记终态提示并落盘，
+          // 压缩过：以主进程为准重载（画出压缩提示、刷新图片 ref）。主进程在发 done 后同步补记终态提示并落盘，
           // 早于本层 loadSession 请求到达，故重载拿到的已含本轮 notices。
           // 别处发起、本层中途接上的一轮：接入前已流出的部分不在气泡里，同样以主进程为准重载。
           if (compacted || external) reloadIntoRuntime(sid)
@@ -1674,14 +1620,21 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         patchCardBlocks(sid, (blocks) => resolveCard(blocks, ev))
         return
       }
-      // 内容事件：并入消息；若正处于重连横幅则收起（任何真实内容到达即视为"已恢复"）。
+      // 内容事件：并入消息；若正处于重连横幅则收起（任何真实内容到达即视为"已恢复"）。增量按帧合并（见上）。
+      if (isDelta) {
+        queueDelta(sid, ev)
+        return
+      }
       patchRuntime(sid, (r) => {
         const messages = updateLastAssistant(r.messages, (blocks) => reduceBlocks(blocks, ev))
         if (messages === r.messages && r.reconnecting === null) return r
         return { ...r, messages, reconnecting: null }
       })
     })
-    return unsub
+    return () => {
+      unsub()
+      flushAllDeltas()
+    }
   }, [
     refreshSessions,
     patchRuntime,
@@ -1736,6 +1689,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
 
   // 各会话活动态摘要（左侧列表角标用）；仅 runtimes / 未读集 / 后台进行中集变化时重算。
   // 后台回合没缓存 runtime（进行中靠 bgStreaming，完成后 runtime 也会被丢弃），这类会话单独补一条。
+  const sessionStatesRef = useRef<Record<string, SessionLiveState> | null>(null)
   const sessionStates = useMemo<Record<string, SessionLiveState>>(() => {
     const out: Record<string, SessionLiveState> = {}
     for (const [id, r] of runtimes) {
@@ -1759,6 +1713,10 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       for (const k of parent ? [id, parent] : [id])
         out[k] = out[k] ? { ...out[k], attention: true } : { streaming: false, attention: true, unread: unread.has(k) }
     }
+    // runtimes 随流式输出每帧都变，摘要却很少变：内容相同就沿用上一份，免得订阅它的列表每帧重渲染。
+    const prev = sessionStatesRef.current
+    if (prev && sameSessionStates(prev, out)) return prev
+    sessionStatesRef.current = out
     return out
   }, [runtimes, unread, bgStreaming, pendingCards, allSessions])
 
@@ -1873,13 +1831,14 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         return false
       }
       const sendFailed = (msg: string): false => {
-        toast.show({ variant: 'error', title: t('chat.error'), message: msg, duration: 8000 })
+        // 主进程 handler 抛的错经 IPC 传回时带着「Error invoking remote method 'chat:xxx': Error: 」前缀，去掉只留原因。
+        const reason = msg.replace(/^Error invoking remote method '[^']*': (?:\w*Error: )?/, '')
+        toast.show({ variant: 'error', title: t('chat.error'), message: reason, duration: 8000 })
         return false
       }
 
       // 手动 /compact：不加用户气泡（该指令不该留在历史里），只挂一个助手提示位，
-      // 直接请主进程压缩历史；压缩成功经 compacted 事件回到该助手气泡，
-      // none / failed 则改弹 toast 并撤掉这个助手位。
+      // 直接请主进程压缩历史；结果（成功 / 无需压缩 / 失败）经 compacted 事件弹 toast，并撤掉这个助手位。
       if (body.toLowerCase() === '/compact' && atts.length === 0) {
         if (!model) return noModel()
         patchRuntime(sid, (r) => ({
@@ -2185,19 +2144,22 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     }
 
     // 按「轮」删除当前会话的部分对话（同步删上下文）。主进程重写 messages 并重建展示气泡，此处就地替换。
-    // 流式中不删（该会话正被 Agent 循环原地改写 messages）；删的必是当前会话（选择态只在当前对话内）。
-    const deleteTurns = async (turnIndices: number[]): Promise<void> => {
-      if (turnIndices.length === 0) return
+    // 流式中不删（该会话正被 Agent 循环原地改写 messages）；主进程另有同样的检查（挡住主进程自己起的轮），
+    // 被拒时回 null。删的必是当前会话（选择态只在当前对话内）。返回是否已删。
+    const deleteTurns = async (turnIndices: number[]): Promise<boolean> => {
+      if (turnIndices.length === 0) return false
       const id = sessionIdRef.current
-      if (runtimesRef.current.get(id)?.turnId) return
+      if (runtimesRef.current.get(id)?.streaming) return false
       const path = projectPathRef.current
       const dms = await window.deva.chat.deleteTurns(id, path, turnIndices)
-      if (sessionIdRef.current !== id) return
-      patchRuntime(id, (r) => ({ ...r, messages: displayToMessages(dms as DisplayMessage[]) }))
+      if (!dms) return false
+      if (sessionIdRef.current !== id) return true
+      patchRuntime(id, (r) => ({ ...r, messages: displayToMessages(dms) }))
       // updatedAt 变了 → 刷新左侧列表使排序即时更新（标题不重算，保持稳定）。
       const list = await window.deva.chat.listSessions(path)
-      if (projectPathRef.current !== path) return
+      if (projectPathRef.current !== path) return true
       setSessions(list)
+      return true
     }
 
     // 检查点回滚 / 撤销：与 deleteTurns 同形——主进程改写历史并重建展示气泡，此处就地替换并刷新列表排序。
@@ -2417,11 +2379,69 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     dropRuntime
   ])
 
-  return <ChatContext.Provider value={value}>{children}</ChatContext.Provider>
+  // 拆开下发（见 ChatActions）。ref 在渲染时更新：子组件本次渲染里拿到的操作函数，转调的就是本次渲染的实现。
+  const latest = useRef(value)
+  latest.current = value
+  const actions = useMemo(() => bindActions(latest), [])
+  const state = useMemo<ChatState>(
+    () => ({
+      sessions: value.sessions,
+      currentSessionId: value.currentSessionId,
+      streaming: value.streaming,
+      sessionStates: value.sessionStates,
+      currentBinding: value.currentBinding,
+      draftSession: value.draftSession,
+      pendingCards: value.pendingCards,
+      todos: value.todos,
+      pendingInserts: value.pendingInserts,
+      memberProgress: value.memberProgress
+    }),
+    [
+      value.sessions,
+      value.currentSessionId,
+      value.streaming,
+      value.sessionStates,
+      value.currentBinding,
+      value.draftSession,
+      value.pendingCards,
+      value.todos,
+      value.pendingInserts,
+      value.memberProgress
+    ]
+  )
+  const stream = useMemo<ChatStream>(
+    () => ({ messages: value.messages, streaming: value.streaming, streamStatus: value.streamStatus }),
+    [value.messages, value.streaming, value.streamStatus]
+  )
+
+  return (
+    <ChatActionsContext.Provider value={actions}>
+      <ChatStateContext.Provider value={state}>
+        <ChatStreamContext.Provider value={stream}>
+          {children}
+        </ChatStreamContext.Provider>
+      </ChatStateContext.Provider>
+    </ChatActionsContext.Provider>
+  )
 }
 
-export function useChat(): ChatContextValue {
-  const ctx = useContext(ChatContext)
-  if (!ctx) throw new Error('useChat 必须在 ChatProvider 内使用')
+/** 操作函数（引用恒定）。 */
+export function useChatActions(): ChatActions {
+  const ctx = useContext(ChatActionsContext)
+  if (!ctx) throw new Error('useChatActions 必须在 ChatProvider 内使用')
+  return ctx
+}
+
+/** 流式输出期间不变的状态（对话列表、活动态、当前绑定、交互卡、清单等）。 */
+export function useChatState(): ChatState {
+  const ctx = useContext(ChatStateContext)
+  if (!ctx) throw new Error('useChatState 必须在 ChatProvider 内使用')
+  return ctx
+}
+
+/** 当前对话的消息与流式状态（每帧都可能变）。 */
+export function useChatStream(): ChatStream {
+  const ctx = useContext(ChatStreamContext)
+  if (!ctx) throw new Error('useChatStream 必须在 ChatProvider 内使用')
   return ctx
 }

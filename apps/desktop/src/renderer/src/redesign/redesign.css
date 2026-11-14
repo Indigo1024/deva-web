@@ -999,6 +999,8 @@ body.cf-resizing-y * {
   min-width: 0;
   min-height: 0;
   background: var(--bg);
+  /* 输入框上方胶囊排占的高度：胶囊 30px + 与输入盒的间距 8px（见 .cf-dock）。 */
+  --cf-dock-room: 38px;
 }
 .cf-conv__head {
   display: flex;
@@ -1595,6 +1597,30 @@ body.cf-resizing-y * {
   flex: 1;
   min-height: 0;
 }
+/*
+ * 输入框上方原有的那段间距（12px）做成渐隐：输入区不留上内边距（见 .cf-composer），消息区往下延伸进这段间距，
+ * 底边铺同高的渐隐——总间距不变，文字到输入框上沿已完全淡出，不在一条线上被硬切；完全看清的范围与原来相同。
+ * 消息区底部同时补上这段高度，滚到底时最后一条位置不变、不落进渐隐里。
+ * 有胶囊排时（胶囊浮在消息区底部，见 .cf-dock）再加出胶囊排的高度，滚到底时最后一条落在胶囊上方。贴底跟随不受影响——
+ * 加了内边距后 .cf-msgs 内容区变矮，Conversation 里的 ResizeObserver 会贴回底部。
+ * 只在有输入区时生效（选择删除时换成底栏）。渐隐右侧让出滚动条；用叠层而不用 mask：mask 会连带裁掉消息里浮出滚动区的弹层。
+ */
+.cf-conv:has(> .cf-composer) .cf-convmid::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 8px;
+  bottom: 0;
+  height: var(--space-3);
+  background: linear-gradient(to bottom, transparent, var(--bg));
+  pointer-events: none;
+}
+.cf-conv:has(> .cf-composer) .cf-msgs {
+  padding-bottom: calc(var(--space-5) + var(--space-3));
+}
+.cf-conv:has(> .cf-composer .cf-dock:not(:empty)) .cf-msgs {
+  padding-bottom: calc(var(--space-5) + var(--space-3) + var(--cf-dock-room));
+}
 .cf-msgs {
   flex: 1;
   min-height: 0;
@@ -1749,14 +1775,15 @@ body.cf-resizing-y * {
   min-width: 0;
   grid-column: 2;
   grid-row: 1;
-  /* 消息体默认不参与文字选择：手机长按气泡不再拉起浏览器原生的「选择文字」菜单（选择手柄 +
-     拷贝/搜索弹层），桌面右键也不再弹原生菜单 —— 复制、回滚到此处、删除此轮都做成气泡下面的
-     操作行按钮（见 .cf-msg__acts 与 ChatFirstShell 的 MsgActions）。
-     需要精确复制片段时在代码块里拖选：代码块自带复制按钮，且单独放开了选择（见下方 .md-code 规则）。 */
-  user-select: none;
-  -webkit-touch-callout: none;
+  /* 正文可选中：浏览器的原生选字 / 复制 / 右键菜单全部保留。
+     复制、引用、回滚到此处、删除此轮另有一排常驻按钮（见 .cf-msg__acts），
+     两者并存——按钮解决「一次点击就能用」，原生选择解决「就想复制其中一句」。
+     早先这里写的是 user-select: none + -webkit-touch-callout: none，把原生选字和
+     手机长按菜单一起关掉了，实测用户在手机上长按什么都不会发生，也没法复制片段。 */
+  user-select: text;
+  -webkit-touch-callout: default;
 }
-/* 例外：代码块与命令行框内仍可选中（用户常要复制其中几行），它们各自也有复制按钮。 */
+/* 代码块自带复制按钮，选择行为与正文一致（此处保留规则以说明意图，值继承自上面）。 */
 .cf-msg__body pre,
 .cf-msg__body pre *,
 .cf-msg__body .md-code,
@@ -1774,6 +1801,9 @@ body.cf-resizing-y * {
       三个按钮挤成两行（手机上尤其明显）。所以它在 JSX 里排在同一条消息的 body **外面**。
    2. `flex-wrap: nowrap`：按钮文字很短（复制 / 回到此处 / 删除此轮），320px 屏也放得下，
       宁可靠左靠右挤一挤，也不要折行。 */
+.cf-msg__acts::-webkit-scrollbar {
+  display: none;
+}
 .cf-msg__acts {
   grid-column: 1 / -1;
   /* 固定第 2 行：第 1 行是头像 + 气泡（见 .cf-msg > .cf-ava / .cf-msg > .cf-msg__body） */
@@ -1783,6 +1813,10 @@ body.cf-resizing-y * {
   gap: 2px;
   margin-top: 2px;
   flex-wrap: nowrap;
+  /* 4 个按钮（复制 / 引用 / 回到此处 / 删除这一轮）在 320px 屏上放不下：宁可让这一行自己横向滚动，
+     也不折行（折行会让每条消息高出一行，长对话里非常吵）。滚动条隐藏，靠边缘渐隐提示还有内容。 */
+  overflow-x: auto;
+  scrollbar-width: none;
   justify-content: flex-start;
 }
 /* 助手消息：与正文左对齐（让开头绕过头像那一列） */
@@ -1799,6 +1833,9 @@ body.cf-resizing-y * {
   gap: 4px;
   height: 26px;
   padding: 0 7px;
+  /* 文字与图标都不折行：折行会让「Rewind to here」变成两行，操作行高度翻倍。 */
+  white-space: nowrap;
+  flex: none;
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
@@ -1857,6 +1894,27 @@ body.cf-resizing-y * {
   line-clamp: var(--clamp-lines, 3);
   overflow: hidden;
 }
+/* 用户消息里的引用（右键「引用」带进来的 `> ` 段）：同回答里的引用（.md blockquote）左竖线 + 弱化字色，默认折叠 2 行。
+   同 .cf-msg__clamp 不加上下内边距，免得被截断的下一行漏进内边距；与前后正文隔 6px */
+.cf-msg__quote {
+  margin: 6px 0;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--border-strong);
+  color: var(--fg-muted);
+}
+.cf-msg__quote:first-child {
+  margin-top: 0;
+}
+.cf-msg__quote:last-child {
+  margin-bottom: 0;
+}
+.cf-msg__quote.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--clamp-lines, 2);
+  line-clamp: var(--clamp-lines, 2);
+  overflow: hidden;
+}
 .cf-msg__more {
   display: flex;
   align-items: center;
@@ -1913,7 +1971,7 @@ body.cf-resizing-y * {
   grid-template-columns: minmax(0, 1fr);
   justify-items: center;
 }
-/* 压缩摘要：不占头像列，提示居中、展开的摘要占满整行（见 .msg__compaction） */
+/* 两轮之间的压缩提示：不占头像列，分隔线与展开的摘要占满整行（见 .msg__compaction） */
 .cf-msg.is-compaction {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -1966,6 +2024,10 @@ body.cf-resizing-y * {
 .cf-mprogress__pill .cf-avstack {
   --ring: var(--bg-inset);
 }
+/* 后台子智能体的汇总进度没有头像，用子智能体节点的同款图标（见 SubagentProgressNotice） */
+.cf-mprogress__icon {
+  flex: none;
+}
 .cf-mprogress__text {
   min-width: 0;
   overflow: hidden;
@@ -1974,7 +2036,7 @@ body.cf-resizing-y * {
 }
 
 /*
- * 高度可过渡的折叠块（见 ChatFirstShell Fold）：收起 = 行高 1fr → 0fr + 淡出，展开反之。内容裁在 .cf-fold__in 里；
+ * 高度可过渡的折叠块（见 redesign/shell-common.tsx Fold）：收起 = 行高 1fr → 0fr + 淡出，展开反之。内容裁在 .cf-fold__in 里；
  * 收起后内容 visibility: hidden（等过渡放完才藏，不能再被 Tab 到）。时长用 --fold-dur，各处自己覆盖。
  */
 .cf-fold {
@@ -2191,10 +2253,13 @@ button.cf-mask__pill:hover {
   white-space: pre-wrap;
 }
 
-/* 输入区。上方分隔线已去掉，但保留 1px 透明边框：边距与有分隔线时逐像素一致（有无待办胶囊都不变）。 */
+/*
+ * 输入区。上方分隔线已去掉，但保留 1px 透明边框。不留上内边距：输入框上方那段间距由消息区底部的渐隐承担
+ * （见 .cf-convmid::after），总间距不变。
+ */
 .cf-composer {
   position: relative;
-  padding: var(--space-3) var(--space-4) var(--space-4);
+  padding: 0 var(--space-4) var(--space-4);
   border-top: 1px solid transparent;
 }
 /* 回到最新浮标：锚在输入区顶边正上方居中（bottom:100% 相对 .cf-composer）。 */
@@ -2203,7 +2268,8 @@ button.cf-mask__pill:hover {
   bottom: 100%;
   left: 50%;
   transform: translateX(-50%);
-  margin-bottom: var(--space-2);
+  /* 输入区不留上内边距（见 .cf-composer），这里补上那 12px：浮标与输入框的距离同原来，不落进渐隐 */
+  margin-bottom: calc(var(--space-2) + var(--space-3));
   width: 34px;
   height: 34px;
   border-radius: var(--radius-full);
@@ -2215,9 +2281,17 @@ button.cf-mask__pill:hover {
   display: grid;
   place-items: center;
 }
+/* --bg-hover 是半透明叠色，单独用会让浮标悬停时透出底下的文字；叠在不透明底色上。 */
 .cf-jump:hover {
-  background: var(--bg-hover);
+  background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-elevated);
   color: var(--fg);
+}
+/*
+ * 有胶囊排时浮标再让出胶囊排的高度，与胶囊的距离同胶囊占位时（约 21px），也避开胶囊四周的光晕
+ *（见 .cf-todo__pill::before 一组）。
+ */
+.cf-composer:has(.cf-dock:not(:empty)) .cf-jump {
+  margin-bottom: calc(var(--space-2) + var(--space-3) + var(--cf-dock-room));
 }
 .cf-composer__inner {
   position: relative; /* 「/ 指令」联想面板的定位锚 */
@@ -2330,12 +2404,22 @@ button.cf-mask__pill:hover {
 /*
  * 输入盒正上方的胶囊排：待办清单、后台任务、浏览网页、插入对话，左对齐、随内容宽，始终一行——换行会让输入框上方忽高忽低。
  * 先后按出现的先后，新出现的在最右（各胶囊根节点上的 order，见 useDockOrder）。
- * 放不下时两枚按各自内容宽度等比收缩，文字各自省略（计数、停止键等不收缩）；都没有时整排不占位。
+ * 放不下时两枚按各自内容宽度等比收缩，文字各自省略（计数、停止键等不收缩）；都没有时整排不出现。
+ * 整排浮在输入盒正上方、压在消息区底部，不占输入区高度：消息区与没有胶囊时一样大，往上翻时文字从胶囊后面经过，
+ * 只在每枚胶囊四周虚化一圈（见下方光晕），不整行遮挡。胶囊之间的空白不接鼠标，点选、拖选、滚轮照常落到消息上。
+ * 待办面板、浏览器预览等浮层仍以整排（与输入盒同宽）为基准向上展开，位置与胶囊占位时相同。
+ * z-index 取这些浮层原来的层级（30）：整排成了层叠上下文，里面浮层的 z-index 只在排内比较。
  */
 .cf-dock {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  z-index: 30;
   display: flex;
   gap: var(--space-2);
   margin-bottom: var(--space-2);
+  pointer-events: none;
 }
 .cf-dock:empty {
   display: none;
@@ -2343,6 +2427,33 @@ button.cf-mask__pill:hover {
 .cf-dock > * {
   flex: 0 1 auto;
   min-width: 0;
+  pointer-events: auto;
+}
+/* 「/ 指令」联想面板让到胶囊排之上（与胶囊占位时一样）。 */
+.cf-composer__inner:has(> .cf-dock:not(:empty)) > .cf-slash {
+  margin-bottom: calc(var(--space-2) + var(--cf-dock-room));
+}
+/*
+ * 胶囊四周的虚化：一圈背景色光晕，盖住从胶囊后面经过的文字、向外渐淡。画在胶囊下面单独一层
+ * （z-index:-1，落在整排的层叠上下文里），几枚挨着时光晕不会盖到相邻胶囊的边缘。插入对话胶囊用的也是 .cf-bg__pill。
+ * 胶囊下沿以下裁掉：那里已是输入区，没有文字要盖，光晕只会把输入框上边框洗淡一截。
+ */
+.cf-todo__pill,
+.cf-bg__pill,
+.cf-browser__pill {
+  position: relative;
+}
+.cf-todo__pill::before,
+.cf-bg__pill::before,
+.cf-browser__pill::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  box-shadow: 0 0 8px 4px var(--bg);
+  clip-path: inset(-16px -16px 0 -16px);
+  pointer-events: none;
 }
 /*
  * 胶囊里的文字最多这么宽：长网页标题 / 长消息不把整排撑满，几个同时出现时也不会有一个独占大半；
@@ -3566,6 +3677,42 @@ button.cf-mask__pill:hover {
   gap: 8px;
   margin-bottom: 10px;
 }
+/* 输入框里的引用条（右键「引用」，同 TG 的回复条），在待发附件之后、文字之前：左竖线 + 灰字一行（同消息里的引用 .cf-msg__quote），
+   超出省略、悬停看全文；右侧 ✕ 取消。一次一条，发送时以 `> ` 引用拼在消息开头 */
+.cf-quotebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding-left: var(--space-3);
+  border-left: 3px solid var(--border-strong);
+}
+.cf-quotebar__text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: calc(13px * var(--chat-scale, 1));
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
+.cf-quotebar__x {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+}
+.cf-quotebar__x:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
 .cf-att {
   position: relative;
   flex: none;
@@ -4773,7 +4920,7 @@ button.cf-mask__pill:hover {
   flex: none;
   color: var(--fg-muted);
 }
-/* 运行状态图标（右详情「上次」值 + 运行历史行共用，见 ChatFirstShell RunStatusIcon）：同宽 14px 线框圆形，
+/* 运行状态图标（右详情「上次」值 + 运行历史行共用，见 redesign/TasksPane.tsx RunStatusIcon）：同宽 14px 线框圆形，
    颜色按状态——成功绿、失败红、跳过黄；已中止同对话里「已停止本轮回复」的提示（.msg__notice）：黄色信息图标。 */
 .cf-runicon {
   flex: none;
@@ -5449,6 +5596,7 @@ body.cf-pop-open * {
 }
 /* 一位成员：点整行切到它的对话；行尾「移除成员」平时隐藏，悬停（或键盘聚焦）才出现，悬停变红 */
 .cf-members__row {
+  position: relative;
   display: flex;
   align-items: center;
   border-radius: 9px;
@@ -5504,8 +5652,13 @@ body.cf-pop-open * {
   gap: 7px;
   min-width: 0;
 }
+/* 名字放不下就截断加「…」（后面的状态签不收缩）；不截断会撑出下拉框、压到任务行悬停时的按钮 */
 .cf-members__name {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 13px;
   font-weight: 600;
 }
@@ -5613,28 +5766,39 @@ body.cf-pop-open * {
   background: rgba(255, 255, 255, 0.78);
   color: #2b8a3e;
 }
-/* 任务行右侧：只在暂停时写「已暂停」（不写下次运行时间）；悬停换成「立即运行」「暂停」「删除」 */
+/* 任务行右侧：只在暂停时写「已暂停」（不写下次运行时间）；悬停换成「立即运行」「暂停」「删除」。
+   放在名字那一行里推到行尾（与名字同行居中对齐），距行右缘 10px（含 __open 的右内边距 4px） */
 .cf-members__next {
   flex: none;
-  align-self: flex-start;
-  margin: 9px 10px 0 4px;
+  margin: 0 6px 0 auto;
   font-size: 12px;
   color: var(--fg-subtle);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* 按钮浮在行的右端、不占位（对比稿 design/task-row-overlap.html 方案 B）：悬停时左缘一段渐隐盖住任务名与日程的末尾，
+   文字不重排不跳动；「已暂停」悬停只隐身不让位。底色两层：下层不透明的下拉底色、上层悬停浅底，合起来正好等于行悬停后的颜色 */
 .cf-members__acts {
-  flex: none;
-  display: none;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
   gap: 2px;
-  margin-right: 6px;
+  padding: 0 6px 0 30px;
+  border-radius: 0 9px 9px 0;
+  background:
+    linear-gradient(90deg, transparent, var(--bg-hover) 30px),
+    linear-gradient(90deg, transparent, var(--bg-elevated) 30px);
+  visibility: hidden;
 }
 .cf-members__row:hover .cf-members__next {
-  display: none;
+  visibility: hidden;
 }
 .cf-members__row:hover .cf-members__acts,
 .cf-members__acts:focus-within {
-  display: flex;
+  visibility: visible;
 }
 .cf-members__ib {
   display: grid;

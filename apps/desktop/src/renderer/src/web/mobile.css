@@ -353,6 +353,30 @@
   }
 
   /* ---------------------------- 消息与输入 ---------------------------- */
+  /*
+   * 每条消息下面的操作行（复制 / 引用 / 回到此处 / 删除这一轮）。
+   *
+   * 窄屏上带文字的一排放不下（320px 屏上四个按钮要 421px，可用只有 272px）：
+   * 折行会让每条消息高出一行，长对话里非常吵；横向滚动又把按钮藏在视口外。
+   * 所以窄屏改成只出图标，文字交给 title / aria-label（长按 / 悬停看说明）。
+   * 图标四个一眼可辨：复制、引用、回到此处（回旋箭头）、删除（垃圾桶）。
+   * 宽屏（≥430px）仍带文字——「这一排是什么」靠文字比靠图标清楚。
+   */
+  .cf-msg__act {
+    padding: 0 7px;
+    font-size: 12px;
+  }
+  .cf-msg__act > span {
+    display: none;
+  }
+  @media (max-width: 429px) {
+    .cf-msg__act {
+      gap: 0;
+      padding: 0 6px;
+      width: 34px;
+      justify-content: center;
+    }
+  }
   .cf-msgs {
     padding: var(--space-4) 0;
     overscroll-behavior: contain;

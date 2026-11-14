@@ -12,7 +12,7 @@ import { sweepCheckpoints } from './services/checkpoints'
 import { sweepSubagents } from './services/subagent-store'
 import { sweepMedia } from './services/media-store'
 import { registerSkillsIpc, startSkillsWatcher } from './services/skills'
-import { ensureSeededPersonas, pruneOrphanExtRoles, registerPersonasIpc } from './services/personas'
+import { ensureSeededPersonas, pinAutoAvatarShapes, pruneOrphanExtRoles, registerPersonasIpc } from './services/personas'
 import { registerProfileIpc } from './services/profile'
 import { registerMemoryIpc } from './services/memory'
 import {
@@ -178,11 +178,9 @@ function createWindow(): void {
   // 这里补一个最小编辑菜单——可编辑处给 剪切/复制/粘贴/全选（按 editFlags 灰显不可用项，走原生
   // role 直接操作系统剪贴板）；非编辑但有选区时给 复制/全选。其余情形不弹菜单（保持干净）。
   //
-  // 消息气泡例外（与 Web 版一致）：对话里的右键一律不弹任何菜单 —— 复制、回滚到此处、删除此轮
-  // 都做成了每条消息下面的操作行按钮（见 renderer 的 MsgActions），右键再弹一个原生菜单会与
-  // 「动作都在气泡下面」的交互打架，用户也反馈它挡着复核。判据是命中元素是否落在 .cf-msg 里
-  // （params 里没有 DOM 信息，只能问渲染层要一次命中测试）。
-  // 可编辑处（输入框、设置里的文本框）仍保留原生菜单：那里的右键粘贴/全选没法用操作行替代。
+  // 消息气泡**不再例外**：正文已放开选择（见 redesign.css 的 .cf-msg__body），右键呼出系统菜单复制
+  // 选中的片段是基本预期。每条消息下面的操作行（复制 / 引用 / 回到此处 / 删除这一轮）与它并存——
+  // 按钮解决「一键复制整条」，原生菜单解决「就要其中一句」，两者不冲突。
   mainWindow.webContents.on('context-menu', (_e, params) => {
     const win = mainWindow
     if (!win) return
@@ -201,15 +199,12 @@ function createWindow(): void {
       ]).popup({ window: win })
       return
     }
-    const hasSelection = params.selectionText.trim().length > 0
-    void hitTestMessage(win, params.x, params.y).then((overMessage) => {
-      if (overMessage || win.isDestroyed() || !hasSelection) return
-      Menu.buildFromTemplate([
-        { role: 'copy', label: L.copy, enabled: editFlags.canCopy },
-        { type: 'separator' },
-        { role: 'selectAll', label: L.selectAll }
-      ]).popup({ window: win })
-    })
+    if (params.selectionText.trim().length === 0) return
+    Menu.buildFromTemplate([
+      { role: 'copy', label: L.copy, enabled: editFlags.canCopy },
+      { type: 'separator' },
+      { role: 'selectAll', label: L.selectAll }
+    ]).popup({ window: win })
   })
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -219,28 +214,6 @@ function createWindow(): void {
   }
 }
 
-/**
- * 命中测试：右键位置是否落在某条消息（.cf-msg）里。
- *
- * main 进程的 'context-menu' 事件只给坐标与几个标志，没有 DOM 信息，所以只能向渲染层要一次命中测试。
- * 坐标口径与 elementFromPoint 一致（相对视图左上角的 CSS 像素），少数缩放下可能有半像素偏差——
- * 判据取「是否在消息里」，边界偏差最多让气泡边缘 1px 处弹不弹菜单有别，可接受。
- * 渲染层不可用（未加载完 / 执行失败）时返回 false：宁可保留原生菜单，也不要让右键彻底失灵。
- */
-async function hitTestMessage(win: BrowserWindow, x: number, y: number): Promise<boolean> {
-  try {
-    const hit = await win.webContents.executeJavaScript(
-      `(() => {
-        const el = document.elementFromPoint(${Math.round(x)}, ${Math.round(y)})
-        return !!(el && el.closest && el.closest('.cf-msg'))
-      })()`,
-      true
-    )
-    return hit === true
-  } catch {
-    return false
-  }
-}
 
 /** 显示 / 唤起主窗口（不存在则重建；隐藏 / 最小化则恢复并聚焦）。 */
 function showMainWindow(): void {
@@ -384,6 +357,8 @@ if (!app.requestSingleInstanceLock()) {
   // 按 id 幂等 + 防删除后复活 + 将来新增默认角色可增量补种（守卫位 personas.seeded[id] 入 config）。
   // 每次启动顺带检查默认提示词：升级后有新版、且用户没改过（基线 personas.seededPrompt[id]）→ 换成新版。
   ensureSeededPersonas()
+  // 头像形状存成 'auto' 的旧角色（手机端接受名片建的）：改写成具体形状，此后固定。
+  pinAutoAvatarShapes()
   // 技能 / MCP 的可用角色里已不存在的角色：剔除，都没了的改回所有角色并停用（须在 MCP 自动连接之前）。
   pruneOrphanExtRoles()
   registerPersonasIpc()

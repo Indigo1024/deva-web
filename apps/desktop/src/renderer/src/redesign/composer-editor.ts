@@ -44,7 +44,7 @@ import { slashTokens } from '../../../shared/slash'
 /*
  * 对话输入框的编辑器内核（Lexical 纯文本模式，取代原 textarea）。
  * 换成 contentEditable 是为了能给**会生效**的片段单独上色——textarea 只有一整段纯文本，做不到局部样式：
- *  · `/指令`：开头或正文中间的已启用技能，以及整条只有它的 /compact /rewind。认法与主进程 chat.ts sendMessage
+ *  · `/指令`：开头或正文中间的已启用技能，以及整条只有它的 /compact /rewind。认法与主进程 chat-turns.ts sendMessage
  *    一致（shared/slash.ts：`/` 在开头或空白之后，名字取最长的 [A-Za-z0-9_-]+），再由调用方判定是否认得（isToken）；
  *  · 正文任意位置的 `@名字`（本对话成员、可 @ 的角色、@新建成员），认法同主进程 handleMentions（见 shared/mention.ts）：
  *    显示成成员标签（头像 + 名字，见 MentionNode）；还可能接着敲成更长名字时先只上色（见 $syncTokens）。
@@ -345,6 +345,8 @@ export interface ComposerEditor {
   setText: (text: string, focus?: boolean) => void
   /** 把全文 [start, end) 换成 text，光标放在换上的内容之后，并聚焦（采纳联想用，其余内容不动）。 */
   replaceRange: (start: number, end: number, text: string) => void
+  /** 聚焦输入框，光标放在末尾，内容不动（引用后接着写）。 */
+  focusEnd: () => void
   /** 清空撤销历史（发送后调用，免得撤销把已发出的内容找回来）。 */
   clearHistory: () => void
   /** isToken / mentionNames 的判定依据（技能列表、附件数、成员名单）变了：重新识别要上色的片段与成员标签。 */
@@ -600,6 +602,11 @@ export function useComposerEditor(handlers: ComposerEditorHandlers): ComposerEdi
     [update]
   )
 
+  const focusEnd = useCallback(
+    () => update(() => void $getRoot().selectEnd(), [HISTORY_MERGE_TAG], true),
+    [update]
+  )
+
   const clearHistory = useCallback(
     () => editor.dispatchCommand(CLEAR_HISTORY_COMMAND, undefined),
     [editor]
@@ -610,5 +617,5 @@ export function useComposerEditor(handlers: ComposerEditorHandlers): ComposerEdi
     [update]
   )
 
-  return { rootRef, empty, getText, setText, replaceRange, clearHistory, refreshToken }
+  return { rootRef, empty, getText, setText, replaceRange, focusEnd, clearHistory, refreshToken }
 }

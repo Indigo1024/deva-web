@@ -1,6 +1,7 @@
 import { app, ipcMain, safeStorage } from 'electron'
 import { promises as fs } from 'fs'
 import { join } from 'path'
+import { writeFileAtomic } from './atomic-write'
 import { getDevaHome } from './config'
 
 /**
@@ -17,7 +18,6 @@ let store: Record<string, string> = {}
 let filePath = ''
 let loaded = false
 let loading: Promise<void> | null = null
-let tmpSeq = 0
 let persistChain: Promise<void> = Promise.resolve()
 
 /** 从旧位置 userData/secrets.json 一次性迁移（密文原样搬运，加密不受路径影响）。 */
@@ -57,17 +57,18 @@ async function ensureLoaded(): Promise<void> {
   await loading
 }
 
+/**
+ * 落盘（Web 版加固，见 docs/WEB.md）：
+ *  · **原子写**（上游 v0.1.14 起的 writeFileAtomic）：写到一半崩溃不会留下半截 JSON——
+ *    那样下次载入解析失败即视为空库，全部密钥丢失。
+ *  · **0600**：`secrets.json` 虽在点目录里，也不给同机其他用户读；tmp 建出来就是 0600，
+ *    rename 覆盖后权限跟着新文件走（老文件的 644 会被顺手纠正）。
+ *  · **串行化**：writeFileAtomic 用的是固定的 `<file>.tmp`，两次并发调用会互相踩。
+ *    这里把每次写排到一条链上，保证同一时刻只有一次写。
+ */
 function persist(): Promise<void> {
   const writeOnce = async (): Promise<void> => {
-    const tmpPath = `${filePath}.${process.pid}.${++tmpSeq}.tmp`
-    try {
-      await fs.writeFile(tmpPath, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 })
-      await fs.rename(tmpPath, filePath)
-    } catch (e) {
-      await fs.unlink(tmpPath).catch(() => {})
-      throw e
-    }
-    await fs.chmod(filePath, 0o600).catch(() => {})
+    writeFileAtomic(filePath, JSON.stringify(store, null, 2), { mode: 0o600 })
   }
   const next = persistChain.then(writeOnce, writeOnce)
   persistChain = next.catch(() => {})

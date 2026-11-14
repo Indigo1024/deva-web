@@ -1,12 +1,13 @@
 import { ipcMain } from 'electron'
 import { createHash, randomBytes } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'fs'
 import { join } from 'path'
 import {
   clearAvatarImage as clearAvatarImageFile,
   readAvatarImage as readAvatarImageFile,
   writeAvatarImage as writeAvatarImageFile
 } from './avatar-image'
+import { writeFileAtomic } from './atomic-write'
 import { getConfig, getDevaHome, setConfig } from './config'
 import { pruneRoles } from './ext-roles'
 import { setSkillEnabled } from './skills'
@@ -14,13 +15,14 @@ import { setEnabled as setMcpEnabled } from './mcp-config'
 import { DEFAULT_PERSONAS, LEGACY_PROMPT_HASHES, type DefaultPersona } from './default-personas'
 import { fmScalar, fmString, parseFrontmatter } from './frontmatter'
 import { reassignTaskPersona } from './tasks'
+import { AUTO_SHAPE, legacyAutoShape } from '../../shared/avatar-shape'
 
 /**
  * Agent 提示词（Personas）服务：发现 / 解析 / 读写 `~/.deva/personas/<id>.md`（全局，与项目无关）。
  *
  * 定位（对标 ChatGPT「自定义指令」/ 人格 profile）：每条 persona 是一段命名的**附加系统提示词**
  * （性格、语气、行文风格、偏好等）。可多条并存、独立启停；**已启用**的会在每轮对话前**追加**进
- * 主智能体系统提示词（见 chat.ts `systemPrompt`）。与 skill/subagent 的启停模型一致（叠加，非单选）。
+ * 主智能体系统提示词（见 chat-prompts.ts `systemPrompt`）。与 skill/subagent 的启停模型一致（叠加，非单选）。
  *
  * 设计（照 agents.ts 裁剪，但更简单：**无 tools**——角色不收窄工具，全部工具按需可用）：
  * - **身份 = 文件名去扩展名（id），显示名 = frontmatter `name`**。文件名恒定不改（改显示名只重写
@@ -271,7 +273,7 @@ export function upsertPersona(input: PersonaUpsertInput): PersonaRecord {
 
   try {
     mkdirSync(personasDir(), { recursive: true })
-    writeFileSync(personaFile(id), md, 'utf8')
+    writeFileAtomic(personaFile(id), md)
   } catch {
     /* 写失败：返回内存态记录，UI 仍可用（下次可重试） */
   }
@@ -293,6 +295,32 @@ export function upsertPersona(input: PersonaUpsertInput): PersonaRecord {
       enabled: input.enabled === true
     }
   )
+}
+
+/**
+ * 启动时一次性改写：2026-11-09 ~ 11-11 间手机端接受名片建的角色，头像形状存的是 'auto'（显示时按 id 现算）。
+ * 改成当时算出来的那个具体形状（legacyAutoShape，与界面显示的同一取法），角色从此形状固定、看上去不变。
+ * 其余字段原样保留；不是 JSON、没有 'auto' 的一律不碰。
+ */
+export function pinAutoAvatarShapes(): void {
+  for (const p of listPersonas()) {
+    if (!p.avatar.includes(AUTO_SHAPE)) continue
+    let spec: unknown
+    try {
+      spec = JSON.parse(p.avatar)
+    } catch {
+      continue
+    }
+    if (!spec || typeof spec !== 'object' || (spec as { shape?: unknown }).shape !== AUTO_SHAPE) continue
+    upsertPersona({
+      id: p.id,
+      name: p.name,
+      description: p.description,
+      avatar: JSON.stringify({ ...spec, shape: legacyAutoShape(p.id) }),
+      model: p.model,
+      prompt: p.prompt
+    })
+  }
 }
 
 /** 技能 / MCP 的可用角色里剔除 keep 不认的角色；指定的角色都没了的项改回所有角色并停用（MCP 随之断开）。 */
@@ -449,7 +477,7 @@ function refreshDefaultPrompt(
     : (LEGACY_PROMPT_HASHES[def.id] ?? []).includes(curHash)
   if (!untouched) return false
   try {
-    writeFileSync(personaFile(def.id), composePersonaMd({ ...cur, prompt: def.prompt }), 'utf8')
+    writeFileAtomic(personaFile(def.id), composePersonaMd({ ...cur, prompt: def.prompt }))
     return true
   } catch {
     return false // 写失败：不记基线，下次启动再试
