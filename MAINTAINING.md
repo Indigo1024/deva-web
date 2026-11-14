@@ -121,6 +121,12 @@ git merge --no-ff upstream/main
 | `ChatFirstShell.tsx`、`composer-editor.ts`、`redesign.css` | **两边都要**：我们的消息操作行 / 滚动模型 / 移动端粘贴保留，上游的新组件并入 |
 | 其余业务代码 | 以上游为准，只在类型/枚举上补我们的分支（如附件的 `serverPath` 模式） |
 
+**v0.1.15 那次的教训（以后还会遇到）**：上游把 `ChatFirstShell.tsx` 从 8000 行拆成 12 个文件，
+我们在这个文件里的 40 处改动**没有冲突块可解** —— 取上游的瘦身版之后得按函数一个个搬到新住处
+（`Conversation.tsx` / `ConvMessage.tsx` / `Composer.tsx` / `SettingsPane.tsx` / `shell-common.tsx`），
+而且**上游拆文件时把我们整块的手机端抽屉、顶栏「选择」按钮丢了** —— 这些不会报错，只是功能静默消失。
+所以合并后不能只看 typecheck 过没过，必须按 `docs/WEB.md` 的落位表在浏览器里逐项点一遍。
+
 合并后必跑（顺序固定，别跳）：
 
 ```bash
@@ -310,8 +316,11 @@ ls -la /root/.deva/          # web-auth.json / web-secret.key / secrets.json / a
    tag/Release 已经打起来了（见上一节），下一步可以让它优先比对 Release 版本号，
    别人部署的实例就能一眼看出"落后几个版本"。
 4. **多用户 / 审计日志** —— 多人共用时的前置条件，见上一节。
-5. **移动端继续打磨** —— 长文本粘贴、滚动回拉这几处已经修好；
+5. **移动端继续打磨** —— 长文本粘贴、滚动回拉、正文选字、操作行窄屏都已经修好；
    剩下的多是手感问题（输入框高度、键盘弹起时的布局），有具体案例再动。
+6. **远程通道（飞书 / Telegram）真机验收** —— 代码早就在（`registerRemoteIpc` 已接线，飞书走长连接、
+   Telegram 走 getUpdates，都不需要公网回调），但**从没接过真机器人**。这是「手机不装浏览器也能用」的第二条路：
+   锁屏时服务端照样跑，结果推到聊天软件里。要一个 @BotFather 的 token 或扫码建一个飞书应用就能验。
 
 ---
 

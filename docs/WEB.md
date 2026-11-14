@@ -14,7 +14,7 @@
 本文档只讲**本改版自己的东西**：Web 层怎么搭的、怎么部署、怎么跟随上游更新。
 上游 Deva 本身有哪些功能，属于上游的成果，请查阅[上游项目](https://github.com/sqfcyily/deva)。
 
-当前跟随的上游版本：**v0.1.14**。
+当前跟随的上游版本：**v0.1.15**。
 
 维护与排错看 [MAINTAINING.md](../MAINTAINING.md)；本文档讲的是部署与实现细节。
 
@@ -459,6 +459,37 @@ bash scripts/deva-update.sh --rollback  # 回滚到上一份产物
 
 **严禁给普通滚动挂 `setTimeout` 事后补拉，也严禁在 64px 阈值内吸回 `stickRef`**：否则桌面单格平滑滚轮、触控板微幅尾帧、手机常速慢滑（每帧仅 1~5px）或触控惯性上滑都会被重新吸回底部，表现为「往上滑时出现细微往下滑」。另外上滚触发 `loadEarlier` 前置补轮时，在支持 `overflow-anchor` 的内核（`scrollTop > 0` 已自动锚定）上不要再重写 `scrollTop`，以免抹掉渲染期间合成线程继续上滑的位移并打断惯性。
 
+**1b. 消息正文必须可选中（`user-select: text`），原生长按 / 右键菜单不要拦**
+
+早先 `.cf-msg__body` 写的是 `user-select: none` + `-webkit-touch-callout: none`，本意是「动作都做在气泡下面那排按钮上，别弹原生菜单」。
+实测副作用是**手机上长按什么都不发生**——选不了字、弹不出系统「拷贝」，想复制其中一句只能整条复制。现在两者并存：
+
+| 需求 | 走哪条 |
+| --- | --- |
+| 复制整条消息 | 气泡下面操作行的「复制」 |
+| 复制其中一句 / 一段 | 浏览器原生选字（手机长按、桌面拖选）+ 系统菜单 |
+| 把上文某段当证据带上 | 操作行的「引用」（见下条） |
+
+桌面主进程的原生右键菜单因此**不再**在 `.cf-msg` 上做命中测试压制（`hitTestMessage` 已删）；可编辑区仍给剪切/复制/粘贴/全选。
+
+**1c. 「引用」是操作行里的条件按钮，不是右键菜单项**
+
+上游 v0.1.15 的引用入口是消息区右键菜单（`quoteOf` → 输入框顶部引用条）。网页端没有右键，改成接进操作行：
+
+- 按钮**只在**选区非空、且 `anchorNode` 与 `focusNode` 都落在**同一条** `.cf-msg` 内时出现（`selectionchange` 监听，每屏可见消息各挂一个）
+- 点击后把选区交给 `onQuote` → `onPrefill(quote, true)` → 输入框顶部 `.cf-quotebar`；同时 `removeAllRanges()` 清选区（否则按钮一直挂着、还挡住长按）
+- 转换逻辑一行都不用自己写：`quoteOf`（每行加 `> `，选区两端同在一个代码块时先包围栏保住缩进）、`withQuote`、`splitQuotes` 全部复用上游
+- 引用行里的 `/技能` 与 `@成员` 不算指令、不算点名（`shared/quote.ts` 的 `withoutQuotes`）；引用正文照样算这条消息的内容
+
+**1d. 操作行窄屏只出图标**
+
+四个按钮（复制 / 引用 / 回到此处 / 删除这一轮）带文字时 320px 屏要 421px，可用只有 272px。
+折行会让每条消息高出一行，横向滚动又把按钮藏到视口外，所以：
+
+- `≥430px`：图标 + 文字
+- `<430px`：只出图标（34×34 点击区），文字交给 `title` / `aria-label`
+- `.cf-msg__act` 恒 `white-space: nowrap; flex: none`，操作行 `flex-wrap: nowrap` + `overflow-x: auto`（隐藏滚动条）兜底
+
 **2. 消息内元素的定位一律写死 `grid-row` / `grid-column`**
 
 `.cf-msg` 是两列网格。别用 `order` 调整头像 / 气泡的顺序：Grid 的自动放置按 `order` 走游标，跨整行的操作行会把游标推到下一行，`order` 靠后的元素直接被挤到第三行（用户消息头像因此跑到操作行下面、还回到左边缘）。
@@ -523,6 +554,23 @@ git diff --name-only HEAD^..HEAD -- 'src/main/**' 'src/preload/**'
 | `ChatFirstShell.tsx` / `composer-editor.ts` / `redesign.css` | **两边都要**：消息操作行、滚动模型、移动端无损粘贴保留；上游新组件并入 |
 | 其余业务代码 | 以上游为准，只在类型/枚举上补我们的分支（如附件的 `serverPath` 模式） |
 
+**v0.1.15 起是个特例：上游把 `ChatFirstShell.tsx`（8000 行）整个拆成了 12 个文件**，我们在这个文件里改过的 40 处
+（消息操作行、滚动模型、抽屉、关于页…）不再有「冲突块」可解——`git checkout --theirs` 拿上游的瘦身版之后，
+必须**按函数把自有改动搬到新住处**。落位表：
+
+| 我们改过的东西（旧 `ChatFirstShell.tsx`） | 现在住哪 |
+| --- | --- |
+| `Conversation()` 的滚动模型（`stickRef` / `detachBottom` / `pinToBottom` / `jumpToLatest` / `loadEarlier`）、`isLive` | `Conversation.tsx` |
+| 消息操作行 `MsgActions`（复制 / 引用 / 回到此处 / 删除这一轮） | `ConvMessage.tsx`（在 `.cf-msg__body` 之后渲染，`grid-column: 1/-1`） |
+| 移动端无损粘贴的 `onPaste`（收 `ComposerPasteEvent`） | `Composer.tsx`（三层拦截器在 `composer-editor.ts`，冲突只在 import 行） |
+| `AboutPane` 的版本三件套 / 待构建提示 / 仓库入口 | `SettingsPane.tsx` |
+| `DragBar` 里的 `MobileMenuButton` | `shell-common.tsx` |
+| 抽屉状态 `mobDrawer` / `deva:mobmenu` 监听 / `cf-mobbackdrop` / `onRailTab` 移动端语义 | `ChatFirstShell.tsx`（拆文件时上游把这块丢了，要补回来） |
+| 顶栏「选择」按钮（多轮删除入口） | `Conversation.tsx` 的 `.cf-conv__head` |
+| 顶栏抽屉唤起键 | `Conversation.tsx` 的 `.cf-conv__head` 首个子元素 |
+| `.cf-msg__acts` / `.cf-msg__body` 的 `user-select` / `.cf-jump` 让位 | `redesign.css`（仍是单文件，逐段重贴） |
+| 桌面端「`.cf-msg` 上不弹原生菜单」 | `src/main/index.ts`（v0.1.15 起**已删** `hitTestMessage`：正文可选了，右键就该给复制菜单） |
+
 ### 合并检查清单
 
 每合并一个上游版本，按这个顺序过一遍：
@@ -539,7 +587,11 @@ git diff --name-only HEAD^..HEAD -- 'src/main/**' 'src/preload/**'
 8. **新增的启动期清扫 / 定时逻辑？** → web-server 的启动流程要跟着加（例：v0.1.9 的 `sweepMedia`）
 9. **桌面专用交互（打开文件、系统通知、托盘、文件夹附件）？** → 前端要降级成 Web 可行的行为（下载、浏览器通知、忽略）
 10. **`src/main/services/secrets.ts` 有改动吗？** → 合并后确认 `persist()` 仍是 `0600` 权限 + 同目录临时文件原子改名 + Promise 链串行化写入
-11. **跑两个 typecheck + 两种构建 + 安全用例 + 真机验证**
+11. **上游改动的是「被拆掉的文件」吗？** → 若是（如 v0.1.15 拆 `ChatFirstShell.tsx` / `chat.ts`），
+    按上面的落位表把自有改动搬到新文件，别指望冲突块；改完 `grep -c '^<<<<<<<'` 验零，再靠 typecheck 抓漏
+12. **上游丢掉了我们的块吗？** → 拆文件时容易整块丢（v0.1.15 就丢了手机端抽屉与「选择」按钮入口）。
+    合并后按落位表逐项在浏览器里点一遍：操作行在不在、抽屉能不能开、关于页版本对不对、引用能不能用
+13. **跑两个 typecheck + 两种构建 + 安全用例 + 真机验证**
 
 ```bash
 npm run typecheck          # node + web
@@ -582,6 +634,24 @@ systemctl restart deva-web
 | 超长工具结果落盘 | 写 `$DEVA_HOME` 下的结果目录 | 无需适配（纯主进程） |
 | 内置 office 文本抽取（docx/xlsx/pptx） | 正常 | 无需适配（`fflate` 解包，纯 Node） |
 | 工具按需加载（`tool_search`） | 正常 | 无需适配（工具表与说明都在主进程） |
+
+**v0.1.15 起**
+
+上游这次没有新功能落在 Web 上不能用的地方，改动集中在**结构拆分**与**桌面专属修复**：
+
+| 上游改动 | 桌面行为 | Web 适配 |
+| --- | --- | --- |
+| 渲染层按功能拆分（`ChatFirstShell.tsx` → `Composer` / `Conversation` / `ConvMessage` / `Rail` / `SettingsPane` / `TasksPane` / `ProfileView` / `MemberBar` / `TaskBar` / `GitWidget` / `shell-common` / `ContextMenu`） | 正常 | 本改版的自有改动（消息操作行、滚动模型、移动端抽屉、关于页版本三件套、移动端粘贴）**按函数逐一落位**到新文件；详见下文「合并上游」的落位表 |
+| 主进程按功能拆分（`chat.ts` → `agent-loop` / `chat-turns` / `chat-members` / `chat-state` / `chat-history` / `chat-display` / `chat-prompts` / `chat-task-handoff` / `subagent-run` / `loop-support` / `model-view` / `tool-catalog` / `atomic-write` / `repetition` / `ask-questions` / `background-tasks`） | 正常 | 无需适配（纯主进程，`chat:*` 通道名未变，桥接自动生效） |
+| 右键「引用」（`quoteOf` → 输入框顶部引用条） | 消息区右键菜单 | 入口改成**操作行里的条件按钮**（选区非空且完全落在本条消息内才出现）。转换与渲染逻辑原样复用上游 |
+| 压缩改为「只插摘要、不删消息」+ 对话内压缩提示 + 按压缩边界拆存盘（`<id>.compacted-*.jsonl`） | 正常 | 无需适配：拆分文件不以 `.json` 结尾，会话索引重建天然跳过；提示由渲染层画 |
+| 子智能体默认后台运行 + 逐字复读检测 | 正常 | 无需适配；网页版反而更受益（手机锁屏断 WS，回来能看到结果） |
+| 远程机器人聊天式回复（「仅最终结果」+ 正在输入） | 飞书卡片 / Telegram 消息 | 无需适配：`remote` 模块本来就在 Web 服务端接线（`registerRemoteIpc` / `stopAllChannels`），配置落 `config.json`、密钥落 `secrets.json`；飞书走长连接 WebSocket、Telegram 走 getUpdates 长轮询，都不需要公网回调 |
+| 会话历史并发改写防护 / 回合卡在「进行中」 | 正常 | 无需适配（纯主进程；网页版多设备同开一个对话时价值更大） |
+| 服务商默认输出预留超窗导致长对话被拒 | 正常 | 无需适配（引擎自愈，纯主进程） |
+| `atomic-write`（临时文件 + rename） | 正常 | **并入并加强**：`writeFileAtomic` 支持 `mode`，`secrets.json` 用 0600 + 串行写入，`config.json` 0600 |
+| 胶囊排浮于消息区 + 底部渐隐（`.cf-dock`） | 正常 | 无需适配（上游 CSS 自带 `.cf-jump` 让位规则） |
+| macOS 图标留边 / 屏蔽网页设置应用图标角标 / 定时任务行布局 | 桌面专属 | 无影响（与 Web 无关） |
 
 ---
 

@@ -12,7 +12,7 @@ Run the [Deva](https://github.com/sqfcyily/deva) desktop client in a browser.
 >
 > If you want the desktop app, get it from upstream. **This repository ships no Electron installers.**
 >
-> **Following upstream v0.1.14** — merge rules in [docs/WEB.md](docs/WEB.md); how to keep it alive in [MAINTAINING.md](MAINTAINING.md) (Chinese).
+> **Following upstream v0.1.15** — merge rules in [docs/WEB.md](docs/WEB.md); how to keep it alive in [MAINTAINING.md](MAINTAINING.md) (Chinese).
 
 ---
 
@@ -83,6 +83,8 @@ successful load, any later disconnect left the overlay permanently covering a pe
 | Thumbnails | Returns `null`; the UI falls back to a type icon |
 | Window fullscreen / macOS traffic lights | No-ops |
 | Built-in browser (the `browser` tool) | **Not available**: it needs Electron's layered `WebContentsView` + CDP, and a server process has no window layer. The tool is omitted and the composer capsule never renders — no dead entry point |
+| Right-click "Quote" a message | In the message area's right-click menu | The entry sits in the **action row under each message**: select text and a "Quote" button appears, turning the selection into the quote bar above the composer (there is no right-click on a phone) |
+| Selecting and copying message text | Desktop drag-select / right-click copy | **Works the same**: message text stays selectable, long-press on mobile and drag-select on desktop both work, and the system copy menu is available (the per-message row still has its own copy button) |
 | Dropping folders / attaching by real path | The browser cannot see local paths, so everything goes through "upload the bytes" (chunked upload for large files) |
 | Outbound proxy for the server | Requests go out through Node's `fetch` and always **connect directly** — `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are ignored. To route the server through a proxy you must configure it separately (Node 24+ `NODE_USE_ENV_PROXY=1`); setting the variables alone does nothing |
 | electron-updater | Not applicable — upgrade by rebuilding |
