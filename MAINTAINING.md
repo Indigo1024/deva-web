@@ -55,7 +55,7 @@ journalctl -u deva-web -n 80 --no-pager
 2. 从服务器本地绕开隧道测一遍（确认不是隧道的问题）：
 
    ```bash
-   curl -s -o /dev/null -w '%{http_code}\n' <你的域名>/login
+   curl -s -o /dev/null -w '%{http_code}\n' https://<你的域名>/login
    ```
 
    这条返回 200 说明服务本身活着，问题在浏览器与隧道之间。
@@ -157,7 +157,7 @@ systemctl restart deva-web
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 systemctl is-active deva-web
 curl -s -o /dev/null -w '/login %{http_code}\n' http://127.0.0.1:8786/login
-curl -s -o /dev/null -w '公网 %{http_code}\n' <你的域名>/login
+curl -s -o /dev/null -w '公网 %{http_code}\n' https://<你的域名>/login
 cat apps/desktop/out/web/build-info.json     # 提交号 == git rev-parse --short HEAD 才对
 ```
 
