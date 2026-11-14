@@ -1,7 +1,7 @@
 /**
  * 对话流里的单条消息：用户正文（引用、@提及）与助手回复。
  */
-import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useContext, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, Bot, Check, Copy, RotateCcw, TextQuote, Trash2 } from 'lucide-react'
 import { AttachmentList } from './attachments'
 import type { Persona } from '../mock/extensions'
@@ -197,38 +197,12 @@ function MsgActions({
   canAct: boolean
   onRewind?: (turn: number) => void
   onDelete?: (turn: number) => void
-  /** 把选区（Markdown 引用格式）交给输入框顶部的引用条。不给则不显示「引用」。 */
+  /** 把这段正文放进输入框顶部的引用条。不给则不显示「引用」。 */
   onQuote?: (quote: string) => void
 }): React.JSX.Element | null {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
-  const [quote, setQuote] = useState('')
   const rootRef = useRef<HTMLDivElement>(null)
-
-  // 选区变化时重算：只有整段选区都落在本条消息里才给「引用」。
-  // 挂在 document 上（selectionchange 不冒泡到元素），每屏可见的消息各挂一个，量很小。
-  useEffect(() => {
-    if (!onQuote) return
-    const read = (): void => {
-      const sel = window.getSelection()
-      const host = rootRef.current?.closest('.cf-msg')
-      let next = ''
-      if (
-        sel &&
-        !sel.isCollapsed &&
-        host &&
-        sel.anchorNode &&
-        sel.focusNode &&
-        host.contains(sel.anchorNode) &&
-        host.contains(sel.focusNode)
-      ) {
-        next = quoteOf(sel)
-      }
-      setQuote((prev) => (prev === next ? prev : next))
-    }
-    document.addEventListener('selectionchange', read)
-    return () => document.removeEventListener('selectionchange', read)
-  }, [onQuote])
 
   const copy = (): void => {
     if (!text) return
@@ -251,11 +225,39 @@ function MsgActions({
       viaBridge()
     }
   }
+
+  /**
+   * 引用：按钮**常驻**（和复制 / 回到此处 / 删除这一轮 一样），不等选区、不等长按。
+   *
+   * 点下去时的取法：本条消息里**有选区就引那一段**（用户先在正文里划了两句），否则引**整条**。
+   * 引用后清掉选区——留着会跟浏览器自带的长按菜单叠在一起，也容易让人以为还在等操作。
+   */
+  const quote = (): void => {
+    if (!onQuote) return
+    const sel = window.getSelection()
+    const host = rootRef.current?.closest('.cf-msg')
+    let body = ''
+    if (
+      sel &&
+      !sel.isCollapsed &&
+      host &&
+      sel.anchorNode &&
+      sel.focusNode &&
+      host.contains(sel.anchorNode) &&
+      host.contains(sel.focusNode)
+    ) {
+      body = quoteOf(sel)
+    }
+    // 没有选区（或选区不在本条里）就引整条正文。
+    onQuote(body || text.trim())
+    sel?.removeAllRanges()
+  }
+
   const turnable = canAct && typeof turn === 'number' && turn >= 0
-  /** 正文为空（例如还没输出、或这一轮只有工具调用）时不给复制：点了什么也拿不到。 */
+  /** 正文为空（例如还没输出、或这一轮只有工具调用）时不给复制与引用：点了什么也拿不到。 */
   const canCopy = text.trim().length > 0
   // 一个按钮都排不出来就不占位（否则气泡下面会多出一条空白）。
-  if (!canCopy && !turnable && !quote) return null
+  if (!canCopy && !turnable) return null
   return (
     <div className="cf-msg__acts" ref={rootRef}>
       {canCopy && (
@@ -270,17 +272,13 @@ function MsgActions({
           <span>{copied ? t('chat.md.copied') : t('common.copy')}</span>
         </button>
       )}
-      {quote && onQuote && (
+      {canCopy && onQuote && (
         <button
           type="button"
           className="cf-msg__act"
-          onClick={() => {
-            onQuote(quote)
-            // 引用完清掉选区：留着会一直显示这个按钮，也会挡住后面的长按。
-            window.getSelection()?.removeAllRanges()
-            setQuote('')
-          }}
+          onClick={quote}
           title={t('cf.quote')}
+          aria-label={t('cf.quote')}
         >
           <TextQuote size={13} />
           <span>{t('cf.quote')}</span>
