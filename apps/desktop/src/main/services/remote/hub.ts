@@ -16,6 +16,7 @@ import {
   upsertPersona,
   type PersonaRecord
 } from '../personas'
+import { personaWorkspace } from '../role-home'
 import { resolveDefaultEffort, resolveDefaultModel, resolveModelRefOrNull } from '../model-resolve'
 import { previewSchedule } from '../tasks'
 import type { TaskCreateInput } from '../tasks-types'
@@ -35,6 +36,7 @@ import type {
   NoticeView,
   PromptView,
   RemoteAdapter,
+  RemoteUser,
   TurnBlock,
   TurnPage,
   TurnStatus
@@ -192,36 +194,42 @@ function isAuthorized(id: ChannelId, userId: string): boolean {
   return getChannelConfig(id).users.some((u) => u.id === userId)
 }
 
-async function tryPair(msg: InboundMessage, code: string): Promise<void> {
-  const id = msg.chat.channel
+/**
+ * 用配对码把一个平台用户加入白名单（chatId = 与其私聊的会话 id）。IM 上由 /pair 指令触发（tryPair），
+ * 手机网页端在扫码页里直接调用。失败给出可直接展示给用户的原因。
+ */
+export function redeemPairCode(
+  id: ChannelId,
+  user: RemoteUser,
+  chatId: string,
+  code: string
+): { ok: true } | { ok: false; message: string } {
   const p = pairing.get(id)
   if (!p || p.expiresAt < Date.now()) {
     pairing.delete(id)
-    return notice(msg.chat, {
-      tone: 'warning',
-      text: '配对码已过期或尚未生成。请在电脑端 Deva 的「机器人」面板里生成新的配对码。'
-    })
+    return { ok: false, message: '配对码已过期或尚未生成。请在电脑端 Deva 的「手机」面板里生成新的配对码。' }
   }
   if (code !== p.code) {
     p.failures++
     if (p.failures >= PAIR_MAX_FAILURES) pairing.delete(id)
-    return notice(msg.chat, {
-      tone: 'error',
-      text:
-        p.failures >= PAIR_MAX_FAILURES
-          ? '配对码错误次数过多，已作废。请在电脑端重新生成。'
-          : '配对码不正确，请核对后重发。'
-    })
+    return {
+      ok: false,
+      message:
+        p.failures >= PAIR_MAX_FAILURES ? '配对码错误次数过多，已作废。请在电脑端重新生成。' : '配对码不正确，请核对后重发。'
+    }
   }
   pairing.delete(id)
   updateChannelConfig(id, (c) => ({
     ...c,
-    users: [
-      ...c.users.filter((u) => u.id !== msg.user.id),
-      { id: msg.user.id, name: msg.user.name, chatId: msg.chat.chatId, pairedAt: Date.now() }
-    ]
+    users: [...c.users.filter((u) => u.id !== user.id), { id: user.id, name: user.name, chatId, pairedAt: Date.now() }]
   }))
   notifyState()
+  return { ok: true }
+}
+
+async function tryPair(msg: InboundMessage, code: string): Promise<void> {
+  const r = redeemPairCode(msg.chat.channel, msg.user, msg.chat.chatId, code)
+  if (!r.ok) return notice(msg.chat, { tone: r.message.includes('不正确') ? 'error' : 'warning', text: r.message })
   await notice(msg.chat, { tone: 'success', title: '配对成功', text: `现在可以直接给我发消息了。\n\n${HELP}` })
 }
 
@@ -275,7 +283,7 @@ function homeChats(sessionId?: string): ChatAddress[] {
 // ───────── 回复范围 ─────────
 
 /** 对话是否落在机器人的回复范围内（见 store.ts ReplyScope）；没绑定角色、或角色已不存在的对话算默认角色。 */
-function allows(channel: ChannelId, s: { id: string; personaId?: string }): boolean {
+export function allows(channel: ChannelId, s: { id: string; personaId?: string }): boolean {
   const { scope } = getChannelConfig(channel)
   if (scope.mode === 'personas') return scope.personas.includes(resolvePersonaId(s.personaId))
   if (scope.mode === 'sessions') return scope.sessions.includes(s.id)
@@ -283,21 +291,21 @@ function allows(channel: ChannelId, s: { id: string; personaId?: string }): bool
 }
 
 /** 同 allows，按 id 查对话。「全部」不看对话在不在（任务首跑前就失败时，对话还没建出来，通知照样要推）。 */
-function inScope(channel: ChannelId, sessionId: string): boolean {
+export function inScope(channel: ChannelId, sessionId: string): boolean {
   if (getChannelConfig(channel).scope.mode === 'all') return true
   const s = getSession(sessionId)
   return !!s && allows(channel, s)
 }
 
 /** 本机器人能用的已启用角色（回复范围限定了角色时只含选中的）。 */
-function allowedPersonas(channel: ChannelId): PersonaRecord[] {
+export function allowedPersonas(channel: ChannelId): PersonaRecord[] {
   const { scope } = getChannelConfig(channel)
   const all = listPersonas().filter((p) => p.enabled)
   return scope.mode === 'personas' ? all.filter((p) => scope.personas.includes(p.id)) : all
 }
 
 /** 回复范围限定了角色、却没有一个可用（选中的都删了 / 停用了）：新建不了对话。 */
-const NO_PERSONA = '回复范围内没有可用的角色，请在电脑端「机器人」里调整回复范围。'
+const NO_PERSONA = '回复范围内没有可用的角色，请在电脑端「手机」面板里调整回复范围。'
 
 function sessionTitle(sessionId: string): string {
   return getSession(sessionId)?.title || '新对话'
@@ -339,6 +347,17 @@ interface TurnTrack {
 const turns = new Map<string, TurnTrack>()
 /** 对话 → 正在跑的回合（/stop 用）。 */
 const sessionTurn = new Map<string, string>()
+
+/** 某对话正在跑的回合 id（手机网页端停止回复用）。 */
+export function runningTurnOf(sessionId: string): string | undefined {
+  return sessionTurn.get(sessionId)
+}
+
+/** 某对话是否停在交互卡上（提问 / 计划 / 挂载）等你决定。 */
+export function sessionWaiting(sessionId: string): boolean {
+  for (const p of prompts.values()) if (p.sessionId === sessionId && p.view.state === 'open' && !isCard(p.view)) return true
+  return false
+}
 
 function ensureTrack(turnId: string, sessionId: string, eager: boolean): TurnTrack {
   let t = turns.get(turnId)
@@ -404,7 +423,7 @@ function setTurnTyping(t: TurnTrack, on: boolean): void {
 }
 
 /** 工具调用在 IM 上只化作一句「正在…」状态提示（不展示参数与结果）。 */
-const TOOL_HINTS: Record<string, string> = {
+export const TOOL_HINTS: Record<string, string> = {
   read_file: '正在读取文件',
   list_dir: '正在查看目录',
   glob: '正在查找文件',
@@ -425,7 +444,7 @@ const TOOL_HINTS: Record<string, string> = {
   send_to_subagent: '正在交给子助手处理'
 }
 
-const RETRY_TEXT: Record<string, string> = {
+export const RETRY_TEXT: Record<string, string> = {
   truncated: '回复被截断，正在续写',
   empty: '上一步没有输出，正在追问',
   context: '上下文超限，压缩后重试',
@@ -822,16 +841,17 @@ function onBusEvent({ turnId, sessionId, event }: ChatEventPayload): void {
       turnId,
       sessionId,
       event.type === 'ask_user'
-        ? { kind: 'ask', key: event.key, sessionTitle: title, questions: event.questions, state: 'open' }
+        ? { kind: 'ask', key: event.key, sessionId, sessionTitle: title, questions: event.questions, state: 'open' }
         : event.type === 'plan_review'
-          ? { kind: 'plan', key: event.key, sessionTitle: title, plan: event.plan, state: 'open' }
+          ? { kind: 'plan', key: event.key, sessionId, sessionTitle: title, plan: event.plan, state: 'open' }
           : {
               kind: 'mount',
               key: event.key,
+              sessionId,
               sessionTitle: title,
-              tool: event.tool,
-              path: event.path,
-              state: 'open'
+              ...(event.question ? { question: event.question } : {}),
+              state: 'open',
+              ...(event.member ? { member: event.member } : {})
             }
     )
     scheduleFlush(t, true)
@@ -860,6 +880,7 @@ function onNotice(n: AppNotice): void {
     void notice(chat, {
       title: n.title,
       text: n.body,
+      sessionId: sid,
       buttons: sid && !here ? [{ label: '切换到此对话', value: { k: 'use', sid } }] : undefined
     })
   }
@@ -942,7 +963,7 @@ async function handleMessage(msg: InboundMessage): Promise<void> {
     return notice(msg.chat, {
       tone: 'warning',
       title: '尚未配对',
-      text: '请让机器人的主人在电脑端 Deva 的「机器人」面板里生成邀请码，然后在这里发送：\n/pair 邀请码'
+      text: '请让机器人的主人在电脑端 Deva 的「手机」面板里生成邀请码，然后在这里发送：\n/pair 邀请码'
     })
   }
   // 扫码创建时还不知道私聊 chatId（主动打招呼也可能失败）：用户第一次发消息时补上。
@@ -1078,7 +1099,7 @@ async function runCommand(chat: ChatAddress, name: string, arg: string, trail: T
  * 按名称 / id 找本机器人能用的角色。未指定角色（空名）固定用默认角色 Deva，不挑列表里的第一个——
  * 除非回复范围限定了角色且不含 Deva，才取范围内的第一个。
  */
-function pickPersona(channel: ChannelId, name: string): { id: string; name: string } | null {
+export function pickPersona(channel: ChannelId, name: string): { id: string; name: string } | null {
   if (!name) {
     const { scope } = getChannelConfig(channel)
     if (scope.mode !== 'personas' || scope.personas.includes(DEFAULT_PERSONA_ID))
@@ -1093,23 +1114,32 @@ function genSessionId(): string {
   return `sess_${Date.now().toString(36)}_${randomInt(0, 36 ** 4).toString(36)}`
 }
 
-function createSession(chat: ChatAddress, personaId?: string): string {
-  const sid = genSessionId()
+/**
+ * 按角色新建一个对话（不绑定到任何私聊；手机网页端直接用，IM 的 createSession 再绑定）。
+ * sid：手机网页端先定好的 id（调用方已校验格式、确认不存在）；缺省现生成。
+ */
+export function createSessionFor(channel: ChannelId, personaId?: string, sid = genSessionId()): string {
   const persona = personaId ? getPersona(personaId) : null
   // 与桌面「新建对话」同形：立即建档（左侧列表可见），模型快照角色偏好（空 = 跟随默认）。
-  ensureSession(sid, { personaId, focusRoot: null, model: persona?.model || undefined })
+  // 角色设了工作区就一开始挂载它（同桌面新建对话，见 role-home.ts personaWorkspace）。
+  ensureSession(sid, { personaId, focusRoot: personaWorkspace(personaId), model: persona?.model || undefined })
   saveSession(sid)
   // 桌面左侧列表只在回合开始时刷新，/new 建的空对话不发消息就一直看不到：单独通知一次。
   publishSessionsChanged()
-  bind(chat, sid)
   // 回复范围限定了对话：在手机上新建的对话自动纳入，否则一建好就落在范围外、收不到回复。
-  if (getChannelConfig(chat.channel).scope.mode === 'sessions') {
-    updateChannelConfig(chat.channel, (c) => ({
+  if (getChannelConfig(channel).scope.mode === 'sessions') {
+    updateChannelConfig(channel, (c) => ({
       ...c,
       scope: { ...c.scope, sessions: [...c.scope.sessions, sid] }
     }))
     notifyState()
   }
+  return sid
+}
+
+function createSession(chat: ChatAddress, personaId?: string): string {
+  const sid = createSessionFor(chat.channel, personaId)
+  bind(chat, sid)
   return sid
 }
 

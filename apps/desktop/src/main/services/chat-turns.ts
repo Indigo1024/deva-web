@@ -5,8 +5,11 @@ import type {
   ChatInsertRequest,
   ChatInsertResult,
   ChatModelConfig,
-  ChatSendRequest
+  ChatSendRequest,
+  InsertAttachment,
+  TakenInserts
 } from '../../shared/chat-protocol'
+import { buildInsertDelivery, cleanInsertAttachments } from './chat-inserts'
 import {
   isEffortLevel,
   type ContentPart,
@@ -26,7 +29,10 @@ import { buildToolSearchTool, fitToolSearch, skillToolUsages, unknownUsages } fr
 import { readMainTool, replyTaskTool, reportToMainTool, rootLabel } from './members'
 import { MEMBER_EXCLUDED, MEMBER_FOLDER_ONLY, UNATTENDED_EXCLUDED } from './tool-catalog'
 import { slashTokens } from '../../shared/slash'
-import { memoryPromptSection } from './memory'
+import { skillInvocationText } from './skill-invoke'
+import type { MemoryAccess, MemoryScope } from './memory'
+import { memoryPromptSection } from './memory-prompt'
+import { tidyPendingMemories } from './memory-tidy'
 import { loadProjectDoc, projectDocPromptSection } from './project-doc'
 import { DEFAULT_PERSONA_ID, getPersona, resolvePersonaId } from './personas'
 import {
@@ -54,6 +60,7 @@ import {
   type StoredSession
 } from './chat-store'
 import {
+  ATTACHMENTS_ONLY_QUESTION,
   buildAttachmentPart
 } from './attachments'
 import { isEn } from '../locale'
@@ -107,6 +114,8 @@ import {
   skillDirNote
 } from './chat-prompts'
 import { pendingNotices, takeNotices, wakeForNotices } from './background-tasks'
+import { roleHome } from './role-home'
+import { buildMountTool } from './workspace-mount'
 import { pendingHandoffs, deliverResult, finishInform, taskAsks, reportTaskAsk } from './chat-task-handoff'
 import {
   memberDispatches,
@@ -124,16 +133,18 @@ import {
   handleMentions
 } from './chat-members'
 import { runAgentLoop } from './agent-loop'
+import { publishStepSaved } from './chat-bus'
 
 /**
  * 回合进行中用户插入、还没交给模型的消息（键 = sessionId，按插入先后）。去向：
  *  · 回合还有下一步 → 当前步骤结束后随工具结果一并交给模型（几条合并成一段，见 INSERT_MARKER）；
  *  · 回合正常结束时仍未送达（模型已在写最后的回复）→ 合并成一条普通消息发出，自动开始下一轮；
  *  · 回合被停止或出错 → 不再发出，原文退回渲染层的输入框（inserts_returned）。
- * 用户也可以在送达前撤回（chat:withdraw-inserts）。
+ * 用户也可以在送达前撤回（chat:withdraw-inserts）。附件只存路径，送达时才读（见 chat-inserts.ts）。
  */
 interface PendingInsert {
   text: string
+  attachments: InsertAttachment[]
   /** 插入时的模型：来不及送达、改作下一轮发出时，本对话模型解析不了就用它（同 chat:send）。 */
   model: ChatModelConfig
   /** 从手机端插入的（改作下一轮发出时，全是手机端的才按手机端发起处理）。 */
@@ -196,7 +207,13 @@ const insertableTurns = new Set<string>()
 
 /** 推送某会话待送达的插入消息（插入 / 送达 / 撤回 / 回合结束后）。 */
 function emitInserts(sessionId: string): void {
-  emit('', sessionId, { type: 'inserts', pending: (pendingInserts.get(sessionId) ?? []).map((e) => e.text) })
+  emit('', sessionId, {
+    type: 'inserts',
+    pending: (pendingInserts.get(sessionId) ?? []).map((e) => ({
+      text: e.text,
+      attachments: e.attachments.map((a) => a.name)
+    }))
+  })
 }
 
 /**
@@ -205,11 +222,18 @@ function emitInserts(sessionId: string): void {
  */
 export function insertMessage(req: ChatInsertRequest, fromRemote = false, dispatchId?: string): ChatInsertResult {
   const text = req.text.trim()
-  if (!text) return { ok: false, reason: 'empty' }
+  const attachments = cleanInsertAttachments(req.attachments)
+  if (!text && !attachments.length) return { ok: false, reason: 'empty' }
   const turnId = busySessions.get(req.sessionId)
   if (!turnId) return { ok: false, reason: 'idle' }
   if (!insertableTurns.has(turnId)) return { ok: false, reason: 'busy' }
-  const entry: PendingInsert = { text, model: req.model, fromRemote, ...(dispatchId ? { dispatchId } : {}) }
+  const entry: PendingInsert = {
+    text,
+    attachments,
+    model: req.model,
+    fromRemote,
+    ...(dispatchId ? { dispatchId } : {})
+  }
   const queue = pendingInserts.get(req.sessionId)
   if (queue) queue.push(entry)
   else pendingInserts.set(req.sessionId, [entry])
@@ -217,15 +241,21 @@ export function insertMessage(req: ChatInsertRequest, fromRemote = false, dispat
   return { ok: true }
 }
 
-/** 取走某会话全部待送达的插入消息，合并成一段原文（没有则 null）。 */
-export function takeInserts(sessionId: string): string | null {
+/** 取走某会话全部待送达的插入消息：原文合并成一段，附件按插入先后排、按路径去重（没有则 null）。 */
+export function takeInserts(sessionId: string): TakenInserts | null {
   const queue = pendingInserts.get(sessionId)
   if (!queue?.length) return null
   pendingInserts.delete(sessionId)
   emitInserts(sessionId)
   const dispatched = queue.flatMap((e) => (e.dispatchId ? [e.dispatchId] : []))
   if (dispatched.length) markDispatchesDelivered(sessionId, dispatched)
-  return queue.map((e) => e.text).join('\n\n')
+  return {
+    text: queue
+      .map((e) => e.text)
+      .filter(Boolean)
+      .join('\n\n'),
+    attachments: cleanInsertAttachments(queue.flatMap((e) => e.attachments))
+  }
 }
 
 /**
@@ -235,15 +265,23 @@ export function takeInserts(sessionId: string): string | null {
 function flushInserts(sessionId: string, endReason: StopReason): boolean {
   const queue = pendingInserts.get(sessionId)
   if (!queue?.length) return false
-  const text = takeInserts(sessionId) as string
-  const giveBack = (): void => emit('', sessionId, { type: 'inserts_returned', text })
+  const { text, attachments } = takeInserts(sessionId) as TakenInserts
+  const giveBack = (): void =>
+    emit('', sessionId, { type: 'inserts_returned', text, ...(attachments.length ? { attachments } : {}) })
   if (endReason === 'aborted' || endReason === 'error' || shuttingDown) {
     giveBack()
     return false
   }
-  // 没有附件时 sendMessage 在起轮之前不会让出执行权：返回时下一轮已经开始，会话又是忙的。
+  // 没有附件时 sendMessage 在起轮之前不会让出执行权：返回时下一轮已经开始，会话又是忙的。带附件时要先读文件，
+  // 这一小段会话是空闲的：期间别处抢先起了一轮的话，sendMessage 报「对话正忙」，消息连同附件退回输入框。
   sendMessage(
-    { sessionId, text, model: queue[queue.length - 1].model, workspaceRoot: null },
+    {
+      sessionId,
+      text,
+      model: queue[queue.length - 1].model,
+      workspaceRoot: null,
+      ...(attachments.length ? { attachments: attachments.map((a) => a.path) } : {})
+    },
     queue.every((e) => e.fromRemote)
   ).catch(giveBack)
   return true
@@ -444,10 +482,11 @@ export async function runTurn(
       signal: controller.signal,
       sessionId,
       canPromptUser: !taskAsk && (trigger === 'desktop' || trigger === 'member'),
-      // 成员会话：全局记忆只读（用户本人的通用偏好由主角色记），项目私有记忆可写。
+      // memory_write 撞上限时用本轮模型归纳旧记忆（定时任务记忆只读，用不到）。
+      memoryModel: turnModel,
+      // 成员会话：浏览器交接由主对话提醒（记忆的读写方式见下方 memoryAccess）。
       ...(isMember
         ? {
-            globalMemoryReadonly: true,
             memberHandoff: {
               name: memberRef?.name ?? notifyTitle(sessionId),
               notify: (reason: string) => notifyPending(turnId, sessionId, { kind: 'browser', reason })
@@ -461,6 +500,26 @@ export async function runTurn(
     const rolePersonaId = resolvePersonaId(session.personaId)
     ctx.personaId = rolePersonaId
     const persona = getPersona(rolePersonaId)
+    // 没挂载工作区时的相对路径基准与 run_command 工作目录：本角色的默认工作区（见 role-home.ts）。
+    ctx.homeDir = roleHome(rolePersonaId)
+    // 各层记忆的读写方式（方案 design/memory-v2-plan.html）：主对话全可写；项目成员全局与角色记忆只读（用户本人的偏好与
+    // 角色的经验由主对话里的角色来记）、项目记忆可写；定时任务等无人值守的回合全只读。
+    const memoryAccess: MemoryAccess = {
+      global: isMember || unattended ? 'ro' : 'rw',
+      role: { personaId: rolePersonaId, name: persona?.name ?? 'Deva', mode: isMember || unattended ? 'ro' : 'rw' },
+      project: unattended ? 'ro' : 'rw'
+    }
+    ctx.memoryAccess = memoryAccess
+    // 旧版记忆待整理时，后台用本轮模型补上类型与标题（不等它，见 memory-tidy.ts）。
+    tidyPendingMemories(
+      [
+        { kind: 'global' },
+        { kind: 'role', personaId: rolePersonaId },
+        ...(effectiveRoot ? [{ kind: 'project', root: effectiveRoot } as MemoryScope] : [])
+      ],
+      turnModel
+    )
+    const workDir = { root: effectiveRoot, home: ctx.homeDir }
 
     // 提示缓存已过期：先把较早的大块工具结果换成占位（原文存文件，不调模型）。缓存反正要重建，此时改写历史
     // 不多花钱；缓存还热时不动（见 tool-results.ts）。清掉的往往足以让下面的摘要压缩不必发生。
@@ -508,6 +567,8 @@ export async function runTurn(
       buildPlanTool(),
       buildTodoTool(),
       buildSkillTool(),
+      // 请用户挂载工作区（见 workspace-mount.ts）；定时任务的工具表按目录表剔除它。
+      buildMountTool(),
       // 查看按需加载工具（browser、create_* 等，见 tool-search.ts）的完整用法；这几个工具在各类对话里至少剩 browser。
       buildToolSearchTool(),
       subagentTool,
@@ -561,18 +622,18 @@ export async function runTurn(
               addedAt: 0
             },
             owner: personaName(parentSession),
-            workspaceRoot: effectiveRoot,
-            folder: effectiveRoot ? rootLabel(effectiveRoot, mainRoot) : '未指定（需要时用户会为你选择，或使用绝对路径）',
+            dir: workDir,
+            folder: effectiveRoot ? rootLabel(effectiveRoot, mainRoot) : '未指定（需要时调用 mount_workspace 请用户选择，或使用绝对路径）',
             personas,
-            // 全局记忆只读；有文件夹时可读写该文件夹的项目私有记忆。
-            memory: memoryPromptSection({ writable: false, projectWritable: true, root: effectiveRoot }),
+            // 全局与角色记忆只读；有文件夹时可读写该文件夹的项目记忆。
+            memory: memoryPromptSection(memoryAccess, effectiveRoot),
             projectDoc
           })
         : unattended
         ? sealedSystemPrompt(
-            effectiveRoot,
+            workDir,
             personas,
-            memoryPromptSection({ writable: false, root: effectiveRoot }),
+            memoryPromptSection(memoryAccess, effectiveRoot),
             projectDoc,
             handoffOwner
               ? { owner: handoffOwner }
@@ -581,9 +642,9 @@ export async function runTurn(
                 : undefined
           )
         : systemPrompt(
-            effectiveRoot,
+            workDir,
             personas,
-            memoryPromptSection({ writable: true, root: effectiveRoot }),
+            memoryPromptSection(memoryAccess, effectiveRoot),
             projectDoc
           ),
       tools,
@@ -652,9 +713,16 @@ export async function runTurn(
       // 后台子智能体在本轮期间结束：通知随下一步的工具结果交给模型。
       takeNotices: () => takeNotices(sessionId),
       // 用户在本轮进行中插入的消息：同样随下一步的工具结果交给模型。
-      takeInserts: () => takeInserts(sessionId),
+      takeInserts: async () => {
+        const taken = takeInserts(sessionId)
+        return taken ? buildInsertDelivery(taken, turnModel.adapter) : null
+      },
       // 逐步落盘：长回合中途崩溃 / 强退，已完成的步骤仍在磁盘上。
-      onStep: () => saveProject(sessionId),
+      // 落盘后通知远程端（手机按对话记录补拉这一轮新写完的回复）。
+      onStep: () => {
+        saveProject(sessionId)
+        publishStepSaved(sessionId)
+      },
       // 轮中压缩：旧读数作废（别让 finally 把压缩前的大数存成下轮触发依据）；轮起点重新定位到本轮请求之后
       // （摘要插在本轮中间，不是轮起点；被并入摘要的步骤都带工具调用，不影响「是否产出可见回复」的判定）。
       compact: midTurnCompactor(turnId, sessionId, session, turnModel, controller, () => {
@@ -918,16 +986,11 @@ async function startTurn(
   if (activated.length) {
     const lead = activated.find((x) => x.start === text.length - text.trimStart().length)
     const rest = (lead ? text.slice(0, lead.start) + text.slice(lead.end) : text).trim()
-    const names = activated.map((x) => x.loaded.name)
-    effectiveText =
-      `（用户通过 ${names.map((n) => `/${n}`).join('、')} 显式激活了技能${names.map((n) => `「${n}」`).join('')}，请严格据下述指令完成本次任务）\n` +
-      activated
-        .map(
-          ({ loaded }) =>
-            `===== 技能指令：${loaded.name} =====\n${skillDirNote(loaded.dir)}${loaded.instructions}\n===== 指令结束 =====`
-        )
-        .join('\n') +
-      (rest ? `\n\n${lead ? '用户补充' : '用户的消息'}：${rest}` : '')
+    effectiveText = skillInvocationText(
+      activated.map(({ loaded }) => ({ name: loaded.name, body: skillDirNote(loaded.dir) + loaded.instructions })),
+      rest,
+      !!lead
+    )
     // 成员会话不提供创建类工具，那几个的用法不附。
     const usable = [...new Set(activated.flatMap((x) => x.loaded.allowedTools))].filter(
       (n) => !session.parentId || !MEMBER_EXCLUDED.has(n)
@@ -947,8 +1010,11 @@ async function startTurn(
   }
   // 读附件期间另一端可能抢先起了一轮：落历史前再确认一次。
   if (historyLocked(sessionId)) throw busyError()
-  const question = effectiveText.trim() || (parts.length ? '请理解并处理上述附件。' : '')
-  const questionText = notes.length ? `${question}\n（${notes.join('；')}）` : question
+  const question = effectiveText.trim() || (parts.length ? ATTACHMENTS_ONLY_QUESTION : '')
+  const withNotes = (s: string): string => (notes.length ? `${s}\n（${notes.join('；')}）` : s)
+  const questionText = withNotes(question)
+  // 技能展开改写了正文：气泡仍显示用户的原话（重开对话、手机端、成员读主对话都按它），技能全文只给模型。
+  const shown = effectiveText !== text ? withNotes(text.trim()) : undefined
   // 「仅恢复代码」后的首条消息：把回滚说明作为**第一个**独立 text 块带给模型（展示层只取最后一个
   // text 块作气泡正文，故用户看不到它），用一次即清。
   if (session.restoreNote) {
@@ -974,8 +1040,8 @@ async function startTurn(
   // 用户直接在成员会话里交代事情：名单上记下它在做什么（成员卡片显示任务标题）。派来的上一项任务还没做完的，
   // 这一轮算接着做它（任务标题不变，完成后交回主对话，见 resumeMemberTask）。
   if (session.parentId && !resumeMemberTask(session, model)) noteMemberDirectTask(session, text)
-  if (parts.length) {
-    parts.push({ type: 'text', text: questionText })
+  if (parts.length || shown !== undefined) {
+    parts.push(shown !== undefined ? { type: 'text', text: questionText, display: shown } : { type: 'text', text: questionText })
     history.push({ role: 'user', content: parts })
   } else {
     history.push({ role: 'user', content: questionText })

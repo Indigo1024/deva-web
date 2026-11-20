@@ -39,6 +39,9 @@ export const ATTACH_FOLDER_PREFIX = '[附件文件夹] '
 /** 只给位置的文件附件注入模型时的前缀标记：其后是绝对路径（首行），供历史重建识别为「文件」。 */
 export const ATTACH_PATH_PREFIX = '[附件文件路径] '
 
+/** 只发了附件、没写字时代填的提问正文（模型需要一句话；手机端不把它当用户的话显示）。 */
+export const ATTACHMENTS_ONLY_QUESTION = '请理解并处理上述附件。'
+
 /** 拖入 / 粘贴的条目里认出的文件夹。 */
 export interface DroppedFolder {
   path: string
@@ -144,6 +147,14 @@ function pasteName(raw: string, mime: string): string {
   const p2 = (n: number): string => String(n).padStart(2, '0')
   const ts = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`
   return `粘贴-${ts}${ext}`
+}
+
+/**
+ * 手机上传来的文件（remote/web/files.ts 已写到 DEVA_HOME 的上传目录）：按选择框同样的规则登记白名单，
+ * 读得进消息的照常读，读不进的只交位置。只有主进程自己写下的文件会走到这里，手机给不出任意路径。
+ */
+export function stageUploadedFile(abs: string, size: number): PickedAttachment {
+  return inspect(abs, size, true)
 }
 
 export function registerAttachmentsIpc(getWindow: () => BrowserWindow | null): void {

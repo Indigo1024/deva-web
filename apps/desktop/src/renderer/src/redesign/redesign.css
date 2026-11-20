@@ -784,6 +784,77 @@ body.cf-resizing-y * {
 :root[data-theme='dark'] .cf-thread.is-active {
   --row-bg: color-mix(in srgb, var(--bg-panel), var(--accent) 20%);
 }
+/* 多选（见 ThreadSelect.tsx）：勾上的行铺主题色底；勾选框是压在头像右下角的小圆，外圈一道行底色的环与头像隔开 */
+.cf-thread.is-picked {
+  background: var(--bg-selected);
+  --row-bg: color-mix(in srgb, var(--bg-panel), var(--accent) 12%);
+}
+:root[data-theme='dark'] .cf-thread.is-picked {
+  --row-bg: color-mix(in srgb, var(--bg-panel), var(--accent) 20%);
+}
+.cf-thread__pick {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  z-index: 2;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--bg-panel);
+  box-shadow: 0 0 0 2px var(--row-bg);
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+.cf-thread.is-picked .cf-thread__pick {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+/* 多选操作条：贴在对话列表底部。左边已选数量与全选，右边归档 / 删除 / 退出 */
+.cf-railsel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.cf-railsel__count {
+  color: var(--fg-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.cf-railsel__all {
+  border: none;
+  background: transparent;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.cf-railsel__all:hover {
+  background: var(--bg-hover);
+}
+.cf-railsel__actions {
+  margin-left: auto;
+  display: flex;
+  gap: 2px;
+}
+.cf-railsel .cf-iconbtn:disabled,
+.cf-railsel__all:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.cf-railsel .cf-iconbtn:disabled:hover {
+  background: transparent;
+  color: var(--fg-subtle);
+}
+.cf-railsel__danger:not(:disabled):hover {
+  color: var(--danger);
+}
 /* 群组头像（有成员的对话）：两人左右堆叠、三人三角排布、四人 2×2 稍微堆叠、更多时第 4 枚写 +N（GroupFace） */
 .cf-thread__face {
   position: relative;
@@ -2069,7 +2140,7 @@ body.cf-resizing-y * {
 
 /*
  * 成员在等你处理（对话末尾，见 MemberAsks，对比稿 design/member-ask-inline.html 方案 A）：每件一枚居中胶囊，外观同上面的
- * .cf-mprogress__pill；展开的那件下面直接是卡片（宽同定时任务交来的结果 560px，卡头由胶囊代替）。处理完换成回执胶囊，
+ * .cf-mprogress__pill；展开的那件下面直接是卡片（宽同定时任务交来的结果 560px，计划卡除外、同消息正文宽；卡头由胶囊代替）。处理完换成回执胶囊，
  * 全部处理完后一起收起（MemberAsks 的 MEMBER_RECEIPT_HOLD_MS / MEMBER_ROW_OUT_MS 与这里的 --fold-dur 对应）。
  * 几件排成一组（.cf-masks）：胶囊之间行距 8px，比消息列的 20px 紧；展开的卡片与下一枚胶囊之间 16px，免得胶囊看着像挂在
  * 上一张卡下面。一行是一个折叠块，收起时连同组内行距一起收掉；整组都收起时，组连同消息列的行距一起收掉——
@@ -2168,6 +2239,10 @@ button.cf-mask__pill:hover {
 }
 .cf-mask__fold.is-closed {
   margin-top: -6px;
+}
+/* 计划卡正文较长：与单独会话里的计划卡同宽（消息正文列 = 整列减去 32px 头像列与列间距），仍居中 */
+.cf-mask__fold--plan {
+  width: calc(100% - 32px - var(--space-3));
 }
 .cf-mask__card > .ask,
 .cf-mask__card > .msg__plan,
@@ -2823,33 +2898,10 @@ button.cf-mask__pill:hover {
   background: var(--bg-hover);
   color: var(--fg);
 }
-/* 模型选择器吸右：占尽左侧空白，把「模型选择器 + 发送键」一并推到工具条右端，
-   模型切换恰落在发送键之前（📎 / 工作区 chip 仍留在左侧）。仅作用于对话输入框，
-   不影响任务表单的同款选择器。 */
-.cf-composer .model-pick {
+/* 模型区（上下文圆环 + 模型 + 思考等级）吸右：占尽左侧空白，把「模型区 + 发送键」一并推到工具条右端
+   （📎 / 工作区 chip 仍留在左侧）。仅作用于对话输入框，不影响任务表单的同款选择器。样式见 model-panel.css。 */
+.cf-composer .cf-mp {
   margin-left: auto;
-}
-/* 思考等级选择器紧贴模型选择器：只让第一个吃掉左侧空白；再抵掉工具条的 gap、收窄两枚贴片
-   相邻一侧的内边距，二者读作一组（贴片无底色，否则中间会空出一截比到发送键还宽的距离）。 */
-.cf-composer .model-pick + .model-pick {
-  margin-left: calc(-1 * var(--space-1));
-}
-.cf-composer .model-pick:has(+ .model-pick) .chip {
-  padding-right: 4px;
-}
-.cf-composer .model-pick + .model-pick .chip {
-  padding-left: 4px;
-}
-/* 思考等级菜单项：档位名 + 一行说明。 */
-.cf-effort__text {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.cf-effort__hint {
-  font-size: 11.5px;
-  font-weight: 400;
-  color: var(--fg-subtle);
 }
 .cf-send {
   display: inline-flex;
@@ -2894,6 +2946,15 @@ button.cf-mask__pill:hover {
 .cf-ins__count {
   flex: none;
   color: var(--fg-subtle);
+}
+/* 随消息插入的附件：回形针，多个时后面跟数量 */
+.cf-ins__files {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--fg-subtle);
+  font-variant-numeric: tabular-nums;
 }
 .cf-hint {
   margin-top: 6px;
@@ -4348,13 +4409,14 @@ button.cf-mask__pill:hover {
   border-radius: var(--radius-full);
   background: var(--bg-elevated);
   color: var(--fg);
+  font-family: inherit;
   font-size: 12.5px;
-  cursor: default;
+  text-align: left;
+  cursor: pointer;
   user-select: none;
   transition: border-color 0.12s ease;
 }
-/* 文字行高 = 标签内高（26 − 上下边框），与编辑态输入框同高同行高：两态文字行盒都从内沿起排、基线一致，
-   进入编辑时不再上下跳（原先 span 行盒偏移 3.625px、输入框 3px，小数坐标下各自取整会差出 1 个物理像素）。 */
+/* 文字行高 = 标签内高（26 − 上下边框），文字行盒从内沿起排，小数坐标下也不会上下偏一个像素。 */
 .cf-me__tagtext {
   min-width: 0;
   line-height: 24px;
@@ -4367,81 +4429,10 @@ button.cf-mask__pill:hover {
   outline: none;
   border-color: var(--accent);
 }
-/* 悬停工具条：portal 到 body、fixed 定位在标签正上方（贴近窗口顶部时改下方），不占标签本身的位置。
-   层级高于模态背景；单钮悬停再染色（编辑蓝、删除红）。 */
-.cf-me__tag.is-hot {
-  border-color: var(--accent);
-}
-.cf-me__tagpop {
-  position: fixed;
-  z-index: 70;
-  translate: -50% -100%;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-full);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow);
-  animation: cf-me-pop 0.12s ease;
-}
-.cf-me__tagpop.is-below {
-  translate: -50% 0;
-}
-@keyframes cf-me-pop {
-  from {
-    opacity: 0;
-  }
-}
-.cf-me__tagbtn {
-  width: 24px;
-  height: 22px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--fg-subtle);
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-.cf-me__tagbtn:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--info) 14%, transparent);
-  color: var(--info);
-}
-.cf-me__tagbtn.is-danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
-}
-.cf-me__tagbtn:disabled {
-  cursor: default;
-  opacity: 0.5;
-}
-.cf-me__tag.is-editing {
-  padding: 0 4px;
-  border-color: var(--accent);
-}
 .cf-me__tagsempty {
   align-self: center;
   color: var(--fg-subtle);
   font-size: 12.5px;
-}
-/* 输入框填满标签（标签宽度由 JS 按内容算，见 editBoxWidth），可被标签上限压缩（min-width:0），
-   超长文字在框内横向滚动而非撑开标签。 */
-.cf-me__tagedit {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: 100%;
-  height: 24px;
-  padding: 0 8px;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--fg);
-  font: inherit;
-  line-height: 24px;
 }
 /* 环形布局：头像居中，每页 12 条沿椭圆环绕（槽位坐标由 JS 算，这里只负责居中锚点）。
    居中用独立的 translate 属性而非 transform —— 翻页动画经 WAAPI 改 transform，两者叠加互不覆盖。 */
@@ -4461,10 +4452,6 @@ button.cf-mask__pill:hover {
 .cf-me__orbit > .cf-me__tag:hover,
 .cf-me__orbit > .cf-me__tag:focus-within {
   z-index: 3;
-}
-/* 编辑中的宽度与位置由 JS 算并夹紧在舞台内（见 MemoryOrbit slotStyle）。 */
-.cf-me__orbit > .cf-me__tag.is-editing {
-  z-index: 4;
 }
 .cf-me__orbitout {
   position: absolute;
@@ -5363,6 +5350,29 @@ a.bots-btn {
   margin-top: 10px;
   font-size: 12px;
 }
+/* 行尾移除图标（与对话里「移除成员」同款）：悬停该行才出现，悬停图标变红。飞书 / Telegram 账号与 Deva 手机版的手机共用。 */
+.cf-rowdel {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  opacity: 0;
+}
+.bots-user:hover .cf-rowdel,
+.phone-dev:hover .cf-rowdel,
+.cf-rowdel:focus-visible {
+  opacity: 1;
+}
+.cf-rowdel:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
 .bots-user + .bots-user {
   padding-top: 10px;
   border-top: 1px solid var(--border);
@@ -6035,3 +6045,4 @@ body.cf-pop-open * {
   margin-top: calc(-1 * var(--space-5));
   overflow: hidden;
 }
+

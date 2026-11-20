@@ -13,6 +13,11 @@ export interface TextPart {
    * 「已告知的状态」。只在主进程内部使用，适配器只发 text，不会发给模型。
    */
   listing?: ListingRecord
+  /**
+   * 气泡里显示的原话（只用于提问正文块）：text 被引擎改写过时才有——如「/技能名」把技能全文展开进 text，
+   * 这里留用户实际打的字。只在主进程内部使用，适配器只发 text，不会发给模型。
+   */
+  display?: string
 }
 /**
  * 随消息下发的清单种类。guide：按需加载工具的完整用法（tool_search 等给出，见 tool-search.ts）；
@@ -31,6 +36,11 @@ export interface ToolUsePart {
   id: string
   name: string
   input: unknown
+  /**
+   * 模型随这次调用给出的思考签名（目前只有 Gemini，见 providers/openai.ts）：回放历史时须原样带回，
+   * 缺了该模型会以 400 拒收。别家模型没有此项。
+   */
+  signature?: string
 }
 export interface ToolResultPart {
   type: 'tool_result'
@@ -154,7 +164,7 @@ export interface NormalizedError {
 export type StreamEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; text: string }
-  | { type: 'tool_call'; id: string; name: string; args: unknown }
+  | { type: 'tool_call'; id: string; name: string; args: unknown; /** 思考签名，见 ToolUsePart.signature。 */ signature?: string }
   /**
    * 参数没能完整解析的工具调用：参数原文残缺、不可执行，cause 说明原因（见 BrokenCallCause）。
    * 循环把它记成一次失败的工具调用，按原因回灌纠正提示（见 agent-loop.ts runAgentLoop）。
@@ -238,16 +248,27 @@ function bodyHint(body: string): string {
 const INBAND_CONTEXT = /context[ _-]?(length|window)|prompt is too long|too many (input )?tokens|exceeds? (the )?(maximum )?context/i
 
 /**
+ * 带内错误里认作「连接中途断开」的句式：中转与上游之间的连接在回复到一半时断了，网关把它包成流里的错误发来
+ *（如「Codex: connection lost mid-reply (unexpectedEOF)」「stream disconnected before completion」）。
+ * 本质同本地断线，只是断在中转那一段。
+ */
+const INBAND_DISCONNECT =
+  /unexpected[ _-]?eof|connection (was )?(lost|reset|closed|aborted|terminated|interrupted|dropped)|(stream|upstream) (was )?(disconnected|closed|interrupted|terminated|reset)|disconnected before completion|premature close|socket hang up|other side closed|ECONNRESET|broken pipe|连接(已|被)?(中断|断开|丢失|重置|关闭)|上游(连接)?(已)?(中断|断开)/i
+
+/**
  * 带内错误（HTTP 200 之后在流里报的错：网关常把上游的 400 包成这样，如「Streaming response failed: [400]
  * This model's maximum context length is …」，issue #43）：正文认得出上下文超限 / 输出上限被拒的，与 HTTP 400
- * 同样归类，引擎的自愈（调小输出预算、压缩后重发）才用得上；其余照旧按 fallback（多为服务端错误）。
+ * 同样归类，引擎的自愈（调小输出预算、压缩后重发）才用得上；认得出是连接中途断开的，按可重试的网络错误处理，
+ * 引擎自动重连、重发本步（同本地断线）；其余照旧按 fallback（多为服务端错误）。
  */
 export function inbandError(text: string, fallback: NormalizedError): NormalizedError {
   const contextual =
     INBAND_CONTEXT.test(text) ||
     parseContextLimit(text) !== undefined ||
     parseContextOverflow(text) !== undefined
-  return contextual ? httpError(400, text) : fallback
+  if (contextual) return httpError(400, text)
+  if (INBAND_DISCONNECT.test(text)) return { kind: 'network', retryable: true, message: fallback.message }
+  return fallback
 }
 
 /** 解析 retry-after 头（秒数或 HTTP 日期）→ 毫秒；无效返回 undefined。 */

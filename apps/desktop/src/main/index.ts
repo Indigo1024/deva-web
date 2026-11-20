@@ -7,6 +7,8 @@ import { registerWorkspaceIpc } from './services/workspace'
 import { registerSecretsIpc } from './services/secrets'
 import { registerProviderIpc } from './services/provider'
 import { hasActiveTurns, registerChatIpc, settleActiveTurns } from './services/chat'
+import { registerContextUsageIpc } from './services/context-usage'
+import { registerReadSyncIpc } from './services/read-sync'
 import { listSessions } from './services/chat-store'
 import { sweepCheckpoints } from './services/checkpoints'
 import { sweepSubagents } from './services/subagent-store'
@@ -25,6 +27,7 @@ import { registerTerminalIpc } from './services/terminal'
 import { registerGitIpc } from './services/git'
 import { registerClipboardIpc } from './services/clipboard'
 import { registerDeliverablesIpc } from './services/deliverables'
+import { registerRoleHomeIpc } from './services/role-home'
 import { registerTasksIpc } from './services/tasks'
 import { startScheduler } from './services/scheduler'
 import { registerRemoteIpc, stopAllChannels } from './services/remote'
@@ -333,6 +336,9 @@ if (!app.requestSingleInstanceLock()) {
 
   // 会话编排（Agent 主循环：流式 → 工具 → 权限 → 回灌）
   registerChatIpc(() => mainWindow)
+  // 上下文占用（输入框模型面板）：订阅会话总线记下回合中的读数，须在 chat 之后。
+  registerContextUsageIpc()
+  registerReadSyncIpc(() => mainWindow)
 
   // 远程通道 / 手机端（飞书等 IM 机器人；默认关闭，需在设置里开启并配对）。订阅会话总线，须在 chat 之后。
   registerRemoteIpc(() => mainWindow)
@@ -382,6 +388,9 @@ if (!app.requestSingleInstanceLock()) {
 
   // 交付卡（present_files）：文件信息与缩略图、用默认应用打开、在文件夹中显示（只作用于该对话里交付的文件）
   registerDeliverablesIpc()
+
+  // 角色的默认工作区（没挂载工作区时的落点）：角色编辑页「工作区」一栏用
+  registerRoleHomeIpc()
 
   // 定时任务 / 自动任务（全局 ~/.deva/tasks.json；创建时批准、执行时零交互）。
   registerTasksIpc(() => mainWindow)

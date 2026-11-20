@@ -1,5 +1,5 @@
 /**
- * 输入框：草稿、/指令、插话胶囊、模型与思考等级选择。
+ * 输入框：草稿、/指令、插话胶囊；模型、思考等级与上下文占用在 ModelPanel.tsx。
  */
 import {
   memo,
@@ -11,11 +11,9 @@ import {
   useSyncExternalStore
 } from 'react'
 import {
-  Check,
   ChevronDown,
   Clock,
   FolderPlus,
-  Lightbulb,
   Paperclip,
   Plus,
   Puzzle,
@@ -33,22 +31,12 @@ import {
 } from './composer-editor'
 import { AttachmentList } from './attachments'
 import type { Persona } from '../mock/extensions'
-import type {
-  EffortLevel
-} from '../../../preload'
 import { TodoCapsule } from '../features/chat/Todos'
 import { BackgroundCapsule } from '../features/chat/BackgroundTasks'
 import { BrowserCapsule } from '../features/browser/BrowserCapsule'
 import { useDockOrder } from '../features/chat/dockOrder'
 import { type AttachKind, type SendAttachment, useChatState, useChatActions } from '../store/chat'
 import { rolesAllow, useExtensions } from '../store/extensions'
-import { findActive, useModels } from '../store/models'
-import {
-  clampEffort,
-  isToggleEffort,
-  supportedEffortLevels,
-  type EffortAdapter
-} from '../../../shared/effort'
 import { NEW_MEMBER_TOKENS } from '../../../shared/mention'
 import { useI18n } from '../i18n/i18n'
 import { useToast } from '../components/ToastProvider'
@@ -67,6 +55,7 @@ import {
 import { samePath, DEFAULT_PERSONA_ID, fill, AvatarStack, Avatar } from './shell-common'
 import { GitWidget, WorkspaceMenu } from './GitWidget'
 import { leadingQuote, withQuote, quotePlain } from './ConvMessage'
+import { ModelPanel } from './ModelPanel'
 
 /**
  * 一次挑选返回的附件（与 preload PickedAttachment 结构一致）；拖入 / 粘贴的文件夹也放这里，kind 为 folder。
@@ -138,16 +127,32 @@ function subscribeDrafts(onChange: () => void): () => void {
  * 正在显示的输入框（随会话切换更新）：插入的消息被撤回或退回时，正是这个会话就直接放回输入框，否则并进那个
  * 会话的草稿（见 restoreToComposer）。
  */
-let liveComposer: { sessionId: string; restore: (text: string) => void } | null = null
+let liveComposer: { sessionId: string; restore: (text: string, attachments: Picked[]) => void } | null = null
+
+/** 把放回来的附件并进待发附件：排在已有的之前（同文字），按路径去重。 */
+function mergePicked(back: Picked[], cur: Picked[]): Picked[] {
+  if (!back.length) return cur
+  const seen = new Set(back.map((p) => p.path))
+  return [...back, ...cur.filter((p) => !seen.has(p.path))]
+}
 
 /**
- * 把文字放回某会话的输入框：排在已有内容之前，中间空一行。开头的引用放回引用条；引用条里已有引用时，
- * 这段引用就留在文字里（不覆盖用户新放的引用）。
+ * 把文字与附件放回某会话的输入框：文字排在已有内容之前，中间空一行。开头的引用放回引用条；引用条里已有引用时，
+ * 这段引用就留在文字里（不覆盖用户新放的引用）。附件（撤回或退回的插入消息带的）放回待发附件。
  */
-export function restoreToComposer(sessionId: string, text: string): void {
-  if (!text.trim()) return
+export function restoreToComposer(sessionId: string, text: string, attachments: SendAttachment[] = []): void {
+  if (!text.trim() && !attachments.length) return
+  // 这些附件发出去之前就在待发附件里，路径仍是主进程授权过的。
+  const back: Picked[] = attachments.map((a) => ({
+    path: a.path,
+    name: a.name,
+    ext: '',
+    size: a.size ?? 0,
+    kind: a.kind,
+    supported: true
+  }))
   if (liveComposer?.sessionId === sessionId) {
-    liveComposer.restore(text)
+    liveComposer.restore(text, back)
     return
   }
   const d = composerDrafts.get(sessionId)
@@ -155,14 +160,16 @@ export function restoreToComposer(sessionId: string, text: string): void {
   const body = lq ? lq.rest : text
   setComposerDraft(sessionId, {
     text: d?.text.trim() ? (body ? `${body}\n\n${d.text}` : d.text) : body,
-    pending: d?.pending ?? [],
+    pending: mergePicked(back, d?.pending ?? []),
     quote: lq?.quote ?? d?.quote
   })
 }
 
 /**
  * 待送达的插入消息（输入框上方，与待办清单、后台任务胶囊同一排）：回合进行中插入、当前步骤还没结束的消息。
- * 「撤回」把文字放回输入框，可以改完再插入；送达后胶囊消失，消息出现在执行步骤里。多条显示条数，送达时合并成一条。
+ * 「撤回」把文字与附件放回输入框，可以改完再插入；送达后胶囊消失，消息出现在执行步骤里。多条显示条数，送达时合并成一条。
+ * 带附件的在文字后加一枚回形针（多个时带数量），附件名挂在悬停上——胶囊文字最多 160px，写文件名会把正文挤没；
+ * 只有附件没有文字时，文字位置写附件名（多个写「N 个附件」）。
  */
 function InsertCapsule({ sessionId }: { sessionId: string }): React.JSX.Element | null {
   const { t } = useI18n()
@@ -171,20 +178,34 @@ function InsertCapsule({ sessionId }: { sessionId: string }): React.JSX.Element 
   const [busy, setBusy] = useState(false)
   const order = useDockOrder(pendingInserts.length > 0, sessionId)
   if (pendingInserts.length === 0) return null
-  const text = pendingInserts.join('  ')
+  const words = pendingInserts
+    .map((p) => p.text)
+    .filter(Boolean)
+    .join('  ')
+  const files = pendingInserts.flatMap((p) => p.attachments)
+  const text =
+    words || (files.length === 1 ? files[0] : t('cf.insert.files').replace('{n}', String(files.length)))
+  const title = [words, ...files.map((name) => `[${name}]`), t('cf.insert.pendingHint')].filter(Boolean).join('\n')
   const withdraw = (): void => {
     setBusy(true)
     void withdrawInserts()
-      .then((back) => restoreToComposer(sessionId, back))
+      .then((back) => restoreToComposer(sessionId, back.text, back.attachments))
       .finally(() => setBusy(false))
   }
   return (
     <div className="cf-ins" style={{ order }}>
       {/* 消息文字最多 160px（见 .cf-dock），完整内容挂在悬停上 */}
-      <div className="cf-bg__pill cf-ins__pill" title={`${text}\n${t('cf.insert.pendingHint')}`}>
+      <div className="cf-bg__pill cf-ins__pill" title={title}>
         <Clock size={13} className="cf-ins__icon" />
         <span className="cf-bg__label cf-ins__label">{t('cf.insert.pending')}</span>
         <span className="cf-bg__name">{text}</span>
+        {files.length > 0 && (
+          <span className="cf-ins__files">
+            <Paperclip size={12} />
+            {/* 没有文字时数量已写在「N 个附件」里，不再重复 */}
+            {files.length > 1 && words && files.length}
+          </span>
+        )}
         {pendingInserts.length > 1 && (
           <span className="cf-ins__count">{t('cf.insert.count').replace('{n}', String(pendingInserts.length))}</span>
         )}
@@ -435,8 +456,8 @@ export const Composer = memo(function Composer({
         : `跟 ${name} 说点什么…`)
   const supported = pending.filter((p) => p.supported)
   const canSend = Boolean(input.trim()) || supported.length > 0 || Boolean(quote)
-  // 回合进行中有文字（或引用）：唯一的按键是「发送」（插入当前轮）。只插文字与引用，待发附件留在输入框里随下一条消息发出。
-  const canInsert = streaming && (Boolean(input.trim()) || Boolean(quote))
+  // 回合进行中有文字、引用或附件：唯一的按键是「发送」（插入当前轮），附件随这条消息一并插入。
+  const canInsert = streaming && canSend
   /** 上一次插入的时刻：插入后输入框清空、同一位置随即变成停止键，短时间内不认停止，防双击把任务停掉。 */
   const insertedAtRef = useRef(0)
   const stopTurn = (): void => {
@@ -474,7 +495,6 @@ export const Composer = memo(function Composer({
   }
 
   const pickFiles = async (): Promise<void> => {
-    if (streaming) return
     addPicked((await window.deva.fs.pickAttachments()) as Picked[])
   }
 
@@ -512,8 +532,9 @@ export const Composer = memo(function Composer({
 
   // 拖入 / 粘贴的文件夹：只记位置，不读内容。未挂载时恰好一个文件夹 → 直接挂载（同「挂载文件夹」）；
   // 一次多个不猜哪个是项目，全部作为文件夹贴片。拖入的正是已挂载的那个 → 不加贴片，挂载 chip 闪一下。
+  // 回合进行中不替用户挂载（工作目录在一轮中途换掉，正在跑的步骤会对不上），一律作为文件夹贴片随消息插入。
   const addFolders = (dirs: { path: string; name: string }[]): void => {
-    if (!focusRoot && dirs.length === 1) {
+    if (!focusRoot && dirs.length === 1 && !streaming) {
       onMount(dirs[0].path)
       setWsFlash({ path: dirs[0].path })
       return
@@ -564,28 +585,26 @@ export const Composer = memo(function Composer({
     if (!files.length || dt.getData('text/plain')) return false
 
     e.preventDefault()
-    if (!streaming) void ingest(files)
+    void ingest(files)
     return true
   }
 
   // 拖入文件 / 文件夹：整个窗口都可放下。Chromium 对未拦截的文件拖放默认「打开该文件」
-  // （导航离开应用），故凡带文件的 dragover / drop 都 preventDefault；回复中只拦截不附加，同粘贴。
+  // （导航离开应用），故凡带文件的 dragover / drop 都 preventDefault。回复中照常附加，随插入的消息发出。
   const ingestRef = useRef(ingest)
   ingestRef.current = ingest
-  const streamingRef = useRef(streaming)
-  streamingRef.current = streaming
   useEffect(() => {
     const hasFiles = (e: DragEvent): boolean => Boolean(e.dataTransfer?.types.includes('Files'))
     const onDragOver = (e: DragEvent): void => {
       if (!hasFiles(e)) return
       e.preventDefault()
-      if (e.dataTransfer) e.dataTransfer.dropEffect = streamingRef.current ? 'none' : 'copy'
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
     }
     const onDrop = (e: DragEvent): void => {
       if (!hasFiles(e)) return
       e.preventDefault()
       const files = Array.from(e.dataTransfer?.files ?? [])
-      if (files.length && !streamingRef.current) void ingestRef.current(files)
+      if (files.length) void ingestRef.current(files)
     }
     window.addEventListener('dragover', onDragOver)
     window.addEventListener('drop', onDrop)
@@ -598,20 +617,34 @@ export const Composer = memo(function Composer({
   const removePending = (path: string): void =>
     setPending((prev) => prev.filter((p) => p.path !== path))
 
-  // 插入当前轮：清空输入框交给主进程，当前步骤结束后送达；没插进去（原因已 toast）就把文字放回（引用回到引用条）。
+  /** 待发附件里能发出去的，换成发送 / 插入用的形状。 */
+  const sendable = (): SendAttachment[] =>
+    pending
+      .filter((p) => p.supported)
+      .map((p) => ({
+        path: p.path,
+        name: p.name,
+        kind: p.kind as AttachKind,
+        ...(p.kind === 'folder' ? {} : { size: p.size })
+      }))
+
+  // 插入当前轮：清空输入框交给主进程，当前步骤结束后送达；没插进去（原因已 toast）就把文字与附件放回（引用回到引用条）。
   const insertNow = (): void => {
     const text = composer.getText()
     const q = quote
+    const atts = sendable()
     // /compact、/rewind 是本地指令，回合进行中用不了，也不该当成消息插进去。
-    if ((!text.trim() && !q) || (!q && /^\/(compact|rewind)$/i.test(text.trim()))) return
+    if ((!text.trim() && !q && !atts.length) || (!q && !atts.length && /^\/(compact|rewind)$/i.test(text.trim())))
+      return
     const full = withQuote(q, text)
     const sid = sessionId
     insertedAtRef.current = Date.now()
     composer.setText('')
     composer.clearHistory()
+    setPending([])
     setQuote('')
-    void onInsert(full).then((ok) => {
-      if (!ok) restoreToComposer(sid, full)
+    void onInsert(full, atts).then((ok) => {
+      if (!ok) restoreToComposer(sid, full, atts)
     })
   }
 
@@ -622,7 +655,7 @@ export const Composer = memo(function Composer({
     }
     const text = composer.getText()
     const q = quote
-    const atts = pending.filter((p) => p.supported)
+    const atts = sendable()
     if (!text.trim() && atts.length === 0 && !q) return
     // /rewind 纯渲染层指令：打开回滚面板、不发消息；此刻不可用则原样留在输入框。
     if (text.trim().toLowerCase() === '/rewind' && atts.length === 0) {
@@ -635,15 +668,7 @@ export const Composer = memo(function Composer({
     composer.clearHistory()
     setPending([])
     setQuote('')
-    void onSend(
-      withQuote(q, text),
-      atts.map((p) => ({
-        path: p.path,
-        name: p.name,
-        kind: p.kind as AttachKind,
-        ...(p.kind === 'folder' ? {} : { size: p.size })
-      }))
-    ).then((sent) => {
+    void onSend(withQuote(q, text), atts).then((sent) => {
       // 未发出（未选模型 / 请求失败，原因已 toast）：把草稿放回——但别覆盖用户在此期间新敲的内容；
       // 此间已切到别的会话的，放回原会话的草稿里。
       if (sent) return
@@ -763,7 +788,9 @@ export const Composer = memo(function Composer({
   useLayoutEffect(() => {
     const entry = {
       sessionId,
-      restore: (text: string): void => {
+      restore: (text: string, attachments: Picked[]): void => {
+        setPending((cur) => mergePicked(attachments, cur))
+        if (!text.trim()) return
         // 开头的引用放回引用条；引用条里已有（用户新放的）就留在文字里，不覆盖。
         const lq = quoteRef.current ? null : leadingQuote(text)
         if (lq) setQuote(lq.quote)
@@ -959,8 +986,7 @@ export const Composer = memo(function Composer({
                 {t('cf.mountWorkspace')}
               </button>
             )}
-            <ModelPicker />
-            <EffortPicker />
+            <ModelPanel />
             {/* 回合进行中只有一枚键：输入框有文字＝「发送」（插入当前轮），空＝「停止」（只放图标，与发送同宽不跳动）。
                 有文字时不出停止，要停先清空输入框。 */}
             {streaming ? (
@@ -995,181 +1021,3 @@ export const Composer = memo(function Composer({
     </div>
   )
 })
-
-/**
- * 模型选择器。复用 app.css 的既有类
- * （model-pick / chip / model-pick__backdrop / model-pick__menu），零新增 CSS。
- * 只列「已启用服务商 × 已启用模型」，按服务商分组。
- * 切换时做两件事：① 写当前对话覆盖层并立即落库到会话属性（setSessionModel，切了不发重启也不丢），
- * 故同角色的多个对话可各用不同模型；② 把这次选择记为「最近使用模型」（setActiveModel）——本应用不设
- * 显式「默认模型」，最近一次在此切换的模型即充当**新对话未选时的默认**（见 store/models.tsx activeModelId）。
- * 显示的是**本对话生效模型**：本对话已选则显示所选；未选 / 所选模型已被删除 → 回落最近使用模型
- * activeModel 显示（与主进程 resolveModelRef 的兜底一致，删除的偏好模型自动回归最近使用）。
- * 菜单向上弹出（.model-pick__menu 的 bottom:calc(100%+8px)），锚在输入区工具条恰在屏内。
- */
-function ModelPicker(): React.JSX.Element {
-  const { t } = useI18n()
-  const { activeModel, providers, setActiveModel } = useModels()
-  const { currentBinding } = useChatState()
-  const { setSessionModel } = useChatActions()
-  const [open, setOpen] = useState(false)
-  // 只列对话模型（purpose==='llm'）：决策模型（如 Jev）不生成文本，绝不可被选为对话模型。
-  const groups = providers
-    .filter((p) => p.enabled && (p.purpose ?? 'llm') === 'llm')
-    .map((p) => ({ p, models: p.models.filter((m) => m.enabled) }))
-    .filter((g) => g.models.length > 0)
-  // 本对话生效模型：解析对话覆盖层的 model 引用 `"pid:mid"`；空/非法/已删除 → 回落全局 activeModel。
-  const selected = useMemo(() => {
-    const ref = currentBinding.model
-    if (ref) {
-      const idx = ref.indexOf(':')
-      if (idx > 0) {
-        const pid = ref.slice(0, idx)
-        const mid = ref.slice(idx + 1)
-        const p = providers.find((x) => x.id === pid)
-        const m = p?.models.find((x) => x.id === mid)
-        if (p && m) return { pid, mid, name: m.name, accent: p.accent }
-      }
-    }
-    if (activeModel)
-      return {
-        pid: activeModel.provider.id,
-        mid: activeModel.model.id,
-        name: activeModel.model.name,
-        accent: activeModel.provider.accent
-      }
-    return null
-  }, [currentBinding.model, providers, activeModel])
-  return (
-    <div className="model-pick">
-      <button
-        className={`chip${open ? ' is-open' : ''}`}
-        type="button"
-        title={t('chat.selectModel')}
-        onClick={() => setOpen((v) => !v)}
-      >
-        {selected && <span className="chip__dot" style={{ background: selected.accent }} />}
-        <span className="chip__label">{selected ? selected.name : t('chat.selectModel')}</span>
-        <ChevronDown size={13} className="chip__caret" />
-      </button>
-      {open && (
-        <>
-          <div className="model-pick__backdrop" onClick={() => setOpen(false)} />
-          <div className="model-pick__menu" role="menu">
-            {groups.length === 0 && <div className="model-pick__empty">{t('chat.noModel')}</div>}
-            {groups.map(({ p, models }) => (
-              <div key={p.id} className="model-pick__group">
-                <div className="model-pick__group-head">
-                  <span className="model-pick__dot" style={{ background: p.accent }} />
-                  <span className="model-pick__group-name">{p.name}</span>
-                </div>
-                {models.map((m) => {
-                  const active = selected?.pid === p.id && selected?.mid === m.id
-                  return (
-                    <button
-                      key={m.id}
-                      role="menuitemradio"
-                      aria-checked={active}
-                      className={`model-pick__item${active ? ' is-active' : ''}`}
-                      title={m.name === m.id ? m.id : `${m.name} · ${m.id}`}
-                      onClick={() => {
-                        // ① 记入本对话属性；② 记为「最近使用」，充当后续新对话未选时的默认。
-                        setSessionModel(`${p.id}:${m.id}`)
-                        setActiveModel(p.id, m.id)
-                        setOpen(false)
-                      }}
-                    >
-                      <span className="model-pick__name">{m.name}</span>
-                      {active && <Check size={14} className="model-pick__check" />}
-                    </button>
-                  )
-                })}
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
-/**
- * 思考等级选择器（紧挨模型选择器，复用其 model-pick / chip 类）。与模型同一套语义：切换只改本对话并立即
- * 落库（setSessionEffort），同时记为「最近使用」（setActiveEffort），尚未定格的对话（新对话）沿用它。
- * 只列本对话生效模型支持的档（模型能力内置表，见 shared/effort.ts）；模型不支持思考等级则整个隐藏。
- * 「默认」= 不发任何思考参数；各档如何映射到各家协议、不支持时如何自愈，见主进程 providers/* 与 chat.ts。
- */
-function EffortPicker(): React.JSX.Element | null {
-  const { t } = useI18n()
-  const { activeEffort, setActiveEffort, activeModel, providers } = useModels()
-  const { currentBinding } = useChatState()
-  const { setSessionEffort } = useChatActions()
-  const [open, setOpen] = useState(false)
-  // 本对话生效模型（同 ModelPicker：本对话已选 → 否则回落最近使用）。选择器只列对话模型，adapter 必属三协议之一。
-  const active = findActive(providers, currentBinding.model ?? null) ?? activeModel
-  const adapter = active?.provider.adapter as EffortAdapter | undefined
-  const modelId = active?.model.id
-  const levels = adapter && modelId ? supportedEffortLevels(adapter, modelId) : []
-  if (!adapter || !modelId || levels.length === 0) return null
-  // 只能开、不能调档的模型（如通义 qwen-plus、Kimi K2）：唯一的一档显示为「开启」。
-  const toggle = isToggleEffort(adapter, modelId)
-  const nameOf = (lv: EffortLevel): string =>
-    toggle && lv !== 'default' ? t('chat.effort.on') : t(`chat.effort.levels.${lv}`)
-  const hintOf = (lv: EffortLevel): string =>
-    toggle && lv !== 'default' ? t('chat.effort.onHint') : t(`chat.effort.hints.${lv}`)
-  // 本对话存的档位（尚未定格时为「最近使用」）收敛到该模型支持的档来显示——与主进程实际发送的一致；
-  // 存值本身不改，换回支持该档的模型即恢复。
-  const current = clampEffort(adapter, modelId, currentBinding.effort ?? activeEffort)
-  const label = nameOf(current)
-  const options: EffortLevel[] = ['default', ...levels]
-  return (
-    <div className="model-pick">
-      <button
-        className={`chip${open ? ' is-open' : ''}`}
-        type="button"
-        title={`${t('chat.effort.title')}：${label}`}
-        aria-label={`${t('chat.effort.title')}：${label}`}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <Lightbulb size={13} />
-        <span className="chip__label">{label}</span>
-        <ChevronDown size={13} className="chip__caret" />
-      </button>
-      {open && (
-        <>
-          <div className="model-pick__backdrop" onClick={() => setOpen(false)} />
-          <div className="model-pick__menu" role="menu">
-            <div className="model-pick__group">
-              <div className="model-pick__group-head">
-                <span className="model-pick__group-name">{t('chat.effort.title')}</span>
-              </div>
-              {options.map((lv) => {
-                const active = lv === current
-                return (
-                  <button
-                    key={lv}
-                    role="menuitemradio"
-                    aria-checked={active}
-                    className={`model-pick__item${active ? ' is-active' : ''}`}
-                    onClick={() => {
-                      // ① 记入本对话属性；② 记为「最近使用」，充当后续新对话的默认。
-                      setSessionEffort(lv)
-                      setActiveEffort(lv)
-                      setOpen(false)
-                    }}
-                  >
-                    <span className="model-pick__name cf-effort__text">
-                      <span>{nameOf(lv)}</span>
-                      <span className="cf-effort__hint">{hintOf(lv)}</span>
-                    </span>
-                    {active && <Check size={14} className="model-pick__check" />}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  )
-}

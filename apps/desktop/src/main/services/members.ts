@@ -19,6 +19,7 @@ import type { MemberRunStatus } from '../../shared/chat-protocol'
 import { isAbsolute, resolve } from 'path'
 import type { Message, ToolSpec } from '../providers/types'
 import { isAutoNudge, isCompactionSummary, isTaskNotification } from './compaction'
+import { shownText } from './skill-invoke'
 
 /** 一个主对话的成员上限（含已移除的不算）。 */
 export const MAX_MEMBERS = 10
@@ -123,8 +124,8 @@ export function rootLabel(root: string | null, mainRoot: string | null): string 
 }
 
 /**
- * create_member 的 folder 参数 → 绝对路径（相对路径以主对话工作目录为基准，「.」= 主对话工作目录本身）。
- * 空 = 不指定文件夹（null）；主对话没挂文件夹时相对路径解析不了，也是 null（调用方报错）。
+ * create_member 的 folder 参数 → 绝对路径（相对路径以主对话的当前工作目录为基准，「.」= 它本身）。
+ * 空 = 不指定文件夹（null）；没有基准时相对路径解析不了，也是 null（调用方报错）。
  */
 export function resolveMemberFolder(folder: string, mainRoot: string | null): string | null {
   const f = folder.trim()
@@ -139,11 +140,11 @@ export function resolveMemberFolder(folder: string, mainRoot: string | null): st
 export function realUserText(m: Message): string | null {
   if (m.role !== 'user') return null
   if (isCompactionSummary(m) || isAutoNudge(m) || isTaskNotification(m)) return null
-  if (typeof m.content === 'string') return m.content
+  if (typeof m.content === 'string') return shownText(m.content)
   if (m.content.some((p) => p.type === 'tool_result')) return null
   for (let i = m.content.length - 1; i >= 0; i--) {
     const p = m.content[i]
-    if (p.type === 'text') return p.text
+    if (p.type === 'text') return shownText(p)
   }
   return ''
 }
@@ -383,7 +384,7 @@ export function mainMemberTools(): ToolSpec[] {
           folder: {
             type: 'string',
             description:
-              '它负责的文件夹：相对当前工作目录的路径（如 web；整个当前工作目录写 .）或绝对路径。省略表示不指定文件夹（成员没有工作目录，用户之后可以在成员的对话里为它选）。'
+              '它负责的文件夹：相对当前工作目录的路径（如 web，不存在会自动建好；整个当前工作目录写 .）或已存在的绝对路径。省略表示不指定文件夹（成员没有工作目录，用户之后可以在成员的对话里为它选）。'
           },
           pick_folder: {
             type: 'boolean',

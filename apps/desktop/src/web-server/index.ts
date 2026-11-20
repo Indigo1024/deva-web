@@ -64,6 +64,9 @@ import { registerWorkspaceIpc } from '../main/services/workspace'
 import { registerSecretsIpc } from '../main/services/secrets'
 import { registerProviderIpc } from '../main/services/provider'
 import { hasActiveTurns, registerChatIpc, settleActiveTurns } from '../main/services/chat'
+import { registerContextUsageIpc } from '../main/services/context-usage'
+import { registerReadSyncIpc } from '../main/services/read-sync'
+import { registerRoleHomeIpc } from '../main/services/role-home'
 import { listSessions, getSession } from '../main/services/chat-store'
 import { sweepCheckpoints } from '../main/services/checkpoints'
 import { sweepSubagents } from '../main/services/subagent-store'
@@ -270,6 +273,9 @@ function bootServices(): void {
   safeStorage.isEncryptionAvailable()
   registerProviderIpc()
   registerChatIpc(webWindowRef)
+  // 上下文占用（输入框模型面板）：订阅会话总线记下回合中的读数，须在 chat 之后（上游 v0.1.16）
+  registerContextUsageIpc()
+  registerReadSyncIpc(webWindowRef)
   registerRemoteIpc(webWindowRef)
   void sweepCheckpoints(listSessions().map((m) => m.id)).catch(() => {})
   void sweepSubagents(listSessions().map((m) => m.id)).catch(() => {})
@@ -291,6 +297,8 @@ function bootServices(): void {
   registerGitIpc()
   registerClipboardIpc()
   registerTasksIpc(webWindowRef)
+  // 角色的默认工作区（没挂载工作区时的落点）：角色编辑页「工作区」一栏用（上游 v0.1.16）
+  registerRoleHomeIpc()
   registerWebUpdaterIpc(webWindowRef)
 
   // Web 专属通道

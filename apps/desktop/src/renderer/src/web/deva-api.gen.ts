@@ -13,6 +13,7 @@ const webUtils = { getPathForFile: (_f: File): string => '' }
 import type { EffortLevel } from '../../../shared/effort'
 import type { UpdateState } from '../../../shared/update'
 import type { DeliverableInfo } from '../../../shared/deliverables'
+import type { PhoneLinkResult, PhonePairedEvent, PhoneQrResult, PhoneState, PhoneVia } from '../../../shared/phone'
 import type { AgentDraft, AutotaskDraft } from '../../../shared/drafts'
 import type { BrowserLiveFrame, BrowserUiState } from '../../../shared/browser'
 import type {
@@ -20,12 +21,14 @@ import type {
   ChatSendRequest,
   ChatInsertRequest,
   ChatInsertResult,
+  TakenInserts,
   ChatCompactRequest,
   ChatCreateSessionRequest,
   ChatSetModelRequest,
   ChatSetEffortRequest,
   ChatSetFocusRequest,
   ChatRenameSessionRequest,
+  ChatRemoteChange,
   AttachmentChip,
   HandoffInfo,
   MemberTask,
@@ -41,6 +44,7 @@ import type {
   MountResponse,
   ResolveAutotaskResult,
   ChatStreamEvent,
+  ContextUsage,
   MemberProgressGroup
 } from '../../../shared/chat-protocol'
 
@@ -50,12 +54,14 @@ export type {
   ChatSendRequest,
   ChatInsertRequest,
   ChatInsertResult,
+  TakenInserts,
   ChatCompactRequest,
   ChatCreateSessionRequest,
   ChatSetModelRequest,
   ChatSetEffortRequest,
   ChatSetFocusRequest,
   ChatRenameSessionRequest,
+  ChatRemoteChange,
   AttachmentChip,
   HandoffInfo,
   MemberTask,
@@ -71,6 +77,7 @@ export type {
   MountResponse,
   ResolveAutotaskResult,
   ChatStreamEvent,
+  ContextUsage,
   MemberProgressGroup
 }
 
@@ -271,6 +278,8 @@ export interface PersonaRecord {
   avatarImage: string
   /** 偏好模型引用 `"providerId:modelId"`；空串 = 跟随主对话默认。 */
   model: string
+  /** 工作区（绝对路径；空串 = 用角色的默认工作区）。设了则绑定此角色的新对话一开始就挂载它。 */
+  workspace: string
   /** 正文 = 追加进主智能体系统提示词的内容。 */
   prompt: string
   enabled: boolean
@@ -284,23 +293,32 @@ export interface UserProfile {
   avatarImage: string
 }
 
-/** 记忆条目（全局 / 项目私有共用，与 services/memory.ts 对齐）。 */
+/** 记忆类型：user 用户 / feedback 做事方式 / project 进展 / reference 资料（与 services/memory.ts 对齐）。 */
+export type MemoryType = 'user' | 'feedback' | 'project' | 'reference'
+/** 记忆条目（全局 / 角色 / 项目共用，与 services/memory.ts 对齐）。 */
 export interface MemoryEntry {
   id: string
-  content: string
+  type: MemoryType
+  /** 一句话标题（进索引）。 */
+  title: string
+  /** 正文，可为空。 */
+  body: string
   createdAt: number
   updatedAt: number
 }
 export interface MemorySnapshot {
   entries: MemoryEntry[]
-  /** 当前总字数（与注入系统提示词同一口径）。 */
+  /** 当前索引总字数（与随消息下发同一口径）。 */
   used: number
-  /** 总字数上限：写入后超出即拒写。 */
+  /** 索引总字数上限：写入后超出即拒写。 */
   budget: number
   maxEntries: number
-  maxChars: number
+  maxTitle: number
+  maxBody: number
 }
-export type MemoryErrorCode = 'empty' | 'tooLong' | 'full' | 'budget' | 'notFound' | 'duplicate'
+/** 记忆作用域：省略 = 全局；字符串 = 该工作区的项目记忆；`{ personaId }` = 该角色的记忆。 */
+export type MemoryScopeArg = string | { personaId: string }
+export type MemoryErrorCode = 'empty' | 'tooLong' | 'full' | 'budget' | 'notFound' | 'duplicate' | 'badType'
 export type MemoryIpcResult = { ok: true; snapshot: MemorySnapshot } | { ok: false; code: MemoryErrorCode }
 
 /** Agent 提示词新建/更新入参（有 id 覆盖，无 id 新建）。 */
@@ -310,6 +328,8 @@ export interface PersonaUpsertInput {
   description?: string
   avatar?: string
   model?: string
+  /** 工作区（空串 = 改回默认工作区；缺省 = 保持原值）。 */
+  workspace?: string
   prompt?: string
   enabled?: boolean
 }
@@ -566,7 +586,7 @@ export interface ProviderListModelsResult {
 }
 
 /** IM 机器人（远程通道）状态，与 services/remote/index.ts 的 BotView / ScanEvent 对齐。 */
-export type BotPlatform = 'feishu' | 'telegram'
+export type BotPlatform = 'feishu' | 'telegram' | 'web'
 export type BotReplyMode = 'stream' | 'final'
 /** 回复范围：all 全部 / personas 选中角色的对话 / sessions 选中的对话（两份清单都保留，切模式不丢）。 */
 export interface BotReplyScope {
@@ -705,15 +725,20 @@ const api = {
   },
   /**
    * 记忆：查看 / 增改删 / 清空，与模型的 memory_* 工具同一套校验。
-   * 末位可选 root：省略 = 全局记忆（~/.deva/memory.json）；给出 = 该工作区的项目私有记忆（~/.deva/projects/<key>/）。
+   * 末位可选 scope：省略 = 全局记忆（~/.deva/memory.json）；字符串 = 该工作区的项目记忆（~/.deva/projects/<key>/）；
+   * `{ personaId }` = 该角色的记忆（~/.deva/personas/memory/<id>.json）。
    */
   memory: {
-    list: (root?: string): Promise<MemorySnapshot> => ipcRenderer.invoke('memory:list', root),
-    /** 无 id 新增，有 id 覆盖更新。 */
-    write: (content: string, id?: string, root?: string): Promise<MemoryIpcResult> =>
-      ipcRenderer.invoke('memory:write', content, id, root),
-    remove: (id: string, root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:delete', id, root),
-    clear: (root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', root)
+    list: (scope?: MemoryScopeArg): Promise<MemorySnapshot> => ipcRenderer.invoke('memory:list', scope),
+    /** 无 id 新增（type、title 必填），有 id 更新（省略的字段保持原值）。 */
+    write: (
+      input: { type?: MemoryType; title?: string; body?: string },
+      id?: string,
+      scope?: MemoryScopeArg
+    ): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:write', input, id, scope),
+    remove: (id: string, scope?: MemoryScopeArg): Promise<MemoryIpcResult> =>
+      ipcRenderer.invoke('memory:delete', id, scope),
+    clear: (scope?: MemoryScopeArg): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', scope)
   },
   /** Agent 提示词（全局 ~/.deva/personas）：列出 / 读取 / 新建更新 / 删除 / 启停。 */
   personas: {
@@ -793,8 +818,8 @@ const api = {
       ipcRenderer.invoke('chat:send', req),
     /** 回合进行中插入一条消息（见 ChatInsertRequest）。 */
     insert: (req: ChatInsertRequest): Promise<ChatInsertResult> => ipcRenderer.invoke('chat:insert', req),
-    /** 撤回某对话全部待送达的插入消息，返回合并后的原文（没有则为空串）。 */
-    withdrawInserts: (sessionId: string): Promise<{ text: string }> =>
+    /** 撤回某对话全部待送达的插入消息，返回合并后的原文（没有则为空串）与附件。 */
+    withdrawInserts: (sessionId: string): Promise<TakenInserts> =>
       ipcRenderer.invoke('chat:withdraw-inserts', sessionId),
     /** 手动压缩历史（/compact）：无后续模型轮，只回发 compacted + done 事件。 */
     compact: (req: ChatCompactRequest): Promise<{ turnId: string }> =>
@@ -855,6 +880,9 @@ const api = {
       ipcRenderer.invoke('chat:delete-turns', sessionId, workspaceRoot, turnIndices),
     /** 待办清单：某会话的当前状态（切到该会话时拉取，此后的变化走 todos 事件）。 */
     todos: (sessionId: string): Promise<TodoState> => ipcRenderer.invoke('chat:todos', sessionId),
+    /** 上下文占用：按 modelRef（本对话生效模型）算窗口与压缩线；模型解析不了回 null。 */
+    contextUsage: (sessionId: string, modelRef: string): Promise<ContextUsage | null> =>
+      ipcRenderer.invoke('chat:context-usage', sessionId, modelRef),
     /** 手动取消当前清单（回合进行中不受理）：胶囊收起，下一条消息告知模型。返回取消后的状态。 */
     cancelTodoList: (sessionId: string): Promise<TodoState> =>
       ipcRenderer.invoke('chat:todo-cancel', sessionId),
@@ -909,6 +937,14 @@ const api = {
       const listener = (): void => cb()
       ipcRenderer.on('chat:sessions-changed', listener)
       return () => ipcRenderer.removeListener('chat:sessions-changed', listener)
+    },
+    /** 正在看这个对话：记为已读（与手机共用，手机上的红点随之消掉）。 */
+    markRead: (sessionId: string): Promise<{ ok: true }> => ipcRenderer.invoke('chat:mark-read', sessionId),
+    /** 手机等别的设备改了对话（看过 / 删除 / 归档 / 改模型）；返回取消订阅函数 */
+    onRemoteChange: (cb: (c: ChatRemoteChange) => void): (() => void) => {
+      const listener = (_e: unknown, c: ChatRemoteChange): void => cb(c)
+      ipcRenderer.on('chat:remote-change', listener)
+      return () => ipcRenderer.removeListener('chat:remote-change', listener)
     }
   },
   /** 集成终端：列出已装 shell、建 PTY、写输入、改尺寸、销毁；订阅数据/退出事件。 */
@@ -1087,6 +1123,12 @@ const api = {
     reveal: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('deliverables:reveal', sessionId, toolUseId, index)
   },
+  /** 角色的默认工作区（没挂载工作区时的落点，见 main/services/role-home.ts）：角色编辑页用。 */
+  workspace: {
+    /** 角色的默认工作区路径（还没写过文件时 exists 为 false）。 */
+    roleHome: (personaId: string): Promise<{ path: string; exists: boolean }> =>
+      ipcRenderer.invoke('workspace:role-home', personaId)
+  },
   /**
    * 检查更新（设置 → 关于）。状态由主进程持有，经 onState 推送；check / download / install 只负责触发。
    * download：Windows exe 安装的在应用内下载，其余在浏览器里打开安装包直链。
@@ -1186,6 +1228,34 @@ const api = {
       const listener = (_e: unknown, ev: BotScanEvent): void => cb(ev)
       ipcRenderer.on('remote:scan', listener)
       return () => ipcRenderer.removeListener('remote:scan', listener)
+    }
+  },
+  /** Deva 手机版（「手机」面板里，用户添加后才有，最多一个）。 */
+  phone: {
+    getState: (): Promise<PhoneState> => ipcRenderer.invoke('phone:get-state'),
+    /** 添加 Deva 手机版（默认没有，最多一个；已有就返回现状）。 */
+    add: (): Promise<PhoneState> => ipcRenderer.invoke('phone:add'),
+    /** 删除 Deva 手机版：已连接的手机全部断开。 */
+    remove: (): Promise<PhoneState> => ipcRenderer.invoke('phone:remove'),
+    setEnabled: (enabled: boolean): Promise<PhoneState> => ipcRenderer.invoke('phone:set-enabled', enabled),
+    /** 重连出错的通道（不等自动重试）。 */
+    retry: (): Promise<{ ok: true }> => ipcRenderer.invoke('phone:retry'),
+    /** 新的配对二维码（一次性票据，2 分钟有效）：via = 扫码后手机走哪条路，对应的通道随之开启。 */
+    qr: (via: PhoneVia): Promise<PhoneQrResult> => ipcRenderer.invoke('phone:qr', via),
+    /** 网页版的一次性链接（复制链接；10 分钟内有效）。 */
+    link: (via: PhoneVia): Promise<PhoneLinkResult> => ipcRenderer.invoke('phone:link', via),
+    /** 二维码收起：作废还挂着的配对票据。 */
+    qrCancel: (): Promise<{ ok: true }> => ipcRenderer.invoke('phone:qr-cancel'),
+    removeDevice: (id: string): Promise<{ ok: true }> => ipcRenderer.invoke('phone:remove-device', id),
+    onChanged: (cb: (state: PhoneState) => void): (() => void) => {
+      const listener = (_e: unknown, state: PhoneState): void => cb(state)
+      ipcRenderer.on('phone:changed', listener)
+      return () => ipcRenderer.removeListener('phone:changed', listener)
+    },
+    onPaired: (cb: (ev: PhonePairedEvent) => void): (() => void) => {
+      const listener = (_e: unknown, ev: PhonePairedEvent): void => cb(ev)
+      ipcRenderer.on('phone:paired', listener)
+      return () => ipcRenderer.removeListener('phone:paired', listener)
     }
   }
 }

@@ -14,7 +14,7 @@
 本文档只讲**本改版自己的东西**：Web 层怎么搭的、怎么部署、怎么跟随上游更新。
 上游 Deva 本身有哪些功能，属于上游的成果，请查阅[上游项目](https://github.com/sqfcyily/deva)。
 
-当前跟随的上游版本：**v0.1.15**。
+当前跟随的上游版本：**v0.1.16**。
 
 维护与排错看 [MAINTAINING.md](../MAINTAINING.md)；本文档讲的是部署与实现细节。
 
@@ -652,6 +652,21 @@ systemctl restart deva-web
 | `atomic-write`（临时文件 + rename） | 正常 | **并入并加强**：`writeFileAtomic` 支持 `mode`，`secrets.json` 用 0600 + 串行写入，`config.json` 0600 |
 | 胶囊排浮于消息区 + 底部渐隐（`.cf-dock`） | 正常 | 无需适配（上游 CSS 自带 `.cf-jump` 让位规则） |
 | macOS 图标留边 / 屏蔽网页设置应用图标角标 / 定时任务行布局 | 桌面专属 | 无影响（与 Web 无关） |
+
+**v0.1.16 起**
+
+| 上游功能 | 桌面行为 | Web 适配 |
+| --- | --- | --- |
+| 记忆三层（全局 / 角色 / 项目）+ 类型与标题 + 写满自动归纳 | 正常 | 无需适配（纯主进程 + 渲染层新组件） |
+| 角色默认工作区（`~/Deva/Agents/<id>`）+ `mount_workspace` 工具 | 正常 | 无需适配；`registerRoleHomeIpc` 已接进 `bootServices()`。网页版文件选择器本就能选服务器目录，比桌面还顺 |
+| 输入框模型面板平铺 + 上下文占用圆环 | 正常 | 无需适配；`registerContextUsageIpc` 已接进 `bootServices()`（须在 chat 之后） |
+| 对话列表多选（批量归档 / 删除） | 正常 | 无需适配（Rail / ThreadSelect，纯渲染层） |
+| 回合进行中插入消息可带附件 | 正常 | 无需适配 |
+| 手机版（`remote/web` + `PhonePane` + `apps/relay-node`） | 扫码配对，局域网直连或 Cloudflare/自建中转 | 已接线：`registerRemoteIpc` 本来就在；`powerMonitor` 替身恒「活跃」（服务端没有系统电源事件）；`ws` / `@noble/*` 依赖已装。**未真机验收** |
+| 流内断线自动重试 / Gemini 思考签名 / 模型请求超时 | 正常 | 无需适配（纯主进程） |
+| 首次配置的官方服务商可删除 | 正常 | 无需适配 |
+
+上游 v0.1.16 又把 `Composer` 的 `onPaste` 签名写回了 `ClipboardEvent`——本改版保持 `ComposerPasteEvent`（手机粘贴走 `beforeinput`），合并时已重贴。
 
 ---
 

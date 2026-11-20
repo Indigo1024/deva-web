@@ -363,6 +363,20 @@ export const session = {
   defaultSession: sessionStub
 }
 
+// ── powerMonitor：手机版适配器用它判断「电脑是否闲置」 ──────────────────────────
+/**
+ * 上游 v0.1.16 的 `remote/web/adapter.ts` 用 `powerMonitor.getSystemIdleTime()`
+ * 决定手机端要不要把 Deva 显示成「离开」。服务端没有系统电源事件，恒返回 0
+ * （= 从不闲置），调用方拿到的就是「电脑在用」，手机上不会误显示离开。
+ * 方法不存在时 PhoneAdapter 自己有 try/catch 兜底，这里给个永远可调的实现更稳。
+ */
+export const powerMonitor = {
+  getSystemIdleTime: (): number => 0,
+  getSystemIdleState: (_threshold: number): 'active' | 'idle' | 'locked' | 'unknown' => 'active',
+  isOnBatteryPower: (): boolean => false,
+  onBatteryPower: (): boolean => false
+}
+
 // ── clipboard：缓存 + 往返 ────────────────────────────────────────────────
 export const clipboard = {
   readText(): string {

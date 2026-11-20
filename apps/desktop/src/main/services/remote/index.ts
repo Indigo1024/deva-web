@@ -31,6 +31,7 @@ import {
 import { TelegramAdapter, fetchTelegramMe } from './telegram'
 import { startTelegramLink } from './telegram-onboard'
 import type { ChannelId, ChannelState, Platform, RemoteAdapter } from './types'
+import { registerPhoneIpc } from './web/phone'
 
 /**
  * 机器人面板的 IPC 与生命周期。机器人都经扫码创建，扫码人自动成为已配对用户（白名单）：
@@ -58,7 +59,9 @@ const ADAPTERS: Record<Platform, (bot: BotConfig) => Promise<RemoteAdapter | str
     const token = await getSecret(SECRET_KEY(bot.id, 'botToken'))
     if (!token) return '机器人 Token 丢失，请删除后重新添加。'
     return new TelegramAdapter(bot.id, { token })
-  }
+  },
+  // 手机版由 web/phone.ts 单独管理（单例，不在机器人列表里），这里不会被调用。
+  web: async () => '手机访问请在「手机」面板里设置。'
 }
 
 export interface BotView {
@@ -80,6 +83,7 @@ export interface BotView {
 function publicState(): { bots: BotView[] } {
   return {
     bots: listBots()
+      .filter((b) => b.platform !== 'web')
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((b) => ({
         id: b.id,
@@ -198,6 +202,7 @@ function genId(prefix: string): string {
 
 export function registerRemoteIpc(getWindow: () => BrowserWindow | null): void {
   initHub()
+  registerPhoneIpc(getWindow)
 
   const send = (channel: string, payload: unknown): void => {
     const w = getWindow()
@@ -330,7 +335,7 @@ export function registerRemoteIpc(getWindow: () => BrowserWindow | null): void {
 
   // 启动时自动连接已启用的机器人（失败只记日志 / 状态，不阻塞启动）。
   for (const b of listBots())
-    if (b.enabled)
+    if (b.enabled && b.platform !== 'web')
       void launch(b.id).then(
         (err) => err && console.warn(`[remote] ${b.name} 自动连接失败：`, err),
         (e) => console.warn(`[remote] ${b.name} 自动连接失败：`, (e as Error)?.message ?? e)
