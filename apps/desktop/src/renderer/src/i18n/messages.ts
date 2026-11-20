@@ -692,14 +692,14 @@ const zhCN: MessageTree = {
     md: { copy: '复制', copied: '已复制' }
   },
   bots: {
-    title: '手机',
+    title: '机器人',
     search: '搜索',
     add: '添加',
     added: '已添加',
     addTitle: '通过{p}连接',
     listEmpty: '还没有连接，点上方的 + 添加。',
     detailEmpty: '在左侧选择一项查看详情。',
-    paneHint: '在手机上继续用 Deva：扫码用 Deva 手机版，或接入飞书、Telegram。',
+    paneHint: '接入飞书、Telegram 机器人。',
     unnamed: '未命名',
     platform: { web: 'Deva 手机版', feishu: '飞书', telegram: 'Telegram' },
     region: { cn: '中国', intl: '国际' },
@@ -2215,14 +2215,14 @@ const en: MessageTree = {
     md: { copy: 'Copy', copied: 'Copied' }
   },
   bots: {
-    title: 'Phone',
+    title: 'Bots',
     search: 'Search',
     add: 'Add',
     added: 'Added',
     addTitle: 'Connect via {p}',
     listEmpty: 'Nothing connected yet. Use + above to add one.',
     detailEmpty: 'Select an item on the left to see its details.',
-    paneHint: 'Keep using Deva on your phone: scan to use Deva Mobile, or connect Feishu or Telegram.',
+    paneHint: 'Connect Feishu or Telegram bots.',
     unnamed: 'Unnamed',
     platform: { web: 'Deva Mobile', feishu: 'Feishu', telegram: 'Telegram' },
     region: { cn: 'China', intl: 'Intl' },
