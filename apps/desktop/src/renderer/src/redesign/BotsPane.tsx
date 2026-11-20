@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ExternalLink, KeyRound, Loader2, Plus, QrCode, RefreshCw, Search, Trash2, UserMinus, X } from 'lucide-react'
 import QRCode from 'qrcode'
 import { useI18n } from '../i18n/i18n'
-import { PhoneDetail, PhoneRow, usePhoneState } from './PhonePane'
 import { PlatformLogo } from './PlatformLogo'
 import { useDialog } from '../components/DialogProvider'
 import { useToast } from '../components/ToastProvider'
@@ -20,10 +19,8 @@ type ScopeKind = Exclude<Scope['mode'], 'all'>
 const DEFAULT_PERSONA_ID = 'general'
 
 /** 可添加的平台（菜单顺序）。soon = 即将支持，菜单里置灰。 */
-const PLATFORMS: { id: Platform; soon?: boolean }[] = [{ id: 'web' }, { id: 'feishu' }, { id: 'telegram' }]
+const PLATFORMS: { id: Platform; soon?: boolean }[] = [{ id: 'feishu' }, { id: 'telegram' }]
 
-/** 左列表里「手机」（顶部固定行）的选中标记。 */
-const PHONE = 'phone'
 
 /**
  * 「机器人」tab（图标栏「设置」上方）：与对话 / 角色 / 任务同一套面板——左列表 + 右详情。
@@ -44,10 +41,10 @@ export function BotsPane(): React.JSX.Element {
     let alive = true
     void window.deva.remote.getState().then((s) => {
       if (!alive) return
-      setBots(s.bots)
+      setBots(s.bots.filter((b) => b.platform !== 'web'))
       setLoaded(true)
     })
-    const off = window.deva.remote.onChanged((s) => setBots(s.bots))
+    const off = window.deva.remote.onChanged((s) => setBots(s.bots.filter((b) => b.platform !== 'web')))
     return () => {
       alive = false
       off()
@@ -61,22 +58,13 @@ export function BotsPane(): React.JSX.Element {
     [bots, q]
   )
   const view = bots.find((b) => b.id === viewId) ?? null
-  const phone = usePhoneState()
-  const phoneAdded = !!phone?.added
-
-  // 默认选第一项（添加了 Deva 手机版就是它）；选中的一项被删除后同理回落。
+  // 默认选择第一个机器人；扫码手机版不是本改版的入口。
   useEffect(() => {
-    if (!phone || !loaded) return
-    if (viewId === PHONE ? phoneAdded : viewId && bots.some((b) => b.id === viewId)) return
-    setViewId(phoneAdded ? PHONE : (bots[0]?.id ?? null))
-  }, [bots, viewId, phone, phoneAdded, loaded])
-
-  // + 菜单：Deva 手机版最多一个，已添加就直接选中它；飞书 / Telegram 走扫码。
-  const pick = (p: Platform): void => {
-    if (p !== 'web') return setAdding(p)
-    if (phoneAdded) return setViewId(PHONE)
-    void window.deva.phone.add().then(() => setViewId(PHONE))
-  }
+    if (!loaded) return
+    if (viewId && bots.some((b) => b.id === viewId)) return
+    setViewId(bots[0]?.id ?? null)
+  }, [bots, viewId, loaded])
+  const pick = (p: Platform): void => setAdding(p)
 
   return (
     <>
@@ -103,15 +91,14 @@ export function BotsPane(): React.JSX.Element {
               </button>
             )}
           </div>
-          <BotAddMenu onPick={pick} phoneAdded={phoneAdded} />
+          <BotAddMenu onPick={pick} />
         </div>
         <div className="cf-list">
-          {!q && phone && phoneAdded && <PhoneRow state={phone} active={viewId === PHONE} onClick={() => setViewId(PHONE)} />}
           {!loaded ? null : bots.length === 0 ? (
             q ? (
               <div className="cf-empty">{t('cf.searchNoResults')}</div>
             ) : (
-              !phoneAdded && <div className="cf-empty">{t('bots.listEmpty')}</div>
+              <div className="cf-empty">{t('bots.listEmpty')}</div>
             )
           ) : shown.length === 0 ? (
             <div className="cf-empty">{t('cf.searchNoResults')}</div>
@@ -143,13 +130,7 @@ export function BotsPane(): React.JSX.Element {
 
       <main className="cf-conv">
         <div className="cf-dragbar" aria-hidden="true" />
-        {viewId === PHONE && phone?.added ? (
-          <div className="cf-profile">
-            <div className="bots-detail">
-              <PhoneDetail state={phone} />
-            </div>
-          </div>
-        ) : view ? (
+        {view ? (
           <div className="cf-profile">
             <div className="bots-detail">
               <BotDetail key={view.id} bot={view} />
@@ -159,7 +140,7 @@ export function BotsPane(): React.JSX.Element {
           <div className="cf-quick">
             <div className="cf-quick__inner">
               <div className="cf-quick__title">{t('bots.title')}</div>
-              <div className="cf-quick__hint">{loaded && (bots.length || phoneAdded) ? t('bots.detailEmpty') : t('bots.paneHint')}</div>
+              <div className="cf-quick__hint">{loaded && bots.length ? t('bots.detailEmpty') : t('bots.paneHint')}</div>
             </div>
           </div>
         )}
@@ -180,7 +161,7 @@ export function BotsPane(): React.JSX.Element {
 }
 
 /** 「添加机器人」：悬停展开支持的平台（交互同角色 / 任务的 AddMenu），点击即开始添加。 */
-function BotAddMenu({ onPick, phoneAdded }: { onPick: (p: Platform) => void; phoneAdded: boolean }): React.JSX.Element {
+function BotAddMenu({ onPick }: { onPick: (p: Platform) => void }): React.JSX.Element {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const closeTimer = useRef<number | null>(null)
@@ -234,7 +215,6 @@ function BotAddMenu({ onPick, phoneAdded }: { onPick: (p: Platform) => void; pho
               <PlatformLogo platform={p.id} size={20} />
               <span>{t(`bots.platform.${p.id}`)}</span>
               {p.soon && <span className="bots-tag">{t('bots.soon')}</span>}
-              {p.id === 'web' && phoneAdded && <span className="bots-tag">{t('bots.added')}</span>}
             </button>
           ))}
         </div>

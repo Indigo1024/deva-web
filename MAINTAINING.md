@@ -327,3 +327,7 @@ ls -la /root/.deva/          # web-auth.json / web-secret.key / secrets.json / a
 ## 许可
 
 上游 [sqfcyily/deva](https://github.com/sqfcyily/deva) 是 MIT；Web 适配层同样 MIT，随便部署随便改。
+
+## v1.8.0：不提供扫码手机版入口
+
+移除 PhonePane.tsx、phone.css 和 BotsPane 内的 Deva 手机版列表项、添加项、详情与状态订阅。后端协议及上游新增代码保留，不另外部署 relay；飞书/Telegram 不受影响。合并上游时不要恢复此入口。

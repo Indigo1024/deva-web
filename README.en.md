@@ -84,7 +84,6 @@ successful load, any later disconnect left the overlay permanently covering a pe
 | Window fullscreen / macOS traffic lights | No-ops |
 | Built-in browser (the `browser` tool) | **Not available**: it needs Electron's layered `WebContentsView` + CDP, and a server process has no window layer. The tool is omitted and the composer capsule never renders — no dead entry point |
 | Right-click "Quote" a message | In the message area's right-click menu | The entry sits in the **action row under each message** as a persistent button: tap it to quote the current selection, or the whole message if nothing is selected — the result lands in the quote bar above the composer |
-| Phone companion (scan to pair) | "Bots" pane → add "Deva phone" | The same channel is already wired into the Web server; the pane should show it. **Not yet verified with a real phone** |
 | Selecting and copying message text | Desktop drag-select / right-click copy | **Works the same**: message text stays selectable, long-press on mobile and drag-select on desktop both work, and the system copy menu is available (the per-message row still has its own copy button) |
 | Dropping folders / attaching by real path | The browser cannot see local paths, so everything goes through "upload the bytes" (chunked upload for large files) |
 | Outbound proxy for the server | Requests go out through Node's `fetch` and always **connect directly** — `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` are ignored. To route the server through a proxy you must configure it separately (Node 24+ `NODE_USE_ENV_PROXY=1`); setting the variables alone does nothing |
@@ -167,3 +166,7 @@ Upstream [sqfcyily/deva](https://github.com/sqfcyily/deva) is MIT licensed; copy
 authors. This port would not exist without it.
 
 The web adaptation layer here is likewise released under [MIT](LICENSE) — deploy it or fork it freely.
+
+## v1.8.0
+
+Removed the scan-to-pair phone UI and entry points. This port is accessed directly by URL. Feishu, Telegram, shared protocols and other upstream features remain.

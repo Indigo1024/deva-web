@@ -662,7 +662,6 @@ systemctl restart deva-web
 | 输入框模型面板平铺 + 上下文占用圆环 | 正常 | 无需适配；`registerContextUsageIpc` 已接进 `bootServices()`（须在 chat 之后） |
 | 对话列表多选（批量归档 / 删除） | 正常 | 无需适配（Rail / ThreadSelect，纯渲染层） |
 | 回合进行中插入消息可带附件 | 正常 | 无需适配 |
-| 手机版（`remote/web` + `PhonePane` + `apps/relay-node`） | 扫码配对，局域网直连或 Cloudflare/自建中转 | 已接线：`registerRemoteIpc` 本来就在；`powerMonitor` 替身恒「活跃」（服务端没有系统电源事件）；`ws` / `@noble/*` 依赖已装。**未真机验收** |
 | 流内断线自动重试 / Gemini 思考签名 / 模型请求超时 | 正常 | 无需适配（纯主进程） |
 | 首次配置的官方服务商可删除 | 正常 | 无需适配 |
 
@@ -684,3 +683,7 @@ systemctl restart deva-web
 ## 许可
 
 跟上游一致：[MIT](../LICENSE)。
+
+## v1.8.0：不提供扫码手机版入口
+
+移除 PhonePane.tsx、phone.css 和 BotsPane 内的 Deva 手机版列表项、添加项、详情与状态订阅。后端协议及上游新增代码保留，不另外部署 relay；飞书/Telegram 不受影响。合并上游时不要恢复此入口。
