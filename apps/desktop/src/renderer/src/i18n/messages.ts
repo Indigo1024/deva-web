@@ -720,7 +720,7 @@ const zhCN: MessageTree = {
       feishu:
         '扫码的飞书账号会自动成为这个机器人的主人，创建完成后机器人会主动给你发消息。电脑上的 Deva 需要保持运行（关窗驻留托盘即可）。',
       telegram:
-        '点 Start 的 Telegram 账号会成为这个机器人的主人。Token 只加密保存在这台电脑上。电脑上的 Deva 需要保持运行（关窗驻留托盘即可），且能访问 Telegram（如需代理，请设置系统代理）。'
+        '点 Start 的 Telegram 账号会成为这个机器人的主人。Token 只加密保存在这台电脑上。电脑上的 Deva 需要保持运行（关窗驻留托盘即可），且能访问 Telegram（如需代理，设置 HTTPS_PROXY 等环境变量）。'
     },
     tokenLead: '扫码打开 BotFather，发送 /newbot 创建机器人，再把它回复的 Token 粘贴到下面。',
     tokenPlaceholder: '粘贴 Token，形如 123456789:AAH…',
@@ -881,6 +881,19 @@ const zhCN: MessageTree = {
     apiKey: 'API 密钥',
     apiKeyPlaceholder: '在此填写 API Key',
     apiHost: 'API 地址',
+    advanced: '高级设置',
+    headers: '自定义请求头',
+    headersHint: '随每个请求发送，同名时覆盖默认值（如 User-Agent）。',
+    noHeaders: '暂无请求头，点击「添加请求头」新增',
+    headerName: '名称，如 originator',
+    headerValue: '值',
+    addHeader: '添加请求头',
+    removeHeader: '移除',
+    headerIssue: {
+      name: '名称含不支持的字符，不会发送。',
+      reserved: '该请求头由应用管理，不会发送。',
+      value: '值仅支持英文、数字和符号，不会发送。'
+    },
     getKey: '获取密钥',
     modelList: '模型',
     addModel: '添加模型',
@@ -2243,7 +2256,7 @@ const en: MessageTree = {
       feishu:
         'The account that scans becomes the owner of the bot, and the bot will message you once it is ready. Deva must stay running on this computer (keeping it in the tray is enough).',
       telegram:
-        'The Telegram account that taps Start becomes the owner of the bot. The token is stored encrypted on this computer only. Deva must stay running here (keeping it in the tray is enough) and be able to reach Telegram (set a system proxy if you need one).'
+        'The Telegram account that taps Start becomes the owner of the bot. The token is stored encrypted on this computer only. Deva must stay running here (keeping it in the tray is enough) and be able to reach Telegram (set HTTPS_PROXY or similar env vars if you need a proxy).'
     },
     tokenLead: 'Scan to open BotFather, send /newbot to create a bot, then paste the token it replies with below.',
     tokenPlaceholder: 'Paste the token, e.g. 123456789:AAH…',
@@ -2413,6 +2426,19 @@ const en: MessageTree = {
     apiKey: 'API Key',
     apiKeyPlaceholder: 'Enter your API key',
     apiHost: 'API Host',
+    advanced: 'Advanced settings',
+    headers: 'Custom headers',
+    headersHint: 'Sent with every request; same-name headers replace the defaults (e.g. User-Agent).',
+    noHeaders: 'No headers yet — click "Add header"',
+    headerName: 'Name, e.g. originator',
+    headerValue: 'Value',
+    addHeader: 'Add header',
+    removeHeader: 'Remove',
+    headerIssue: {
+      name: 'Unsupported characters in the name. Not sent.',
+      reserved: 'This header is managed by the app. Not sent.',
+      value: 'Only ASCII letters, digits and symbols are supported. Not sent.'
+    },
     getKey: 'Get key',
     modelList: 'Models',
     addModel: 'Add model',
