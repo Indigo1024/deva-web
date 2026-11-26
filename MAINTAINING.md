@@ -331,3 +331,8 @@ ls -la /root/.deva/          # web-auth.json / web-secret.key / secrets.json / a
 ## v1.8.0：不提供扫码手机版入口
 
 移除 PhonePane.tsx、phone.css 和 BotsPane 内的 Deva 手机版列表项、添加项、详情与状态订阅。后端协议及上游新增代码保留，不另外部署 relay；飞书/Telegram 不受影响。合并上游时不要恢复此入口。
+
+
+## v1.8.1 / upstream v0.1.17
+
+同步服务商自定义请求头与 403 原因说明，恢复 DeepSeek 漏进正文的 DSML 工具调用；Telegram 改用共享 HTTP 层。保留移动抽屉、复制/引用/回滚/删除四个常驻操作、原生选区、三层长文本粘贴、反回拉滚动与认证安全。继续排除扫码配对 UI，不部署 relay。飞书/Telegram 真机器人及真实 DeepSeek 请求未实跑。

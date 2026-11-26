@@ -340,8 +340,17 @@ try {
     console.log('  PASS 启动告警 stderr →', srvStderr.trim().split('\n')[0])
     console.log(`  PASS 服务正常启动监听 :${freePort}，GET /login → ${loginStatus}，跨站 WS /ws → ${wsDenyStatus}`)
   } finally {
-    srvProc.kill('SIGTERM')
-    await new Promise((r) => srvProc.once('close', r))
+    // Register before signalling; close may already have fired during assertions.
+    if (srvProc.exitCode === null && srvProc.signalCode === null) {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          srvProc.kill('SIGKILL')
+          reject(new Error('security fixture did not stop within 10 seconds'))
+        }, 10000)
+        srvProc.once('close', () => { clearTimeout(timer); resolve() })
+        srvProc.kill('SIGTERM')
+      })
+    }
   }
 
   // 5.2 验证新 key 下读取旧密文：返回 null，且 decryptString 的 console.error 只打印 1 次

@@ -14,7 +14,7 @@
 本文档只讲**本改版自己的东西**：Web 层怎么搭的、怎么部署、怎么跟随上游更新。
 上游 Deva 本身有哪些功能，属于上游的成果，请查阅[上游项目](https://github.com/sqfcyily/deva)。
 
-当前跟随的上游版本：**v0.1.16**。
+当前跟随的上游版本：**v0.1.17**。
 
 维护与排错看 [MAINTAINING.md](../MAINTAINING.md)；本文档讲的是部署与实现细节。
 
@@ -687,3 +687,8 @@ systemctl restart deva-web
 ## v1.8.0：不提供扫码手机版入口
 
 移除 PhonePane.tsx、phone.css 和 BotsPane 内的 Deva 手机版列表项、添加项、详情与状态订阅。后端协议及上游新增代码保留，不另外部署 relay；飞书/Telegram 不受影响。合并上游时不要恢复此入口。
+
+
+## v1.8.1 / upstream v0.1.17
+
+同步服务商自定义请求头与 403 原因说明，恢复 DeepSeek 漏进正文的 DSML 工具调用；Telegram 改用共享 HTTP 层。保留移动抽屉、复制/引用/回滚/删除四个常驻操作、原生选区、三层长文本粘贴、反回拉滚动与认证安全。继续排除扫码配对 UI，不部署 relay。飞书/Telegram 真机器人及真实 DeepSeek 请求未实跑。

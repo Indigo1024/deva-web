@@ -12,7 +12,7 @@ Run the [Deva](https://github.com/sqfcyily/deva) desktop client in a browser.
 >
 > If you want the desktop app, get it from upstream. **This repository ships no Electron installers.**
 >
-> **Following upstream v0.1.16** — merge rules in [docs/WEB.md](docs/WEB.md); how to keep it alive in [MAINTAINING.md](MAINTAINING.md) (Chinese).
+> **Following upstream v0.1.17** — merge rules in [docs/WEB.md](docs/WEB.md); how to keep it alive in [MAINTAINING.md](MAINTAINING.md) (Chinese).
 
 ---
 
@@ -170,3 +170,8 @@ The web adaptation layer here is likewise released under [MIT](LICENSE) — depl
 ## v1.8.0
 
 Removed the scan-to-pair phone UI and entry points. This port is accessed directly by URL. Feishu, Telegram, shared protocols and other upstream features remain.
+
+
+## v1.8.1 / upstream v0.1.17
+
+Custom provider headers and detailed 403 reasons; recover DeepSeek DSML tool calls leaked into text. Telegram now uses the shared HTTP layer. Existing mobile drawer, four message actions, native selection, multiline paste, scroll stability and authentication remain. Phone pairing UI stays excluded; no relay deployment. Feishu/Telegram live bot integration is not verified.

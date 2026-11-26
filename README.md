@@ -12,7 +12,7 @@
 
 要桌面客户端，去上游下载。这个仓库不提供任何 Electron 安装包。
 
-**当前跟随的上游版本：v0.1.16**（跟随方式与合并规则见 [docs/WEB.md](docs/WEB.md)；坏了怎么修看 [MAINTAINING.md](MAINTAINING.md)）。
+**当前跟随的上游版本：v0.1.17**（跟随方式与合并规则见 [docs/WEB.md](docs/WEB.md)；坏了怎么修看 [MAINTAINING.md](MAINTAINING.md)）。
 
 ## 这是什么
 
@@ -165,3 +165,8 @@ node out/web/ctl.cjs passwd
 ## v1.8.0 改版取舍
 
 移除上游扫码配对手机版的界面组件与入口。本改版直接通过网址访问，无需绑定电脑或部署手机版中转。飞书、Telegram、共享协议和其他上游新功能保留。
+
+
+## v1.8.1 / upstream v0.1.17
+
+同步服务商自定义请求头与 403 原因说明，恢复 DeepSeek 漏进正文的 DSML 工具调用；Telegram 改用共享 HTTP 层。保留移动抽屉、复制/引用/回滚/删除四个常驻操作、原生选区、三层长文本粘贴、反回拉滚动与认证安全。继续排除扫码配对 UI，不部署 relay。飞书/Telegram 真机器人及真实 DeepSeek 请求未实跑。
